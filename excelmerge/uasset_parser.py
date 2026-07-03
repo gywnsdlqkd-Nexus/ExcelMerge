@@ -4,6 +4,29 @@ import struct
 
 _UASSET_MAGIC = 0x9E2A83C1
 
+# --- 포맷/안전 한계 상수 ---
+NAME_HASH_LEN_CANDIDATES = (8, 4, 0, 16)  # NameTable 엔트리 hash 길이 후보 (UE 버전별 변형)
+MAX_ASCII_NAME_BYTES = 8192  # NameTable ASCII FString 길이 상한
+MAX_UTF16_NAME_BYTES = 16384  # NameTable UTF-16 FString 바이트 길이 상한
+MAX_FOLDERNAME_ASCII = 4096  # PackageSummary FolderName ASCII 길이 상한
+MAX_FOLDERNAME_UTF16 = 8192  # PackageSummary FolderName UTF-16 바이트 길이 상한
+MAX_CUSTOM_VERSIONS = 200  # PackageSummary CustomVersions 개수 상한
+MAX_NAME_COUNT = 1_000_000  # PackageSummary name_count 상한
+MIN_HEADER_SIZE = 0x40  # 파싱 시도 가능한 최소 헤더 크기
+HEURISTIC_SCAN_START = 0x20  # 휴리스틱 NameTable 스캔 시작 offset
+HEURISTIC_SCAN_END = 0x400  # 휴리스틱 NameTable 스캔 종료 offset
+MAX_HEURISTIC_NAMES = 200_000  # 휴리스틱 스캔 시 name count 상한
+MAX_PROP_SIZE = 100 * 1024 * 1024  # PropertyTag size 상한 (100MB)
+STRUCT_PROP_SAFETY_LIMIT = 256  # 중첩 struct 내 property 파싱 루프 상한
+MAX_ARRAY_COUNT = 1_000_000  # ArrayProperty count 상한
+ARRAY_PREVIEW_ITEMS = 5  # 배열 값 미리보기 최대 아이템 수
+HEX_PREVIEW_BYTES = 16  # hex 폴백 미리보기 바이트 수
+MAX_ROWS = 100_000  # RowMap NumRows 상한
+MAX_FNAME_NUMBER = 1024  # RowName FName Number 필드 상한
+ROW_SCORE_CAP = 64  # RowMap 후보 검증 시 시도할 최대 row 수
+ROW_PROP_SAFETY_LIMIT = 1000  # row 1개당 property 파싱 루프 상한
+MAX_ROW_PROP_SIZE = 1024 * 1024  # RowMap 첫 PropertyTag size 상한 (1MB)
+
 
 def _read_fstring(buf: bytes, offset: int) -> tuple[str, int]:
     """UE FString 디코드 — Int32 length + (ASCII | UTF-16LE) + null terminator.
@@ -72,7 +95,7 @@ def _try_decode_name_table(
         cur += 4
         if n > 0:
             byte_len = n
-            if byte_len > 8192 or cur + byte_len > n_buf:
+            if byte_len > MAX_ASCII_NAME_BYTES or cur + byte_len > n_buf:
                 return None
             try:
                 s = buf[cur:cur + byte_len - 1].decode("utf-8", errors="replace")
@@ -81,7 +104,7 @@ def _try_decode_name_table(
             cur += byte_len
         elif n < 0:
             byte_len = (-n) * 2
-            if byte_len > 16384 or cur + byte_len > n_buf:
+            if byte_len > MAX_UTF16_NAME_BYTES or cur + byte_len > n_buf:
                 return None
             try:
                 s = buf[cur:cur + byte_len - 2].decode("utf-16-le", errors="replace")
@@ -102,7 +125,7 @@ def _parse_package_summary(buf: bytes) -> dict | None:
     반환: {name_count, name_offset, total_header_size, ...} 또는 None (실패).
     """
     try:
-        if len(buf) < 0x40:
+        if len(buf) < MIN_HEADER_SIZE:
             return None
         off = 0
         magic = struct.unpack_from("<I", buf, off)[0]; off += 4
@@ -119,7 +142,7 @@ def _parse_package_summary(buf: bytes) -> dict | None:
         off += 4  # file_version_licensee_ue4
         # CustomVersions Array (count + count * 20bytes)
         custom_count = struct.unpack_from("<i", buf, off)[0]; off += 4
-        if custom_count < 0 or custom_count > 200:
+        if custom_count < 0 or custom_count > MAX_CUSTOM_VERSIONS:
             return None
         off += custom_count * 20
         if off + 8 > len(buf):
@@ -130,12 +153,12 @@ def _parse_package_summary(buf: bytes) -> dict | None:
         # FolderName FString
         fn_len = struct.unpack_from("<i", buf, off)[0]; off += 4
         if fn_len > 0:
-            if fn_len > 4096 or off + fn_len > len(buf):
+            if fn_len > MAX_FOLDERNAME_ASCII or off + fn_len > len(buf):
                 return None
             off += fn_len
         elif fn_len < 0:
             sz = (-fn_len) * 2
-            if sz > 8192 or off + sz > len(buf):
+            if sz > MAX_FOLDERNAME_UTF16 or off + sz > len(buf):
                 return None
             off += sz
         if off + 12 > len(buf):
@@ -143,7 +166,7 @@ def _parse_package_summary(buf: bytes) -> dict | None:
         off += 4  # package_flags
         name_count = struct.unpack_from("<i", buf, off)[0]; off += 4
         name_offset = struct.unpack_from("<i", buf, off)[0]; off += 4
-        if name_count <= 0 or name_count > 1_000_000:
+        if name_count <= 0 or name_count > MAX_NAME_COUNT:
             return None
         if name_offset <= 0 or name_offset >= len(buf):
             return None
@@ -161,28 +184,28 @@ def _scan_name_table(buf: bytes) -> tuple[list[str], int, int]:
     """NameTable 디코드 — 1차로 정확 파싱, 2차로 휴리스틱(1바이트 step).
     반환: (names, name_offset, name_data_end). 실패 시 _UAssetParseError.
     """
-    if len(buf) < 0x40:
+    if len(buf) < MIN_HEADER_SIZE:
         raise _UAssetParseError("buffer too short")
 
     summary = _parse_package_summary(buf)
     if summary is not None:
         cnt = summary["name_count"]
         off = summary["name_offset"]
-        for hash_len in (8, 4, 0, 16):
+        for hash_len in NAME_HASH_LEN_CANDIDATES:
             res = _try_decode_name_table(buf, off, cnt, hash_len)
             if res is not None:
                 decoded, end = res
                 return decoded, off, end
 
     best: tuple[list[str], int, int] | None = None
-    scan_end = min(len(buf), 0x400)
-    for probe in range(0x20, scan_end - 8):
+    scan_end = min(len(buf), HEURISTIC_SCAN_END)
+    for probe in range(HEURISTIC_SCAN_START, scan_end - 8):
         cnt, off = struct.unpack_from("<ii", buf, probe)
-        if cnt <= 0 or cnt > 200000:
+        if cnt <= 0 or cnt > MAX_HEURISTIC_NAMES:
             continue
         if off <= probe or off >= len(buf):
             continue
-        for hash_len in (8, 4, 0, 16):
+        for hash_len in NAME_HASH_LEN_CANDIDATES:
             res = _try_decode_name_table(buf, off, cnt, hash_len)
             if res is None:
                 continue
@@ -229,7 +252,7 @@ def _read_property_tag(
         raise _UAssetParseError("size/index truncated")
     size, array_index = struct.unpack_from("<ii", buf, off)
     off += 8
-    if size < 0 or size > 100 * 1024 * 1024:
+    if size < 0 or size > MAX_PROP_SIZE:
         raise _UAssetParseError(f"unreasonable size: {size}")
 
     tag: dict = {"name": name, "type": type_name, "size": size,
@@ -285,7 +308,7 @@ def _read_struct_value(buf, off, end, names) -> str:
     parts = []
     cur = off
     safety = 0
-    while cur < end and safety < 256:
+    while cur < end and safety < STRUCT_PROP_SAFETY_LIMIT:
         safety += 1
         try:
             tag, vo, ve = _read_property_tag(buf, cur, names)
@@ -303,14 +326,14 @@ def _read_array_value(buf, off, end, tag, names) -> str:
     """ArrayProperty/SetProperty 본문. 스칼라 inner는 inline, 그 외는 count 표기."""
     try:
         count = struct.unpack_from("<i", buf, off)[0]
-        if count < 0 or count > 1000000:
+        if count < 0 or count > MAX_ARRAY_COUNT:
             return f"array:{end-off}B"
         cur = off + 4
         inner = tag.get("inner_type", "")
         if inner == "StructProperty":
             return f"[{count} structs]"
         items: list[str] = []
-        for _ in range(min(count, 5)):
+        for _ in range(min(count, ARRAY_PREVIEW_ITEMS)):
             if cur >= end:
                 break
             if inner == "IntProperty":
@@ -418,7 +441,7 @@ def _read_property_value(buf, value_off, value_end, tag, names) -> str:
     except Exception:
         pass
     raw = buf[value_off:value_end]
-    return f"hex:{raw[:16].hex()}{'…' if len(raw) > 16 else ''}"
+    return f"hex:{raw[:HEX_PREVIEW_BYTES].hex()}{'…' if len(raw) > HEX_PREVIEW_BYTES else ''}"
 
 
 def _row_name_is_valid(name: str) -> bool:
@@ -450,7 +473,7 @@ def _try_count_rows(
             break
         safety = 0
         ok = True
-        while safety < 1000:
+        while safety < ROW_PROP_SAFETY_LIMIT:
             safety += 1
             try:
                 tag, vo, ve = _read_property_tag(buf, cur, names)
@@ -488,14 +511,14 @@ def _find_row_map_start(
     end = n_buf - 24
     while pos < end:
         num_rows, name_idx, name_num = struct.unpack_from("<iii", buf, pos)
-        if 1 <= num_rows <= 100000 and 0 <= name_idx < name_count and 0 <= name_num <= 1024:
+        if 1 <= num_rows <= MAX_ROWS and 0 <= name_idx < name_count and 0 <= name_num <= MAX_FNAME_NUMBER:
             row_name = names[name_idx]
             if _row_name_is_valid(row_name):
                 try:
                     tag, _, _ = _read_property_tag(buf, pos + 12, names)
                     if tag is not None and tag.get("type") in _KNOWN_PROP_TYPES \
-                            and 0 < tag.get("size", 0) <= 1024 * 1024:
-                        cap = min(num_rows, 64)
+                            and 0 < tag.get("size", 0) <= MAX_ROW_PROP_SIZE:
+                        cap = min(num_rows, ROW_SCORE_CAP)
                         score = _try_count_rows(buf, pos + 4, num_rows, names, cap)
                         if score >= max(1, cap // 2):
                             if best is None or score > best[2]:
@@ -528,7 +551,7 @@ def _parse_row_map(
         row_props: dict[str, str] = {}
         safety = 0
         row_failed = False
-        while safety < 1000:
+        while safety < ROW_PROP_SAFETY_LIMIT:
             safety += 1
             try:
                 tag, vo, ve = _read_property_tag(buf, cur, names)
