@@ -1,0 +1,15 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(python -c \"import excel_diff_merge; print\\('OK'\\)\")",
+      "Bash(python -m PyInstaller --onefile --windowed --name \"ExcelDiffMerge_v3\" excel_diff_merge.py)",
+      "Bash(python -m PyInstaller --onefile --windowed --name \"ExcelDiffMerge_v4\" excel_diff_merge.py)",
+      "Bash(pip install *)",
+      "Bash(python -m PyInstaller --onefile --windowed --name \"ExcelDiffMerge_v5\" excel_diff_merge.py)",
+      "Bash(python -m PyInstaller --onefile --windowed --name \"ExcelDiffMerge_v6\" excel_diff_merge.py)",
+      "Bash(python -m PyInstaller --onefile --windowed --name \"ExcelDiffMerge_v7\" excel_diff_merge.py)",
+      "Bash(python excel_diff_merge.py)",
+      "Bash(python -c ' *)"
+    ]
+  }
+}
