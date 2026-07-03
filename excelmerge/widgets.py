@@ -145,12 +145,21 @@ class ExcelTableView(QTableView):
 
     def _set_current_cell_no_update(self, r: int, c: int):
         """선택을 건드리지 않고 currentIndex만 이동.
-        헤더 범위 선택 직후에 사용 — setCurrentIndex()는 눌려 있는 Shift를 보고
-        SelectCurrent(앵커 사각형으로 선택 대체)를 적용해 방금 만든 열/행 전체
+        헤더/범위 선택 직후에 사용 — setCurrentIndex()는 눌려 있는 Shift를 보고
+        SelectCurrent(앵커 사각형으로 선택 대체)를 적용해 방금 만든 범위
         선택을 붕괴시키므로, NoUpdate로 현재 셀만 옮긴다."""
         sm = self.selectionModel()
         if sm is not None and 0 <= r < self.rowCount() and 0 <= c < self.columnCount():
             sm.setCurrentIndex(self._model.index(r, c), QItemSelectionModel.NoUpdate)
+
+    def _move_current_cell(self, r: int, c: int):
+        """현재 셀을 단일 선택으로 이동 — Excel의 Ctrl+점프처럼 기존 선택을 비운다.
+        setCurrentIndex()는 Ctrl이 눌린 상태에서 Toggle로 동작해 원래 셀 선택이
+        남으므로 ClearAndSelect를 명시한다."""
+        sm = self.selectionModel()
+        if sm is not None and 0 <= r < self.rowCount() and 0 <= c < self.columnCount():
+            sm.setCurrentIndex(self._model.index(r, c),
+                               QItemSelectionModel.ClearAndSelect)
 
     # ── 사용자 헤더 크기 추적 ────────────────────────────────────────────────
     def _on_section_h_resized(self, logical_index: int, _old: int, new_size: int):
@@ -735,9 +744,9 @@ class ExcelTableView(QTableView):
                 ar = anchor.row() if anchor.isValid() else cur_r
                 ac = anchor.column() if anchor.isValid() else cur_c
                 self._select_range(ar, ac, tr, tc)
-                self._set_current_cell(tr, tc)
+                self._set_current_cell_no_update(tr, tc)
             else:
-                self._set_current_cell(tr, tc)
+                self._move_current_cell(tr, tc)
             event.accept(); return
 
         # ── Ctrl+Home / Ctrl+End ──
@@ -745,13 +754,17 @@ class ExcelTableView(QTableView):
             tr, tc = 0, 0
             if shift and cur_r >= 0 and cur_c >= 0:
                 self._select_range(cur_r, cur_c, tr, tc)
-            self._set_current_cell(tr, tc)
+                self._set_current_cell_no_update(tr, tc)
+            else:
+                self._move_current_cell(tr, tc)
             event.accept(); return
         if ctrl and not alt and key == Qt.Key_End:
             tr, tc = max(0, self.rowCount() - 1), max(0, self.columnCount() - 1)
             if shift and cur_r >= 0 and cur_c >= 0:
                 self._select_range(cur_r, cur_c, tr, tc)
-            self._set_current_cell(tr, tc)
+                self._set_current_cell_no_update(tr, tc)
+            else:
+                self._move_current_cell(tr, tc)
             event.accept(); return
 
         super().keyPressEvent(event)

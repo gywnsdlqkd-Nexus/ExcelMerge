@@ -255,6 +255,58 @@ def test_header_multiselect_extension():
     print("PASS test_header_multiselect_extension")
 
 
+def test_ctrl_jump_single_selection():
+    """Ctrl+방향키 점프 회귀 테스트 — 엑셀처럼 단일 선택으로 이동해야 한다.
+    수정 전에는 Ctrl 수정자 때문에 setCurrentIndex가 Toggle로 동작해
+    원래 셀과 대상 셀이 함께 선택됐다."""
+    from PyQt5.QtTest import QTest
+    from excelmerge.main_window import MainWindow
+    app = QApplication.instance() or QApplication([])
+    win = MainWindow()
+    # 0~2열 값 있음, 3열 빈 값, 4열 값 있음
+    dm = [[("same", f"h{c}", f"h{c}") for c in range(5)]]
+    for r in range(1, 6):
+        dm.append([("same", "" if c == 3 else f"v{r}{c}",
+                    "" if c == 3 else f"v{r}{c}") for c in range(5)])
+    meta = [(r, r) for r in range(len(dm))]
+    win._diff_matrix, win._diff_row_meta = dm, meta
+    win._refresh_tables()
+    tbl = win.panel_a.table
+    win.show()
+    app.processEvents()
+
+    # 값 경계 점프: (2,0) → 연속 데이터 끝 (2,2) — 단일 선택
+    tbl._move_current_cell(2, 0)
+    QTest.keyClick(tbl, Qt.Key_Right, Qt.ControlModifier)
+    assert tbl.get_selected_cells() == {(2, 2)}, tbl.get_selected_cells()
+    # 빈 열 건너 다음 값 셀 (2,4) — 단일 선택
+    QTest.keyClick(tbl, Qt.Key_Right, Qt.ControlModifier)
+    assert tbl.get_selected_cells() == {(2, 4)}, tbl.get_selected_cells()
+    # 값이 더 없으면 마지막 셀로 — 단일 선택
+    QTest.keyClick(tbl, Qt.Key_Right, Qt.ControlModifier)
+    assert tbl.get_selected_cells() == {(2, tbl.columnCount() - 1)}, tbl.get_selected_cells()
+
+    # Ctrl+Shift+방향키: 범위 선택 유지 (붕괴 없음)
+    tbl._move_current_cell(2, 0)
+    QTest.keyClick(tbl, Qt.Key_Right, Qt.ControlModifier | Qt.ShiftModifier)
+    assert tbl.get_selected_cells() == {(2, 0), (2, 1), (2, 2)}, tbl.get_selected_cells()
+
+    # Ctrl+Shift+End: 데이터 영역으로 클램프된 범위, 붕괴 없음
+    tbl._move_current_cell(1, 1)
+    QTest.keyClick(tbl, Qt.Key_End, Qt.ControlModifier | Qt.ShiftModifier)
+    sel = tbl.get_selected_cells()
+    assert max(r for r, _ in sel) == len(dm) - 1, sel
+    assert max(c for _, c in sel) == 4, sel
+    assert len(sel) == (len(dm) - 1) * 4, len(sel)
+
+    # Ctrl+Home: 단일 이동
+    QTest.keyClick(tbl, Qt.Key_Home, Qt.ControlModifier)
+    assert tbl.get_selected_cells() == {(0, 0)}, tbl.get_selected_cells()
+
+    win.close()
+    print("PASS test_ctrl_jump_single_selection")
+
+
 if __name__ == "__main__":
     test_golden_roles()
     test_headers()
@@ -262,4 +314,5 @@ if __name__ == "__main__":
     test_cell_kind()
     test_view_behaviors()
     test_header_multiselect_extension()
+    test_ctrl_jump_single_selection()
     print("ALL MODEL/VIEW TESTS PASS")
