@@ -28,8 +28,7 @@ class MainWindow(QMainWindow):
         self.setWindowIcon(load_app_icon())
         self.resize(1400, 800)
         self._load_worker:          LoadWorker | None         = None
-        self._preview_worker_a:    PreviewWorker | None      = None
-        self._preview_worker_b:    PreviewWorker | None      = None
+        self._preview_workers: dict[str, PreviewWorker | None] = {"a": None, "b": None}
         self._staged_merge_worker: StagedMergeWorker | None = None
         self._saving_side: str = "a"
         self._diff_matrix: list[list] = []
@@ -195,6 +194,7 @@ class MainWindow(QMainWindow):
         splitter = QSplitter(Qt.Horizontal)
         self.panel_a = FilePanel("A 파일 (원본)", "a")
         self.panel_b = FilePanel("B 파일 (비교)", "b")
+        self.panels = {"a": self.panel_a, "b": self.panel_b}   # side 셀렉터 공용 맵
         splitter.addWidget(self.panel_a)
         splitter.addWidget(self.panel_b)
         splitter.setSizes([700, 700])
@@ -215,57 +215,36 @@ class MainWindow(QMainWindow):
             "| 셀 선택 후 우클릭 → 병합 준비 → 저장"
         )
 
-        # 스크롤 동기화
-        for src, dst in [
-            (self.panel_a.table.horizontalScrollBar(), self.panel_b.table.horizontalScrollBar()),
-            (self.panel_b.table.horizontalScrollBar(), self.panel_a.table.horizontalScrollBar()),
-            (self.panel_a.table.verticalScrollBar(),   self.panel_b.table.verticalScrollBar()),
-            (self.panel_b.table.verticalScrollBar(),   self.panel_a.table.verticalScrollBar()),
-        ]:
-            src.valueChanged.connect(dst.setValue)
-
-        # 열/행 크기 양방향 동기화 — 사용자 조작에 의한 변경만 (apply_*는 시그널 미발행)
-        self.panel_a.table.column_resized.connect(self.panel_b.table.apply_column_width)
-        self.panel_b.table.column_resized.connect(self.panel_a.table.apply_column_width)
-        self.panel_a.table.row_resized.connect(self.panel_b.table.apply_row_height)
-        self.panel_b.table.row_resized.connect(self.panel_a.table.apply_row_height)
-
-        # 우클릭 → 스테이징 / 언스테이징
-        self.panel_a.table.stage_requested.connect(self._stage_selected)
-        self.panel_b.table.stage_requested.connect(self._stage_selected)
-        self.panel_a.table.unstage_requested.connect(self._unstage_selected)
-        self.panel_b.table.unstage_requested.connect(self._unstage_selected)
-
-        # 열 헤더 우클릭 → 키 열 변경
-        self.panel_a.table.key_col_changed.connect(self._on_key_col_changed)
-        self.panel_b.table.key_col_changed.connect(self._on_key_col_changed)
-
-        # 열 헤더 우클릭 → 변경 검사 제외 일괄 토글
-        self.panel_a.table.columns_exclude_set.connect(self._on_columns_exclude_set)
-        self.panel_b.table.columns_exclude_set.connect(self._on_columns_exclude_set)
-
-        # 선택 셀 동기화 — QTableView는 itemSelectionChanged가 없으므로
-        # selectionModel().selectionChanged 사용 (selectionModel은 ctor에서 1회 생성)
         self._syncing_selection = False
         self._hidden_rows = set()   # '변경 행만 보기' 필터의 델타 캐시
-        self.panel_a.table.selectionModel().selectionChanged.connect(
-            lambda *_: self._sync_selection(self.panel_a.table, self.panel_b.table)
-        )
-        self.panel_b.table.selectionModel().selectionChanged.connect(
-            lambda *_: self._sync_selection(self.panel_b.table, self.panel_a.table)
-        )
 
-        # 패널 내 저장 버튼 연결
-        self.panel_a.save_btn.clicked.connect(lambda: self._save_staged("a"))
-        self.panel_b.save_btn.clicked.connect(lambda: self._save_staged("b"))
+        # A↔B 대칭 배선 — 스크롤/크기/선택 동기화 (src → dst 양방향 루프)
+        # ※ 람다의 루프 변수는 기본값 인자(s=..., d=...)로 바인딩해야 한다.
+        for src, dst in ((self.panel_a, self.panel_b), (self.panel_b, self.panel_a)):
+            src.table.horizontalScrollBar().valueChanged.connect(
+                dst.table.horizontalScrollBar().setValue)
+            src.table.verticalScrollBar().valueChanged.connect(
+                dst.table.verticalScrollBar().setValue)
+            # 열/행 크기 동기화 — 사용자 조작에 의한 변경만 (apply_*는 시그널 미발행)
+            src.table.column_resized.connect(dst.table.apply_column_width)
+            src.table.row_resized.connect(dst.table.apply_row_height)
+            # 선택 셀 동기화 — QTableView는 itemSelectionChanged가 없으므로
+            # selectionModel().selectionChanged 사용 (selectionModel은 ctor에서 1회 생성)
+            src.table.selectionModel().selectionChanged.connect(
+                lambda *_, s=src.table, d=dst.table: self._sync_selection(s, d))
 
-        # 파일 선택 시: 양쪽 모두 있으면 자동 비교, 한쪽만 있으면 미리보기
-        self.panel_a.file_loaded.connect(lambda p: self._on_file_loaded("a", p))
-        self.panel_b.file_loaded.connect(lambda p: self._on_file_loaded("b", p))
-
-        # 셀 값 직접 편집
-        self.panel_a.cell_value_edited.connect(lambda r, c, v: self._on_cell_edited("a", r, c, v))
-        self.panel_b.cell_value_edited.connect(lambda r, c, v: self._on_cell_edited("b", r, c, v))
+        # side별 패널 시그널 배선
+        for side, panel in self.panels.items():
+            panel.table.stage_requested.connect(self._stage_selected)
+            panel.table.unstage_requested.connect(self._unstage_selected)
+            panel.table.key_col_changed.connect(self._on_key_col_changed)
+            panel.table.columns_exclude_set.connect(self._on_columns_exclude_set)
+            panel.save_btn.clicked.connect(
+                lambda _=False, s=side: self._save_staged(s))
+            panel.file_loaded.connect(
+                lambda p, s=side: self._on_file_loaded(s, p))
+            panel.cell_value_edited.connect(
+                lambda r, c, v, s=side: self._on_cell_edited(s, r, c, v))
 
     def _apply_style(self):
         self.setStyleSheet(APP_QSS)
@@ -305,7 +284,7 @@ class MainWindow(QMainWindow):
         if self._diff_matrix:
             self._reset_compare_state()
             other_side = "b" if side == "a" else "a"
-            other_path = self.panel_b.get_path() if other_side == "b" else self.panel_a.get_path()
+            other_path = self.panels[other_side].get_path()
             if other_path:
                 self._run_preview(other_side, other_path)
 
@@ -313,17 +292,14 @@ class MainWindow(QMainWindow):
         worker.done.connect(self._on_preview_done)
         worker.error.connect(lambda msg: self.status.showMessage(f"파일 로드 오류: {msg}"))
         worker.finished.connect(worker.deleteLater)
-        if side == "a":
-            self._preview_worker_a = worker
-        else:
-            self._preview_worker_b = worker
+        self._preview_workers[side] = worker
         worker.start()
         self.status.showMessage(f"{'A' if side == 'a' else 'B'} 파일 로딩 중...")
 
     def _on_preview_done(self, side: str, data: list[list], formula_data: list[list]):
         self._preview_data[side] = data
         self._formula_data[side] = formula_data
-        panel = self.panel_a if side == "a" else self.panel_b
+        panel = self.panels[side]
         panel._formula_data = formula_data
         panel._row_meta = []   # 미리보기 모드: row_meta 없음 (행 인덱스 = 원본 인덱스)
         panel.preview(data)
@@ -856,7 +832,7 @@ class MainWindow(QMainWindow):
     def _save_staged(self, side: str):
         """side: 'a' 또는 'b' — 해당 파일만 저장."""
         other = "b" if side == "a" else "a"
-        path = self.panel_a.get_path() if side == "a" else self.panel_b.get_path()
+        path = self.panels[side].get_path()
 
         # JSON/uasset 등 비-xlsx 는 저장 미지원 — 사용자에게 안내 후 중단
         if path and os.path.splitext(path)[1].lower() not in _EXCEL_EXTS:
@@ -970,7 +946,7 @@ class MainWindow(QMainWindow):
             self._set_buttons_enabled(True)
             self.status.showMessage(f"저장 완료 — {count}개 셀 저장됨")
             QMessageBox.information(self, "저장 완료", f"{count}개 셀이 파일에 저장됐습니다.")
-            path = self.panel_a.get_path() if side == "a" else self.panel_b.get_path()
+            path = self.panels[side].get_path()
             if path:
                 self._run_preview(side, path)
             return
@@ -1013,7 +989,7 @@ class MainWindow(QMainWindow):
     # ── 셀 직접 편집 ──────────────────────────────────────────────────────────
 
     def _on_cell_edited(self, side: str, r: int, c: int, new_val: str):
-        panel = self.panel_a if side == "a" else self.panel_b
+        panel = self.panels[side]
 
         # ── 미리보기 상태 (비교 전) ──────────────────────────────────────────
         if not self._diff_matrix:
@@ -1137,7 +1113,7 @@ class MainWindow(QMainWindow):
             return
 
         side, r, c, old_val, mode = entry
-        panel = self.panel_a if side == "a" else self.panel_b
+        panel = self.panels[side]
 
         if mode == "preview":
             data = self._preview_data.get(side, [])
