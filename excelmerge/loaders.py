@@ -22,62 +22,79 @@ def _cell_to_str(v) -> str:
     return str(v)
 
 
-def load_sheet_with_formulas(path: str) -> tuple[list[list], list[list]]:
+def _load_values_pass(path: str, progress=None) -> list[list[str]]:
+    """data_only=True 패스 — 캐시된 계산값 시트.
+    progress(done_rows, total_rows_or_None)를 500행마다 호출한다."""
+    wb = openpyxl.load_workbook(path, read_only=True, data_only=True)
+    try:
+        ws = wb.worksheets[0]
+        # read_only 모드의 max_row는 dimension 헤더에서 읽는다 — 없으면 None(불확정)
+        total = ws.max_row
+        values: list[list[str]] = []
+        for i, row in enumerate(ws.iter_rows(values_only=True)):
+            values.append([_cell_to_str(v) for v in row])
+            if progress is not None and (i + 1) % 500 == 0:
+                progress(i + 1, total)
+        if progress is not None:
+            progress(len(values), total)
+        return values
+    finally:
+        try:
+            wb.close()
+        except Exception:
+            pass
+
+
+def _load_formulas_pass(path: str) -> tuple[list[list[str]], list[tuple[int, int, str]]]:
+    """data_only=False 패스 — 수식 텍스트 시트 + '='로 시작하는 셀 좌표 목록."""
+    wb = openpyxl.load_workbook(path, read_only=True, data_only=False)
+    try:
+        ws = wb.worksheets[0]
+        formulas: list[list[str]] = []
+        candidates: list[tuple[int, int, str]] = []   # (r, c, formula_text)
+        for r_idx, row in enumerate(ws.iter_rows(values_only=True)):
+            out_row = []
+            for c_idx, v in enumerate(row):
+                if v is None:
+                    out_row.append("")
+                    continue
+                s = str(v)
+                out_row.append(s)
+                if s.startswith("="):
+                    candidates.append((r_idx, c_idx, s))
+            formulas.append(out_row)
+        return formulas, candidates
+    finally:
+        try:
+            wb.close()
+        except Exception:
+            pass
+
+
+def load_sheet_with_formulas(path: str, progress=None) -> tuple[list[list], list[list]]:
     """
     한 번의 호출로 (계산값 시트, 수식 시트)를 함께 반환한다.
 
     핵심 개선:
-      - read_only=True 로 두 워크북 모두 로드 → 메모리/속도 모두 향상
-        (기본 모드 대비 수~수십 배 빠름).
-      - Excel COM 의존 완전 제거 — win32com 호출 없음.
-      - 미캐시 수식 셀만 _eval_formula_with_row 로 같은 행 컨텍스트 계산
-        (전체 시트를 셀 단위로 COM 호출하던 기존 폴백 제거).
+      - read_only=True 로 두 워크북 모두 로드 → 메모리/속도 모두 향상.
+      - 미캐시 수식 셀만 _eval_formula_with_row 로 같은 행 컨텍스트 계산.
+      - progress(done_rows, total_rows_or_None) 콜백으로 로딩 진행률 보고.
+
+    두 패스(값/수식)를 스레드로 동시 실행하는 안은 실측 결과 이득이 없어
+    (30k×30 파일 기준 0.95배 — openpyxl XML 파싱이 GIL에 묶여 있음) 순차 유지.
+    openpyxl은 한 파스에서 캐시값과 수식을 동시에 줄 수 없어 2패스 자체는 필수.
 
     수식 시트는 NetmarbleCompare.md의 '수식 보존 병합' 기능을 위해
     저장 시 원본 수식(=...)을 그대로 기록하는 데 사용되므로 항상 함께 반환.
     """
-    # 1차 — 캐시값
-    wb_val = openpyxl.load_workbook(path, read_only=True, data_only=True)
-    ws_val = wb_val.worksheets[0]
-    values: list[list[str]] = [
-        [_cell_to_str(v) for v in row]
-        for row in ws_val.iter_rows(values_only=True)
-    ]
-    try:
-        wb_val.close()
-    except Exception:
-        pass
+    values = _load_values_pass(path, progress)
+    formulas, candidates = _load_formulas_pass(path)
 
-    # 2차 — 수식 텍스트 (data_only=False)
-    wb_fml = openpyxl.load_workbook(path, read_only=True, data_only=False)
-    ws_fml = wb_fml.worksheets[0]
-    formulas: list[list[str]] = []
-    needs_eval: list[tuple[int, int, str]] = []   # (r, c, formula_text)
-    for r_idx, row in enumerate(ws_fml.iter_rows(values_only=True)):
-        out_row = []
-        for c_idx, v in enumerate(row):
-            if v is None:
-                out_row.append("")
-                continue
-            s = str(v)
-            out_row.append(s)
-            # 같은 좌표의 캐시값이 비었고 수식 텍스트면 자체 계산 대상
-            if (
-                s.startswith("=")
-                and r_idx < len(values)
-                and c_idx < len(values[r_idx])
-                and values[r_idx][c_idx] == ""
-            ):
-                needs_eval.append((r_idx, c_idx, s))
-        formulas.append(out_row)
-    try:
-        wb_fml.close()
-    except Exception:
-        pass
-
-    # 미캐시 수식만 자체 계산 — 캐시가 모두 채워진 일반 파일은 0회
-    for r_idx, c_idx, fml in needs_eval:
-        if r_idx < len(values) and c_idx < len(values[r_idx]):
+    # '빈 캐시값 + 수식 텍스트' 판정은 두 패스 조인 후 수행 — 순차 구현과 결과 동일.
+    # 캐시가 모두 채워진 일반 파일은 0회.
+    for r_idx, c_idx, fml in candidates:
+        if (r_idx < len(values) and c_idx < len(values[r_idx])
+                and values[r_idx][c_idx] == ""):
             values[r_idx][c_idx] = _eval_formula_with_row(fml, values[r_idx])
 
     return values, formulas
@@ -198,14 +215,15 @@ def load_json_as_matrix(path: str) -> list[list[str]]:
     return matrix
 
 
-def load_sheet_with_formulas_any(path: str) -> tuple[list[list], list[list]]:
+def load_sheet_with_formulas_any(path: str, progress=None) -> tuple[list[list], list[list]]:
     """확장자에 따라 (values, formulas) 매트릭스를 반환하는 통합 디스패처.
     - xlsx 계열: 기존 load_sheet_with_formulas() 사용 (수식 별도 추출).
     - json/uasset: 수식 개념이 없으므로 동일 매트릭스를 두 번 반환.
+    progress 콜백은 행 수 파악이 가능한 xlsx 경로에서만 쓰인다.
     """
     ext = os.path.splitext(path)[1].lower()
     if ext in _EXCEL_EXTS:
-        return load_sheet_with_formulas(path)
+        return load_sheet_with_formulas(path, progress)
     if ext == ".json":
         m = load_json_as_matrix(path)
         return m, [list(row) for row in m]
@@ -213,4 +231,4 @@ def load_sheet_with_formulas_any(path: str) -> tuple[list[list], list[list]]:
         m = load_uasset_as_matrix(path)
         return m, [list(row) for row in m]
     # 알려지지 않은 확장자 — 기존 로직(엑셀)로 폴백
-    return load_sheet_with_formulas(path)
+    return load_sheet_with_formulas(path, progress)

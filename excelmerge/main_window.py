@@ -290,6 +290,7 @@ class MainWindow(QMainWindow):
 
         worker = PreviewWorker(side, path)
         worker.done.connect(self._on_preview_done)
+        worker.progress.connect(self.status.showMessage)
         worker.error.connect(lambda msg: self.status.showMessage(f"파일 로드 오류: {msg}"))
         worker.finished.connect(worker.deleteLater)
         self._preview_workers[side] = worker

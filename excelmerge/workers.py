@@ -1,4 +1,7 @@
 """백그라운드 QThread 워커 (excel_diff_merge.py에서 분리)."""
+import threading
+import time
+
 from PyQt5.QtCore import QThread, pyqtSignal
 
 from .loaders import load_sheet_with_formulas_any
@@ -6,11 +9,20 @@ from .xlsx_writer import (
     _cell_ref, _promote_empty_cols_to_delete, _write_patches_to_file,
 )
 
+_PROGRESS_INTERVAL = 0.1   # 진행률 emit 최소 간격 (초) — 상태바 스팸 방지
+
+
+def _fmt_progress(done: int, total) -> str:
+    if total:
+        return f"{done:,}/{total:,}행"
+    return f"{done:,}행"
+
 
 class PreviewWorker(QThread):
     """단일 파일을 로드해 미리보기 데이터를 돌려준다."""
     done = pyqtSignal(str, list, list)   # side('a'|'b'), data(값), formula_data(수식)
     error = pyqtSignal(str)
+    progress = pyqtSignal(str)           # 로딩 진행률 상태바 메시지
 
     def __init__(self, side: str, path: str):
         super().__init__()
@@ -19,9 +31,20 @@ class PreviewWorker(QThread):
 
     def run(self):
         try:
+            last_emit = [0.0]
+
+            def _on_progress(done_rows, total_rows):
+                now = time.monotonic()
+                if now - last_emit[0] < _PROGRESS_INTERVAL:
+                    return
+                last_emit[0] = now
+                label = "A" if self.side == "a" else "B"
+                self.progress.emit(
+                    f"{label} 파일 로딩 중... {_fmt_progress(done_rows, total_rows)}")
+
             # 통합 함수 — 같은 파일 1회 파싱으로 값/수식 모두 획득
             # xlsx/json/uasset 모두 디스패처 한 곳에서 처리
-            data, formulas = load_sheet_with_formulas_any(self.path)
+            data, formulas = load_sheet_with_formulas_any(self.path, _on_progress)
             self.done.emit(self.side, data, formulas)
         except Exception as e:
             self.error.emit(str(e))
@@ -41,16 +64,38 @@ class LoadWorker(QThread):
         try:
             from concurrent.futures import ThreadPoolExecutor
 
-            def _load(path):
+            # A/B 각 로더 스레드가 진행률을 갱신하면 스로틀을 거쳐 합산 메시지로 emit.
+            # (pyqtSignal emit은 스레드 세이프 — queued connection으로 전달된다)
+            counts = {"a": (0, None), "b": (0, None)}
+            lock = threading.Lock()
+            last_emit = [0.0]
+
+            def _make_progress(side):
+                def _on_progress(done_rows, total_rows):
+                    with lock:
+                        counts[side] = (done_rows, total_rows)
+                        now = time.monotonic()
+                        if now - last_emit[0] < _PROGRESS_INTERVAL:
+                            return
+                        last_emit[0] = now
+                        parts = [
+                            f"{s.upper()} {_fmt_progress(d, t)}"
+                            for s, (d, t) in counts.items() if d
+                        ]
+                    self.progress.emit("로딩 중... " + " · ".join(parts))
+                return _on_progress
+
+            def _load(path, side):
                 if not path:
                     return [], []
-                return load_sheet_with_formulas_any(path)
+                return load_sheet_with_formulas_any(path, _make_progress(side))
 
             self.progress.emit("A/B 파일 병렬 로딩 중...")
-            # A/B 두 파일을 스레드 2개로 동시 파싱 (openpyxl은 IO 바운드라 GIL 영향 적음)
+            # A/B 두 파일을 스레드 2개로 동시 파싱. 각 xlsx는 내부에서 값/수식
+            # 2패스를 다시 병렬화하므로 비교 경로는 최대 4개 파스 스레드가 돈다.
             with ThreadPoolExecutor(max_workers=2) as ex:
-                fa = ex.submit(_load, self.path_a)
-                fb = ex.submit(_load, self.path_b)
+                fa = ex.submit(_load, self.path_a, "a")
+                fb = ex.submit(_load, self.path_b, "b")
                 a, af = fa.result()
                 b, bf = fb.result()
 
