@@ -1,0 +1,1257 @@
+"""메인 윈도우 (excel_diff_merge.py에서 분리)."""
+import os
+import re
+
+from PyQt5.QtWidgets import (
+    QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
+    QPushButton, QLabel, QSplitter, QLineEdit, QStatusBar, QMessageBox,
+    QShortcut, QAbstractItemView,
+)
+from PyQt5.QtCore import Qt, QSize, QRect, QPoint
+from PyQt5.QtGui import QColor, QFont, QIcon, QPixmap, QKeySequence, QPainter, QPen
+from openpyxl.utils import get_column_letter
+
+from .diff_engine import _cell_status, compute_diff
+from .loaders import _EXCEL_EXTS, _eval_formula_with_row
+from .panels import FilePanel
+from .theme import APP_QSS, DIFF_COLORS, load_app_icon, ui_font
+from .widgets import ExcelTableWidget, MinimapScrollBar
+from .workers import LoadWorker, PreviewWorker, StagedMergeWorker
+from .xlsx_writer import _is_file_locked
+
+
+class MainWindow(QMainWindow):
+    def __init__(self):
+        super().__init__()
+        self.setWindowTitle("ExcelMerge")
+        # 작업 표시줄·Alt+Tab에서도 타이틀바와 동일한 앱 아이콘이 보이도록 명시 지정.
+        self.setWindowIcon(load_app_icon())
+        self.resize(1400, 800)
+        self._load_worker:          LoadWorker | None         = None
+        self._preview_worker_a:    PreviewWorker | None      = None
+        self._preview_worker_b:    PreviewWorker | None      = None
+        self._staged_merge_worker: StagedMergeWorker | None = None
+        self._saving_side: str = "a"
+        self._diff_matrix: list[list] = []
+        self._diff_row_meta: list = []   # [(orig_a_row, orig_b_row), ...]
+        self._merged_cells: set = set()
+        self._staged: dict = {}          # {(r, c): 'a_to_b' | 'b_to_a'}
+        self._edited: dict = {"a": {}, "b": {}}   # {side: {(r,c): new_val}}
+        self._preview_data: dict = {"a": [], "b": []}   # 미리보기 raw data
+        self._formula_data: dict = {"a": [], "b": []}   # 수식 원문 데이터
+        self._diff_only: bool = False
+        self._undo_stack: list = []   # [(side, r, c, old_val)]
+        self._raw_data: dict = {"a": [], "b": []}   # 키 열 변경 시 재계산용 캐시
+        self._key_col: int = 0
+        self._excluded_cols: set[int] = set()   # 변경 검사에서 제외할 (display) 열 인덱스
+
+        self._build_ui()
+        self._apply_style()
+        undo_sc = QShortcut(QKeySequence("Ctrl+Z"), self)
+        undo_sc.activated.connect(self._undo)
+        diff_only_sc = QShortcut(QKeySequence("Ctrl+D"), self)
+        diff_only_sc.setContext(Qt.ApplicationShortcut)
+        diff_only_sc.activated.connect(self._toggle_diff_only_shortcut)
+        # F5 — 새로고침 (refresh_btn이 enabled 일 때만 실행)
+        refresh_sc = QShortcut(QKeySequence("F5"), self)
+        refresh_sc.setContext(Qt.ApplicationShortcut)
+        refresh_sc.activated.connect(self._on_refresh_shortcut)
+        # Alt+↑ / Alt+↓ — 이전/다음 변경 셀로 이동
+        prev_diff_sc = QShortcut(QKeySequence("Alt+Up"), self)
+        prev_diff_sc.setContext(Qt.ApplicationShortcut)
+        prev_diff_sc.activated.connect(self._on_prev_diff_shortcut)
+        next_diff_sc = QShortcut(QKeySequence("Alt+Down"), self)
+        next_diff_sc.setContext(Qt.ApplicationShortcut)
+        next_diff_sc.activated.connect(self._on_next_diff_shortcut)
+        # Ctrl+F — 찾기 입력란으로 포커스 이동
+        find_sc = QShortcut(QKeySequence("Ctrl+F"), self)
+        find_sc.setContext(Qt.ApplicationShortcut)
+        find_sc.activated.connect(self._focus_find)
+
+    def _build_ui(self):
+        central = QWidget()
+        self.setCentralWidget(central)
+        root = QVBoxLayout(central)
+        root.setContentsMargins(8, 8, 8, 8)
+        root.setSpacing(6)
+
+        # ── 툴바 ──
+        toolbar = QHBoxLayout()
+
+        self.diff_only_btn = QPushButton("변경 행만 보기")
+        self.diff_only_btn.setFixedHeight(36)
+        self.diff_only_btn.setFont(ui_font(10))
+        self.diff_only_btn.setCheckable(True)
+        self.diff_only_btn.setObjectName("toggle_btn")
+        self.diff_only_btn.setEnabled(False)
+        self.diff_only_btn.setToolTip("변경된 행만 표시 / 전체 표시 전환 (Ctrl+D)")
+        self.diff_only_btn.toggled.connect(self._on_diff_only_toggled)
+        toolbar.addWidget(self.diff_only_btn)
+
+        self.refresh_btn = QPushButton("새로고침")
+        self.refresh_btn.setFixedHeight(36)
+        self.refresh_btn.setFont(ui_font(10))
+        self.refresh_btn.setToolTip("지정된 경로의 파일을 다시 불러와 비교합니다 (F5)")
+        self.refresh_btn.setEnabled(False)
+        self.refresh_btn.clicked.connect(self._run_refresh)
+        toolbar.addWidget(self.refresh_btn)
+
+        # 이전/다음 변경 셀 이동 버튼
+        self.prev_diff_btn = QPushButton("◀ 이전 변경")
+        self.prev_diff_btn.setFixedHeight(36)
+        self.prev_diff_btn.setFont(ui_font(10))
+        self.prev_diff_btn.setEnabled(False)
+        self.prev_diff_btn.setToolTip("이전 변경 셀로 이동 (Alt+↑)")
+        self.prev_diff_btn.clicked.connect(lambda: self._goto_changed(-1))
+        toolbar.addWidget(self.prev_diff_btn)
+
+        self.next_diff_btn = QPushButton("다음 변경 ▶")
+        self.next_diff_btn.setFixedHeight(36)
+        self.next_diff_btn.setFont(ui_font(10))
+        self.next_diff_btn.setEnabled(False)
+        self.next_diff_btn.setToolTip("다음 변경 셀로 이동 (Alt+↓)")
+        self.next_diff_btn.clicked.connect(lambda: self._goto_changed(+1))
+        toolbar.addWidget(self.next_diff_btn)
+
+        # 찾기 — 검색란 + 옵션 토글 + 이전/다음 찾기 버튼
+        toolbar.addSpacing(16)
+        find_box = QHBoxLayout()
+        find_box.setSpacing(4)
+
+        self.find_edit = QLineEdit()
+        self.find_edit.setObjectName("find_edit")
+        self.find_edit.setPlaceholderText("찾을 내용 (Ctrl+F)")
+        self.find_edit.setFixedHeight(36)
+        self.find_edit.setFixedWidth(200)
+        self.find_edit.setFont(ui_font(10))
+        self.find_edit.setClearButtonEnabled(True)
+        self.find_edit.setEnabled(False)
+        self.find_edit.setToolTip("셀 값 검색 — Enter: 다음 찾기, Shift+Enter: 이전 찾기")
+        self.find_edit.returnPressed.connect(lambda: self._goto_find(+1))
+        find_prev_sc = QShortcut(QKeySequence("Shift+Return"), self.find_edit)
+        find_prev_sc.setContext(Qt.WidgetShortcut)
+        find_prev_sc.activated.connect(lambda: self._goto_find(-1))
+        find_box.addWidget(self.find_edit)
+
+        def _find_btn(kind: str, tooltip: str, checkable: bool) -> QPushButton:
+            btn = QPushButton()
+            btn.setObjectName("find_btn")
+            btn.setFixedSize(36, 36)
+            btn.setIcon(self._make_find_icon(kind))
+            btn.setIconSize(QSize(22, 22))
+            btn.setCheckable(checkable)
+            btn.setEnabled(False)
+            btn.setToolTip(tooltip)
+            find_box.addWidget(btn)
+            return btn
+
+        self.find_case_btn = _find_btn(
+            "case",
+            "대소문자 무시 (Ignore case)\n"
+            "켜짐: 대소문자를 구분하지 않고 검색\n"
+            "꺼짐: 대소문자가 정확히 일치할 때만 검색",
+            checkable=True,
+        )
+        self.find_case_btn.setChecked(True)
+
+        self.find_word_btn = _find_btn(
+            "word",
+            "전체 단어 일치 (Match whole word only)\n"
+            "켜짐: 검색어가 독립된 단어로 존재할 때만 찾음\n"
+            "꺼짐: 부분 문자열도 찾음",
+            checkable=True,
+        )
+
+        self.find_prev_btn = _find_btn("prev", "이전 찾기 (Shift+Enter)", checkable=False)
+        self.find_prev_btn.clicked.connect(lambda: self._goto_find(-1))
+
+        self.find_next_btn = _find_btn("next", "다음 찾기 (Enter)", checkable=False)
+        self.find_next_btn.clicked.connect(lambda: self._goto_find(+1))
+
+        toolbar.addLayout(find_box)
+
+        toolbar.addStretch()
+
+        # 범례
+        for lbl, key in [
+            ("추가됨", "added"),
+            ("변경됨", "modified"), ("준비 중", "staged"), ("병합됨", "merged"),
+        ]:
+            dot = QLabel("  ")
+            dot.setFixedSize(20, 20)
+            dot.setStyleSheet(
+                f"background:{DIFF_COLORS[key].name()};"
+                "border:1px solid #aaa; border-radius:3px;"
+            )
+            txt = QLabel(lbl)
+            txt.setFont(ui_font(9))
+            toolbar.addWidget(dot)
+            toolbar.addWidget(txt)
+            toolbar.addSpacing(8)
+
+        root.addLayout(toolbar)
+
+        # ── 좌우 패널 ──
+        splitter = QSplitter(Qt.Horizontal)
+        self.panel_a = FilePanel("A 파일 (원본)", "a")
+        self.panel_b = FilePanel("B 파일 (비교)", "b")
+        splitter.addWidget(self.panel_a)
+        splitter.addWidget(self.panel_b)
+        splitter.setSizes([700, 700])
+        root.addWidget(splitter, 1)
+
+        # ── 변경 셀 위치 미니맵: 양쪽 테이블의 세로/가로 스크롤바를 커스텀으로 교체 ──
+        # 스크롤 동기화 시그널 연결 전에 교체해야 verticalScrollBar()/horizontalScrollBar()
+        # 핸들이 새 객체를 가리킨다.
+        for tbl in (self.panel_a.table, self.panel_b.table):
+            tbl.setVerticalScrollBar(MinimapScrollBar(Qt.Vertical, tbl))
+            tbl.setHorizontalScrollBar(MinimapScrollBar(Qt.Horizontal, tbl))
+
+        # ── 상태바 ──
+        self.status = QStatusBar()
+        self.setStatusBar(self.status)
+        self.status.showMessage(
+            "파일을 선택하면 자동으로 비교합니다.  "
+            "| 셀 선택 후 우클릭 → 병합 준비 → 저장"
+        )
+
+        # 스크롤 동기화
+        for src, dst in [
+            (self.panel_a.table.horizontalScrollBar(), self.panel_b.table.horizontalScrollBar()),
+            (self.panel_b.table.horizontalScrollBar(), self.panel_a.table.horizontalScrollBar()),
+            (self.panel_a.table.verticalScrollBar(),   self.panel_b.table.verticalScrollBar()),
+            (self.panel_b.table.verticalScrollBar(),   self.panel_a.table.verticalScrollBar()),
+        ]:
+            src.valueChanged.connect(dst.setValue)
+
+        # 열/행 크기 양방향 동기화 — 사용자 조작에 의한 변경만 (apply_*는 시그널 미발행)
+        self.panel_a.table.column_resized.connect(self.panel_b.table.apply_column_width)
+        self.panel_b.table.column_resized.connect(self.panel_a.table.apply_column_width)
+        self.panel_a.table.row_resized.connect(self.panel_b.table.apply_row_height)
+        self.panel_b.table.row_resized.connect(self.panel_a.table.apply_row_height)
+
+        # 우클릭 → 스테이징 / 언스테이징
+        self.panel_a.table.stage_requested.connect(self._stage_selected)
+        self.panel_b.table.stage_requested.connect(self._stage_selected)
+        self.panel_a.table.unstage_requested.connect(self._unstage_selected)
+        self.panel_b.table.unstage_requested.connect(self._unstage_selected)
+
+        # 열 헤더 우클릭 → 키 열 변경
+        self.panel_a.table.key_col_changed.connect(self._on_key_col_changed)
+        self.panel_b.table.key_col_changed.connect(self._on_key_col_changed)
+
+        # 열 헤더 우클릭 → 변경 검사 제외 일괄 토글
+        self.panel_a.table.columns_exclude_set.connect(self._on_columns_exclude_set)
+        self.panel_b.table.columns_exclude_set.connect(self._on_columns_exclude_set)
+
+        # 선택 셀 동기화
+        self._syncing_selection = False
+        self.panel_a.table.itemSelectionChanged.connect(
+            lambda: self._sync_selection(self.panel_a.table, self.panel_b.table)
+        )
+        self.panel_b.table.itemSelectionChanged.connect(
+            lambda: self._sync_selection(self.panel_b.table, self.panel_a.table)
+        )
+
+        # 패널 내 저장 버튼 연결
+        self.panel_a.save_btn.clicked.connect(lambda: self._save_staged("a"))
+        self.panel_b.save_btn.clicked.connect(lambda: self._save_staged("b"))
+
+        # 파일 선택 시: 양쪽 모두 있으면 자동 비교, 한쪽만 있으면 미리보기
+        self.panel_a.file_loaded.connect(lambda p: self._on_file_loaded("a", p))
+        self.panel_b.file_loaded.connect(lambda p: self._on_file_loaded("b", p))
+
+        # 셀 값 직접 편집
+        self.panel_a.cell_value_edited.connect(lambda r, c, v: self._on_cell_edited("a", r, c, v))
+        self.panel_b.cell_value_edited.connect(lambda r, c, v: self._on_cell_edited("b", r, c, v))
+
+    def _apply_style(self):
+        self.setStyleSheet(APP_QSS)
+
+    # ── 파일 미리보기 (비교 전 단독 표시) ────────────────────────────────────────
+
+    def _reset_compare_state(self):
+        """비교 결과를 초기화하고 버튼 상태를 되돌린다."""
+        self._diff_matrix = []
+        self._diff_row_meta = []
+        self._merged_cells = set()
+        self._staged = {}
+        self._edited = {"a": {}, "b": {}}
+        self._preview_data = {"a": [], "b": []}
+        self._formula_data = {"a": [], "b": []}
+        self._excluded_cols.clear()
+        self.panel_a.table.set_excluded_cols(self._excluded_cols)
+        self.panel_b.table.set_excluded_cols(self._excluded_cols)
+        self.panel_a._row_meta = []
+        self.panel_b._row_meta = []
+        self.panel_a._staged_display = {}
+        self.panel_b._staged_display = {}
+        self.panel_a._edited_values = {}
+        self.panel_b._edited_values = {}
+        self.diff_only_btn.setChecked(False)
+        self.diff_only_btn.setEnabled(False)
+        self.prev_diff_btn.setEnabled(False)
+        self.next_diff_btn.setEnabled(False)
+        self._set_find_enabled(False)
+        self._update_minimap()
+        self._set_save_btn_state()
+
+    def _run_preview(self, side: str, path: str):
+        """파일 선택 즉시 해당 패널에 원본 데이터를 색상 없이 표시한다."""
+        # 비교 결과가 있으면 비교 상태를 리셋하고 반대쪽 패널도 미리보기로 전환
+        if self._diff_matrix:
+            self._reset_compare_state()
+            other_side = "b" if side == "a" else "a"
+            other_path = self.panel_b.get_path() if other_side == "b" else self.panel_a.get_path()
+            if other_path:
+                self._run_preview(other_side, other_path)
+
+        worker = PreviewWorker(side, path)
+        worker.done.connect(self._on_preview_done)
+        worker.error.connect(lambda msg: self.status.showMessage(f"파일 로드 오류: {msg}"))
+        worker.finished.connect(worker.deleteLater)
+        if side == "a":
+            self._preview_worker_a = worker
+        else:
+            self._preview_worker_b = worker
+        worker.start()
+        self.status.showMessage(f"{'A' if side == 'a' else 'B'} 파일 로딩 중...")
+
+    def _on_preview_done(self, side: str, data: list[list], formula_data: list[list]):
+        self._preview_data[side] = data
+        self._formula_data[side] = formula_data
+        panel = self.panel_a if side == "a" else self.panel_b
+        panel._formula_data = formula_data
+        panel._row_meta = []   # 미리보기 모드: row_meta 없음 (행 인덱스 = 원본 인덱스)
+        panel.preview(data)
+        rows = len(data)
+        cols = max((len(r) for r in data), default=0)
+        self.status.showMessage(
+            f"{'A' if side == 'a' else 'B'} 파일 로드 완료 — {rows}행 × {cols}열  "
+            "| '비교 실행'을 클릭해 두 파일을 비교하세요."
+        )
+        self._set_save_btn_state()
+
+    # ── 비교 ──────────────────────────────────────────────────────────────────
+
+    def _on_refresh_shortcut(self):
+        """F5 단축키 — 새로고침 버튼이 활성 상태일 때만 동작."""
+        if self.refresh_btn.isEnabled():
+            self._run_refresh()
+
+    def _run_refresh(self):
+        # 새로고침은 디폴트(자동너비+MAX_AUTO_COL_WIDTH_PX 상한) 상태로 복귀시킨다.
+        # 세션 중 사용자가 헤더를 드래그해 늘려놓은 열/행 크기도 함께 리셋되어야
+        # populate() 종료부의 _apply_user_sizes() 분기를 건너뛴다.
+        for tbl in (self.panel_a.table, self.panel_b.table):
+            tbl._user_col_widths.clear()
+            tbl._user_row_heights.clear()
+
+        path_a = self.panel_a.get_path()
+        path_b = self.panel_b.get_path()
+        if path_a and path_b:
+            self._run_compare()
+        elif path_a:
+            self._run_preview("a", path_a)
+        elif path_b:
+            self._run_preview("b", path_b)
+
+    def _run_compare(self):
+        path_a = self.panel_a.get_path()
+        path_b = self.panel_b.get_path()
+        if not path_a and not path_b:
+            QMessageBox.warning(self, "경고", "A 파일과 B 파일 중 하나 이상 선택하세요.")
+            return
+
+        self._set_buttons_enabled(False)
+        self._merged_cells = set()
+        self._staged = {}
+        self._edited = {"a": {}, "b": {}}
+        self._diff_matrix = []
+        self._diff_row_meta = []   # 미리보기 잠금 해제
+        self._excluded_cols.clear()
+        self.panel_a.table.set_excluded_cols(self._excluded_cols)
+        self.panel_b.table.set_excluded_cols(self._excluded_cols)
+        self.status.showMessage("파일 로딩 중...")
+
+        self._load_worker = LoadWorker(path_a, path_b)
+        self._load_worker.done.connect(self._on_loaded)
+        self._load_worker.error.connect(self._on_error)
+        self._load_worker.progress.connect(self.status.showMessage)
+        self._load_worker.finished.connect(self._load_worker.deleteLater)
+        self._load_worker.start()
+
+    def _on_loaded(self, a_data, b_data, a_formulas, b_formulas):
+        self._raw_data["a"] = a_data
+        self._raw_data["b"] = b_data
+        self._formula_data["a"] = a_formulas
+        self._formula_data["b"] = b_formulas
+        self.panel_a._formula_data = a_formulas
+        self.panel_b._formula_data = b_formulas
+        self._diff_matrix, self._diff_row_meta = compute_diff(
+            a_data, b_data, self._key_col)
+        self.panel_a._row_meta = self._diff_row_meta
+        self.panel_b._row_meta = self._diff_row_meta
+        self._refresh_tables()
+
+        rows = len(self._diff_matrix)
+        cols = len(self._diff_matrix[0]) if self._diff_matrix else 0
+        changed = self._count_changed()
+
+        self._set_buttons_enabled(True)
+        # 비교 완료 시 디폴트로 "변경 행만 보기" ON.
+        # 이미 ON이었다면 setChecked는 시그널이 발생하지 않으므로 _apply_diff_filter를 직접 호출.
+        if self.diff_only_btn.isChecked():
+            self._apply_diff_filter()
+        else:
+            self.diff_only_btn.setChecked(True)
+        self.status.showMessage(
+            f"비교 완료 — {rows}행 × {cols}열 | 변경된 셀: {changed}개  "
+            "| 셀 선택 후 우클릭 → 병합 준비 → 선택 병합 저장"
+        )
+
+    # ── 키 열 변경 ────────────────────────────────────────────────────────────
+
+    def _on_key_col_changed(self, col: int):
+        if col == self._key_col:
+            return
+        self._key_col = col
+        self.panel_a.table.set_key_col(col)
+        self.panel_b.table.set_key_col(col)
+        if self._raw_data["a"] or self._raw_data["b"]:
+            self._recompute_diff()
+
+    def _recompute_diff(self):
+        self._merged_cells = set()
+        self._staged = {}
+        self._edited = {"a": {}, "b": {}}
+        # 키 열이 바뀌면 동일 인덱스가 다른 의미가 될 수 있으므로 제외 상태도 리셋.
+        self._excluded_cols.clear()
+        self.panel_a.table.set_excluded_cols(self._excluded_cols)
+        self.panel_b.table.set_excluded_cols(self._excluded_cols)
+        # 키 열 변경 시 사용자의 현재 토글 상태(diff_only_btn)는 그대로 유지한다.
+        self._diff_matrix, self._diff_row_meta = compute_diff(
+            self._raw_data["a"], self._raw_data["b"], self._key_col)
+        self.panel_a._row_meta = self._diff_row_meta
+        self.panel_b._row_meta = self._diff_row_meta
+        self._refresh_tables()
+        self._set_buttons_enabled(True)
+        self._apply_diff_filter()
+        rows = len(self._diff_matrix)
+        cols = len(self._diff_matrix[0]) if self._diff_matrix else 0
+        changed = self._count_changed()
+        key_letter = get_column_letter(self._key_col + 1) if self._key_col >= 0 else "없음(ROW 순서)"
+        self.status.showMessage(
+            f"키 열: {key_letter}  |  {rows}행 × {cols}열  |  변경된 셀: {changed}개  "
+            "| 셀 선택 후 우클릭 → 병합 준비 → 선택 병합 저장"
+        )
+
+    # ── 변경 행 필터 ──────────────────────────────────────────────────────────
+
+    def _toggle_diff_only_shortcut(self):
+        if self.diff_only_btn.isEnabled():
+            self.diff_only_btn.setChecked(not self.diff_only_btn.isChecked())
+
+    def _on_diff_only_toggled(self, checked: bool):
+        self._diff_only = checked
+        self._apply_diff_filter()
+
+    def _apply_diff_filter(self):
+        if not self._diff_matrix:
+            self._update_minimap()
+            return
+        # setRowHidden은 sectionResized(_, _, 0)을 emit해 _user_row_heights를 0으로
+        # 오염시킨다. _applying_sizes 플래그로 _on_section_v_resized 측 기록을 차단.
+        tables = (self.panel_a.table, self.panel_b.table)
+        for tbl in tables:
+            tbl._applying_sizes = True
+        try:
+            excl = self._excluded_cols
+            for r, row in enumerate(self._diff_matrix):
+                is_header = (r == 0)   # 최상단 행은 항상 표시
+                is_changed = any(
+                    status != "same"
+                    for c, (status, *_) in enumerate(row)
+                    if c not in excl
+                )
+                hidden = self._diff_only and not is_changed and not is_header
+                self.panel_a.table.setRowHidden(r, hidden)
+                self.panel_b.table.setRowHidden(r, hidden)
+        finally:
+            for tbl in tables:
+                tbl._applying_sizes = False
+        self._update_minimap()
+
+    # ── 변경 셀 탐색(이전/다음) ───────────────────────────────────────────────
+
+    def _on_prev_diff_shortcut(self):
+        if self.prev_diff_btn.isEnabled():
+            self._goto_changed(-1)
+
+    def _on_next_diff_shortcut(self):
+        if self.next_diff_btn.isEnabled():
+            self._goto_changed(+1)
+
+    def _iter_changed_cells(self):
+        """변경된 (r, c) 셀을 행 우선 순서로 yield. 숨겨진 행/제외 열은 제외."""
+        if not self._diff_matrix:
+            return
+        excl = self._excluded_cols
+        for r, row in enumerate(self._diff_matrix):
+            if self.panel_a.table.isRowHidden(r):
+                continue
+            for c, cell in enumerate(row):
+                if c in excl:
+                    continue
+                if cell[0] != "same":
+                    yield (r, c)
+
+    def _current_anchor(self):
+        """현재 선택 셀(우선순위: panel_a → panel_b).
+        없으면 (0, -1) 반환 — A1부터 검사하기 위한 sentinel."""
+        for tbl in (self.panel_a.table, self.panel_b.table):
+            r, c = tbl.currentRow(), tbl.currentColumn()
+            if r >= 0 and c >= 0:
+                return (r, c)
+        return (0, -1)
+
+    def _goto_changed(self, direction: int):
+        """direction=+1: 다음 변경 셀, -1: 이전 변경 셀."""
+        if not self._diff_matrix:
+            return
+        cells = list(self._iter_changed_cells())
+        if not cells:
+            self.status.showMessage("변경된 셀이 없습니다.")
+            return
+        anchor = self._current_anchor()
+        if direction > 0:
+            target = next((p for p in cells if p > anchor), None)
+            if target is None:
+                self.status.showMessage("마지막 변경 셀입니다.")
+                return
+        else:
+            target = next((p for p in reversed(cells) if p < anchor), None)
+            if target is None:
+                self.status.showMessage("첫 변경 셀입니다.")
+                return
+        r, c = target
+        # 양쪽 패널 동기 선택 + 화면 중앙으로 스크롤
+        for tbl in (self.panel_a.table, self.panel_b.table):
+            tbl.setCurrentCell(r, c)
+            item = tbl.item(r, c)
+            if item:
+                tbl.scrollToItem(item, QAbstractItemView.PositionAtCenter)
+
+    # ── 찾기 ──
+    def _make_find_icon(self, kind: str) -> QIcon:
+        """찾기 버튼용 아이콘을 QPainter로 렌더링 (HiDPI 2배 해상도).
+        체크 시 배경이 파란색으로 바뀌므로 Off=진회색 / On=흰색 두 벌을 등록."""
+        def render(color: QColor) -> QPixmap:
+            s = 32
+            pm = QPixmap(s * 2, s * 2)
+            pm.setDevicePixelRatio(2)
+            pm.fill(Qt.transparent)
+            p = QPainter(pm)
+            p.setRenderHint(QPainter.Antialiasing)
+            p.setRenderHint(QPainter.TextAntialiasing)
+            if kind == "case":
+                p.setPen(color)
+                p.setFont(QFont("Segoe UI", 12, QFont.Bold))
+                p.drawText(QRect(0, 0, s, s), Qt.AlignCenter, "Aa")
+            elif kind == "word":
+                p.setPen(color)
+                p.setFont(QFont("Segoe UI", 10, QFont.Bold))
+                p.drawText(QRect(0, 0, s, s - 8), Qt.AlignCenter, "ab")
+                p.setPen(QPen(color, 1.8, Qt.SolidLine, Qt.RoundCap))
+                y = s - 7
+                p.drawLine(QPoint(7, y), QPoint(s - 7, y))
+                p.drawLine(QPoint(7, y), QPoint(7, y - 4))
+                p.drawLine(QPoint(s - 7, y), QPoint(s - 7, y - 4))
+            else:  # "prev" / "next" — 셰브론 화살표
+                p.setPen(QPen(color, 2.6, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin))
+                m = s // 2
+                d = -1 if kind == "prev" else 1
+                p.drawLine(QPoint(m - 3 * d, m - 7), QPoint(m + 4 * d, m))
+                p.drawLine(QPoint(m + 4 * d, m), QPoint(m - 3 * d, m + 7))
+            p.end()
+            return pm
+
+        ic = QIcon()
+        ic.addPixmap(render(QColor("#3b3b3b")), QIcon.Normal, QIcon.Off)
+        ic.addPixmap(render(QColor("#ffffff")), QIcon.Normal, QIcon.On)
+        ic.addPixmap(render(QColor("#b8b8b8")), QIcon.Disabled, QIcon.Off)
+        ic.addPixmap(render(QColor("#b8b8b8")), QIcon.Disabled, QIcon.On)
+        return ic
+
+    def _focus_find(self):
+        """Ctrl+F — 찾기 입력란 포커스 + 전체 선택."""
+        if self.find_edit.isEnabled():
+            self.find_edit.setFocus()
+            self.find_edit.selectAll()
+
+    def _make_find_matcher(self, term: str):
+        """검색 옵션(대소문자 무시/전체 단어)에 맞는 판별 함수를 반환."""
+        ignore_case = self.find_case_btn.isChecked()
+        whole_word = self.find_word_btn.isChecked()
+        if whole_word:
+            # \b는 검색어가 특수문자로 시작/끝나면 동작하지 않으므로 lookaround 사용
+            flags = re.IGNORECASE if ignore_case else 0
+            pat = re.compile(r"(?<!\w)" + re.escape(term) + r"(?!\w)", flags)
+            return lambda text: pat.search(text) is not None
+        if ignore_case:
+            needle = term.casefold()
+            return lambda text: needle in text.casefold()
+        return lambda text: term in text
+
+    def _iter_find_matches(self, match):
+        """검색어와 일치하는 (r, c) 셀을 행 우선 순서로 yield.
+        숨겨진 행/제외 열은 제외. A/B 표시 텍스트 중 한쪽이라도 일치하면 매치."""
+        if not self._diff_matrix:
+            return
+        excl = self._excluded_cols
+        tbl_a, tbl_b = self.panel_a.table, self.panel_b.table
+        for r, row in enumerate(self._diff_matrix):
+            if tbl_a.isRowHidden(r):
+                continue
+            for c in range(len(row)):
+                if c in excl:
+                    continue
+                for tbl in (tbl_a, tbl_b):
+                    item = tbl.item(r, c)
+                    if item is not None and match(item.text()):
+                        yield (r, c)
+                        break
+
+    def _goto_find(self, direction: int):
+        """direction=+1: 다음 찾기, -1: 이전 찾기. 끝에 도달하면 반대편에서 순환."""
+        term = self.find_edit.text()
+        if not term or not self._diff_matrix:
+            return
+        cells = list(self._iter_find_matches(self._make_find_matcher(term)))
+        if not cells:
+            self.status.showMessage(f'"{term}" — 일치 항목이 없습니다.')
+            return
+        anchor = self._current_anchor()
+        wrapped = ""
+        if direction > 0:
+            target = next((p for p in cells if p > anchor), None)
+            if target is None:
+                target = cells[0]
+                wrapped = " — 처음부터 다시 검색합니다."
+        else:
+            target = next((p for p in reversed(cells) if p < anchor), None)
+            if target is None:
+                target = cells[-1]
+                wrapped = " — 끝에서부터 다시 검색합니다."
+        r, c = target
+        # 양쪽 패널 동기 선택 + 화면 중앙으로 스크롤
+        for tbl in (self.panel_a.table, self.panel_b.table):
+            tbl.setCurrentCell(r, c)
+            item = tbl.item(r, c)
+            if item:
+                tbl.scrollToItem(item, QAbstractItemView.PositionAtCenter)
+        idx = cells.index(target) + 1
+        self.status.showMessage(f'찾기: "{term}" {idx}/{len(cells)}개 일치{wrapped}')
+
+    def _update_minimap(self):
+        """현재 표시 중인 행을 기준으로 변경 행/열의 비율 위치를 양쪽
+        세로/가로 스크롤바에 전달한다.
+        - 세로: 가시 행 중 변경 셀이 하나라도 있는 행의 위치.
+        - 가로: 가시 행 안에서 변경 셀이 있는 열의 위치.
+        """
+        row_ratios = []
+        col_ratios = []
+        if self._diff_matrix:
+            excl = self._excluded_cols
+            visible_rows = [
+                r for r in range(len(self._diff_matrix))
+                if not self.panel_a.table.isRowHidden(r)
+            ]
+
+            def _row_has_changed(r):
+                return any(
+                    st != "same"
+                    for c, (st, *_) in enumerate(self._diff_matrix[r])
+                    if c not in excl
+                )
+
+            n = len(visible_rows)
+            if n == 1:
+                r = visible_rows[0]
+                if _row_has_changed(r):
+                    row_ratios.append(0.0)
+            elif n > 1:
+                denom = n - 1
+                for vi, r in enumerate(visible_rows):
+                    if _row_has_changed(r):
+                        row_ratios.append(vi / denom)
+
+            cols_total = len(self._diff_matrix[0]) if self._diff_matrix else 0
+            if cols_total > 0 and visible_rows:
+                if cols_total == 1:
+                    if 0 not in excl and any(self._diff_matrix[r][0][0] != "same" for r in visible_rows):
+                        col_ratios.append(0.0)
+                else:
+                    denom_c = cols_total - 1
+                    for c in range(cols_total):
+                        if c in excl:
+                            continue
+                        if any(self._diff_matrix[r][c][0] != "same" for r in visible_rows):
+                            col_ratios.append(c / denom_c)
+        for tbl in (self.panel_a.table, self.panel_b.table):
+            v = tbl.verticalScrollBar()
+            if isinstance(v, MinimapScrollBar):
+                v.set_change_ratios(row_ratios)
+            h = tbl.horizontalScrollBar()
+            if isinstance(h, MinimapScrollBar):
+                h.set_change_ratios(col_ratios)
+
+    # ── 선택 셀 스테이징 (우클릭) ─────────────────────────────────────────────
+
+    def _stage_selected(self, direction: str):
+        if not self._diff_matrix:
+            return
+
+        cells = (
+            self.panel_a.table.get_selected_cells()
+            | self.panel_b.table.get_selected_cells()
+        )
+        cells = {
+            (r, c) for (r, c) in cells
+            if r < len(self._diff_matrix)
+            and c < len(self._diff_matrix[r])
+            and c not in self._excluded_cols
+            and self._diff_matrix[r][c][0] != "same"
+        }
+        if not cells:
+            QMessageBox.information(self, "알림", "선택한 셀 중 변경된 셀이 없습니다.")
+            return
+
+        # undo 스택에 stage 동작 기록 (셀 목록과 방향을 한 번에 저장)
+        self._undo_stack.append(("stage", list(cells), direction))
+
+        for cell in cells:
+            self._staged[cell] = direction
+
+        # staged 셀에 대해 양쪽 패널의 셀값란 표시값(수식 우선) 미리 계산
+        def _resolve_display(fd, meta, side_idx, r, c, fallback):
+            try:
+                orig = meta[r][side_idx] if r < len(meta) else r
+            except (IndexError, TypeError):
+                orig = r
+            if orig is not None:
+                try:
+                    v = fd[orig][c]
+                    if v:
+                        return v
+                except (IndexError, TypeError):
+                    pass
+            return fallback
+
+        for (r, c) in cells:
+            dir_ = self._staged[r, c]
+            try:
+                _, a_val, b_val = self._diff_matrix[r][c]
+            except (IndexError, TypeError):
+                a_val, b_val = "", ""
+
+            # 편집된 값이 있으면 _formula_data보다 우선 사용
+            a_edited = self.panel_a._edited_values.get((r, c))
+            b_edited = self.panel_b._edited_values.get((r, c))
+
+            if dir_ == "a_to_b":
+                if a_edited is not None:
+                    a_display = a_edited
+                else:
+                    a_display = _resolve_display(self._formula_data["a"], self.panel_a._row_meta, 0, r, c, a_val)
+                b_display = a_display
+            else:
+                if b_edited is not None:
+                    b_display = b_edited
+                else:
+                    b_display = _resolve_display(self._formula_data["b"], self.panel_b._row_meta, 1, r, c, b_val)
+                a_display = b_display
+            self.panel_a._staged_display[r, c] = a_display
+            self.panel_b._staged_display[r, c] = b_display
+
+        self._refresh_tables()
+        self.panel_a.table.clearSelection()
+        self.panel_b.table.clearSelection()
+        self.panel_a._selected_cell = None
+        self.panel_b._selected_cell = None
+        self.panel_a.cell_edit.clear()
+        self.panel_a.cell_edit.setEnabled(False)
+        self.panel_b.cell_edit.clear()
+        self.panel_b.cell_edit.setEnabled(False)
+        self._set_save_btn_state()
+        self.status.showMessage(
+            f"병합 준비 완료 — {len(self._staged)}개 셀 대기 중  | '저장'을 클릭하면 파일에 저장됩니다."
+        )
+
+    # ── 선택 셀 언스테이징 (병합 준비 취소) ───────────────────────────────────────
+
+    def _unstage_selected(self):
+        if not self._staged:
+            return
+        cells = (
+            self.panel_a.table.get_selected_cells()
+            | self.panel_b.table.get_selected_cells()
+        )
+        removed = {c for c in cells if c in self._staged}
+        if not removed:
+            QMessageBox.information(self, "알림", "선택한 셀 중 병합 준비된 셀이 없습니다.")
+            return
+        for cell in removed:
+            del self._staged[cell]
+            self.panel_a._staged_display.pop(cell, None)
+            self.panel_b._staged_display.pop(cell, None)
+        sel_a = self.panel_a.table.get_selected_cells()
+        sel_b = self.panel_b.table.get_selected_cells()
+        self._refresh_tables()
+        if sel_a:
+            self.panel_a.table.mirror_selection(sel_a)
+        if sel_b:
+            self.panel_b.table.mirror_selection(sel_b)
+        self.panel_a._sync_cell_edit()
+        self.panel_b._sync_cell_edit()
+        self._set_save_btn_state()
+        self.status.showMessage(
+            f"병합 준비 취소 — {len(removed)}개 셀 제거됨 | 남은 대기 셀: {len(self._staged)}개"
+        )
+
+    # ── 저장 ─────────────────────────────────────────────────────────────────
+
+    def _save_staged(self, side: str):
+        """side: 'a' 또는 'b' — 해당 파일만 저장."""
+        other = "b" if side == "a" else "a"
+        path = self.panel_a.get_path() if side == "a" else self.panel_b.get_path()
+
+        # JSON/uasset 등 비-xlsx 는 저장 미지원 — 사용자에게 안내 후 중단
+        if path and os.path.splitext(path)[1].lower() not in _EXCEL_EXTS:
+            QMessageBox.information(
+                self, "저장 미지원",
+                f"{'A' if side == 'a' else 'B'} 파일은 비교 전용 형식입니다.\n"
+                f"저장(병합)은 Excel(.xlsx/.xls/.xlsm) 파일에서만 지원됩니다.",
+            )
+            return
+
+        # ── 미리보기 상태 전용 저장 (diff 없이 edited만 있는 경우) ──────────
+        if not self._diff_matrix:
+            if not self._edited.get(side):
+                return
+            if not path:
+                QMessageBox.warning(self, "경고",
+                    f"{'A' if side == 'a' else 'B'} 파일이 지정되지 않았습니다.")
+                return
+            if _is_file_locked(path):
+                QMessageBox.warning(self, "파일 열림",
+                    f"변경하고자 하는 파일이 열려 있으므로 저장할 수 없습니다:\n\n"
+                    f"{'A' if side == 'a' else 'B'} 파일: {os.path.basename(path)}"
+                    "\n\n파일을 닫은 후 다시 시도하세요.")
+                return
+            data_len = len(self._preview_data.get(side, []))
+            meta = [(r if side == "a" else None, r if side == "b" else None)
+                    for r in range(data_len)]
+            dummy_matrix = [[("same", "", "")] for _ in range(data_len)]
+            self._saving_side = side
+            self._set_buttons_enabled(False)
+            self.status.showMessage("저장 중...")
+            edited_side = {side: dict(self._edited[side]), other: {}}
+            fa = self._formula_data["a"] if side == "a" else []
+            fb = self._formula_data["b"] if side == "b" else []
+            path_a = path if side == "a" else ""
+            path_b = path if side == "b" else ""
+            self._staged_merge_worker = StagedMergeWorker(
+                path_a, path_b, dummy_matrix, meta, {}, edited_side, fa, fb,
+            )
+            self._staged_merge_worker.done.connect(self._on_staged_saved)
+            self._staged_merge_worker.error.connect(self._on_error)
+            self._staged_merge_worker.finished.connect(self._staged_merge_worker.deleteLater)
+            self._staged_merge_worker.start()
+            return
+
+        # ── diff 모드 저장 ──────────────────────────────────────────────────
+        has_a2b = any(v == "a_to_b" for v in self._staged.values())
+        has_b2a = any(v == "b_to_a" for v in self._staged.values())
+        has_edit_a = bool(self._edited.get("a"))
+        has_edit_b = bool(self._edited.get("b"))
+
+        # 저장 대상 측이 실제로 쓸 내용이 있는지 확인
+        if side == "a":
+            needs_write = has_b2a or has_edit_a
+        else:
+            needs_write = has_a2b or has_edit_b
+
+        if not needs_write:
+            return
+
+        if not path:
+            QMessageBox.warning(self, "경고",
+                f"{'A' if side == 'a' else 'B'} 파일이 지정되지 않았습니다.")
+            return
+
+        if _is_file_locked(path):
+            QMessageBox.warning(
+                self, "파일 열림",
+                f"변경하고자 하는 파일이 열려 있으므로 저장할 수 없습니다:\n\n"
+                f"{'A' if side == 'a' else 'B'} 파일: {os.path.basename(path)}"
+                "\n\n파일을 닫은 후 다시 시도하세요."
+            )
+            return
+
+        # 저장하지 않는 쪽 경로를 빈 문자열로 전달 → Worker가 해당 파일은 건드리지 않음
+        path_a = path if side == "a" else ""
+        path_b = path if side == "b" else ""
+        # staged 병합 시 반대쪽 edited 값도 병합 소스로 필요하므로 양쪽 모두 전달
+        edited_side = {
+            "a": dict(self._edited["a"]),
+            "b": dict(self._edited["b"]),
+        }
+        # staged 셀 중 이 side에 쓰는 것만 전달
+        # a 저장: b_to_a (B→A 방향) staged 셀만
+        # b 저장: a_to_b (A→B 방향) staged 셀만
+        relevant_direction = "b_to_a" if side == "a" else "a_to_b"
+        staged_for_side = {k: v for k, v in self._staged.items() if v == relevant_direction}
+
+        self._saving_side = side
+        self._set_buttons_enabled(False)
+        self.status.showMessage("저장 중...")
+
+        self._staged_merge_worker = StagedMergeWorker(
+            path_a, path_b, list(self._diff_matrix),
+            list(self._diff_row_meta),
+            staged_for_side,
+            edited_side,
+            self._formula_data["a"], self._formula_data["b"],
+        )
+        self._staged_merge_worker.done.connect(self._on_staged_saved)
+        self._staged_merge_worker.error.connect(self._on_error)
+        self._staged_merge_worker.finished.connect(self._staged_merge_worker.deleteLater)
+        self._staged_merge_worker.start()
+
+    def _on_staged_saved(self, count: int):
+        side = getattr(self, "_saving_side", None)
+
+        # 미리보기 상태(비교 전) 저장 완료 → 해당 side 재로드
+        if not self._diff_matrix:
+            self._edited[side] = {}
+            self._set_buttons_enabled(True)
+            self.status.showMessage(f"저장 완료 — {count}개 셀 저장됨")
+            QMessageBox.information(self, "저장 완료", f"{count}개 셀이 파일에 저장됐습니다.")
+            path = self.panel_a.get_path() if side == "a" else self.panel_b.get_path()
+            if path:
+                self._run_preview(side, path)
+            return
+
+        # ── diff 모드: 저장한 side에 해당하는 staged/edited만 확정 반영 ──────
+        relevant_direction = "b_to_a" if side == "a" else "a_to_b"
+        saved_staged = {k: v for k, v in self._staged.items() if v == relevant_direction}
+        staged_cells = set(saved_staged.keys())
+
+        # staged 방향대로 diff_matrix 확정 반영
+        for (r, c), direction in saved_staged.items():
+            if r < len(self._diff_matrix) and c < len(self._diff_matrix[r]):
+                _, a_val, b_val = self._diff_matrix[r][c]
+                if direction == "a_to_b":
+                    b_val = a_val
+                else:
+                    a_val = b_val
+                self._diff_matrix[r][c] = ("same", a_val, b_val)
+
+        # 저장한 side의 staged/edited 제거 (나머지 side는 유지)
+        # ※ edited 셀의 diff_matrix는 _on_cell_edited에서 이미 계산값으로 갱신되어 있으므로
+        #   여기서 _edited[side] 값(수식 원문 포함)으로 재덮어쓰지 않는다.
+        for k in list(self._staged.keys()):
+            if self._staged[k] == relevant_direction:
+                del self._staged[k]
+        self._edited[side] = {}
+        self._merged_cells |= staged_cells
+
+        self._refresh_tables()
+        self._set_buttons_enabled(True)
+        self.status.showMessage(f"저장 완료 — {count}개 셀 저장됨")
+        QMessageBox.information(self, "저장 완료", f"{count}개 셀이 파일에 저장됐습니다.")
+
+    def _on_error(self, msg: str):
+        self._set_buttons_enabled(True)
+        self.status.showMessage(f"오류: {msg}")
+        QMessageBox.critical(self, "오류", f"작업 실패:\n{msg}")
+
+    # ── 셀 직접 편집 ──────────────────────────────────────────────────────────
+
+    def _on_cell_edited(self, side: str, r: int, c: int, new_val: str):
+        panel = self.panel_a if side == "a" else self.panel_b
+
+        # ── 미리보기 상태 (비교 전) ──────────────────────────────────────────
+        if not self._diff_matrix:
+            data = self._preview_data.get(side, [])
+            if r >= len(data):
+                data.extend([[] for _ in range(r - len(data) + 1)])
+                self._preview_data[side] = data
+            row = data[r]
+            if c >= len(row):
+                row.extend([""] * (c - len(row) + 1))
+            old_val = data[r][c]
+            self._undo_stack.append((side, r, c, old_val, "preview"))
+            # 수식이면 계산값으로 표시, 수식 자체는 formula_data와 _edited_values에 저장
+            if new_val.startswith("="):
+                display_val = _eval_formula_with_row(new_val, data[r])
+                try:
+                    if r < len(self._formula_data.get(side, [])):
+                        while len(self._formula_data[side][r]) <= c:
+                            self._formula_data[side][r].append("")
+                        self._formula_data[side][r][c] = new_val
+                except (IndexError, TypeError):
+                    pass
+                data[r][c] = display_val
+            else:
+                data[r][c] = new_val
+            panel.preview(data)
+            panel.cell_edit.setText(new_val)
+            self._edited[side][(r, c)] = new_val
+            panel._edited_values[(r, c)] = new_val
+            self._set_save_btn_state()
+            self.status.showMessage(
+                f"셀 ({r+1}행, {get_column_letter(c+1)}열) 편집됨 — 저장 버튼을 눌러 파일에 반영하세요."
+            )
+            return
+
+        # ── 비교 후 상태 ─────────────────────────────────────────────────────
+        if r >= len(self._diff_matrix) or c >= len(self._diff_matrix[r]):
+            return
+
+        # undo 스택에 이전 값 저장
+        _, a_val_cur, b_val_cur = self._diff_matrix[r][c]
+        old_val = a_val_cur if side == "a" else b_val_cur
+        self._undo_stack.append((side, r, c, old_val, "diff"))
+
+        # 저장용 누적
+        self._edited[side][(r, c)] = new_val
+        panel._edited_values[(r, c)] = new_val
+
+        # 병합 준비(staged) 상태 셀을 수정하면 준비 해제
+        if (r, c) in self._staged:
+            del self._staged[(r, c)]
+
+        # diff_matrix 즉시 갱신 (수식이면 계산값으로 표시, 수식 자체는 formula_data에 저장)
+        _, a_val, b_val = self._diff_matrix[r][c]
+        if side == "a":
+            if new_val.startswith("="):
+                row_data = [self._diff_matrix[r][cc][1] for cc in range(len(self._diff_matrix[r]))]
+                display_val = _eval_formula_with_row(new_val, row_data)
+                try:
+                    orig = panel._row_meta[r][0]
+                    if orig is not None and orig < len(self._formula_data["a"]):
+                        while len(self._formula_data["a"][orig]) <= c:
+                            self._formula_data["a"][orig].append("")
+                        self._formula_data["a"][orig][c] = new_val
+                except (IndexError, TypeError):
+                    pass
+                a_val = display_val
+            else:
+                a_val = new_val
+        else:
+            if new_val.startswith("="):
+                row_data = [self._diff_matrix[r][cc][2] for cc in range(len(self._diff_matrix[r]))]
+                display_val = _eval_formula_with_row(new_val, row_data)
+                try:
+                    orig = panel._row_meta[r][1]
+                    if orig is not None and orig < len(self._formula_data["b"]):
+                        while len(self._formula_data["b"][orig]) <= c:
+                            self._formula_data["b"][orig].append("")
+                        self._formula_data["b"][orig][c] = new_val
+                except (IndexError, TypeError):
+                    pass
+                b_val = display_val
+            else:
+                b_val = new_val
+        status = _cell_status(a_val, b_val)
+        self._diff_matrix[r][c] = (status, a_val, b_val)
+
+        # 병합됨 셀을 수정했을 때 값이 달라지면 merged 상태 해제
+        if (r, c) in self._merged_cells:
+            if status != "same":
+                self._merged_cells.discard((r, c))
+
+        self._refresh_tables()
+
+        # _refresh_tables 후 populate가 선택을 초기화하므로 cell_edit 값 복원
+        panel.cell_edit.setText(new_val)
+
+        self._set_save_btn_state()
+        self.status.showMessage(
+            f"셀 ({r+1}행, {get_column_letter(c+1)}열) 편집됨 — 저장 버튼을 눌러 파일에 반영하세요."
+        )
+
+    def _undo(self):
+        if not self._undo_stack:
+            return
+        entry = self._undo_stack.pop()
+
+        # 병합 준비(stage) 되돌리기
+        if entry[0] == "stage":
+            _, cells, _ = entry
+            for cell in cells:
+                self._staged.pop(cell, None)
+                self.panel_a._staged_display.pop(cell, None)
+                self.panel_b._staged_display.pop(cell, None)
+            self.panel_a.table.clearSelection()
+            self.panel_b.table.clearSelection()
+            self.panel_a._selected_cell = None
+            self.panel_b._selected_cell = None
+            self._refresh_tables()
+            self._set_save_btn_state()
+            return
+
+        side, r, c, old_val, mode = entry
+        panel = self.panel_a if side == "a" else self.panel_b
+
+        if mode == "preview":
+            data = self._preview_data.get(side, [])
+            if r < len(data) and c < len(data[r]):
+                data[r][c] = old_val
+            self._edited[side].pop((r, c), None)
+            panel._edited_values.pop((r, c), None)
+            panel.preview(data)
+            panel.cell_edit.setText(old_val)
+            self._set_save_btn_state()
+        else:
+            if r >= len(self._diff_matrix) or c >= len(self._diff_matrix[r]):
+                return
+            self._edited[side].pop((r, c), None)
+            panel._edited_values.pop((r, c), None)
+            _, a_val, b_val = self._diff_matrix[r][c]
+            if side == "a":
+                a_val = old_val
+            else:
+                b_val = old_val
+            status = _cell_status(a_val, b_val)
+            self._diff_matrix[r][c] = (status, a_val, b_val)
+            if (r, c) in self._merged_cells and status != "same":
+                self._merged_cells.discard((r, c))
+            # _refresh_tables 전에 선택 상태를 초기화해야
+            # populate 후 itemSelectionChanged 발화 시 자동 적용 로직이 cell_edit 값을
+            # 엉뚱한 셀에 쓰는 것을 막을 수 있다.
+            self.panel_a.table.clearSelection()
+            self.panel_b.table.clearSelection()
+            self.panel_a._selected_cell = None
+            self.panel_b._selected_cell = None
+            self._refresh_tables()
+            panel.cell_edit.clear()
+            panel.cell_edit.setEnabled(False)
+            self._set_save_btn_state()
+
+    # ── 유틸 ──────────────────────────────────────────────────────────────────
+
+    def _refresh_tables(self):
+        self.panel_a.populate(self._diff_matrix, self._merged_cells, self._staged,
+                              self._diff_row_meta, self._excluded_cols)
+        self.panel_b.populate(self._diff_matrix, self._merged_cells, self._staged,
+                              self._diff_row_meta, self._excluded_cols)
+        self._apply_diff_filter()
+
+    def _effective_status(self, r: int, c: int) -> str:
+        """제외 열은 강제로 'same' 으로 노출 — _diff_matrix 원본은 보존."""
+        if c in self._excluded_cols:
+            return "same"
+        return self._diff_matrix[r][c][0]
+
+    def _on_columns_exclude_set(self, cols: list, exclude: bool):
+        """헤더 우클릭 → cols 일괄 제외/해제."""
+        if not cols:
+            return
+        if exclude:
+            new_cols = [c for c in cols if c not in self._excluded_cols]
+            for c in new_cols:
+                self._excluded_cols.add(c)
+            # 새로 제외된 열들의 기존 staged 항목 자동 해제.
+            new_set = set(new_cols)
+            staged_keys = [k for k in self._staged if k[1] in new_set]
+            for key in staged_keys:
+                del self._staged[key]
+                self.panel_a._staged_display.pop(key, None)
+                self.panel_b._staged_display.pop(key, None)
+        else:
+            for c in cols:
+                self._excluded_cols.discard(c)
+        self.panel_a.table.set_excluded_cols(self._excluded_cols)
+        self.panel_b.table.set_excluded_cols(self._excluded_cols)
+        self._refresh_tables()
+        self._set_save_btn_state()
+        changed = self._count_changed()
+        excl_letters = ", ".join(get_column_letter(c + 1) for c in sorted(self._excluded_cols))
+        excl_msg = excl_letters if excl_letters else "없음"
+        self.status.showMessage(
+            f"검사 제외 열: {excl_msg}  |  변경된 셀: {changed}개"
+        )
+
+    def _sync_selection(self, src: ExcelTableWidget, dst: ExcelTableWidget):
+        if self._syncing_selection or src._populating or dst._populating:
+            return
+        self._syncing_selection = True
+        try:
+            dst.mirror_selection(src.get_selected_cells())
+            # mirror_selection 중 _populating=True라 _on_table_selection_changed가 막히므로
+            # 반대쪽 패널의 cell_edit을 수동으로 갱신
+            dst_panel = self.panel_a if dst is self.panel_a.table else self.panel_b
+            dst_panel._sync_cell_edit()
+        finally:
+            self._syncing_selection = False
+
+    def _count_changed(self) -> int:
+        excl = self._excluded_cols
+        return sum(
+            1
+            for r, row in enumerate(self._diff_matrix)
+            for c, (st, *_) in enumerate(row)
+            if st != "same" and c not in excl
+        )
+
+    def _set_save_btn_state(self, enabled: bool = True):
+        # b_to_a staged → A 파일에 쓸 내용 / a_to_b staged → B 파일에 쓸 내용
+        has_a = (any(v == "b_to_a" for v in self._staged.values())
+                 or bool(self._edited.get("a")))
+        has_b = (any(v == "a_to_b" for v in self._staged.values())
+                 or bool(self._edited.get("b")))
+
+        # JSON/uasset 등 비-xlsx 파일은 저장 미지원 → 버튼 강제 비활성화 + 툴팁 안내
+        def _xlsx_ok(path: str) -> bool:
+            return (not path) or os.path.splitext(path)[1].lower() in _EXCEL_EXTS
+        path_a = self.panel_a.get_path()
+        path_b = self.panel_b.get_path()
+        a_writable = _xlsx_ok(path_a)
+        b_writable = _xlsx_ok(path_b)
+
+        self.panel_a.save_btn.setEnabled(enabled and has_a and a_writable)
+        self.panel_b.save_btn.setEnabled(enabled and has_b and b_writable)
+        self.panel_a.save_btn.setToolTip(
+            "파일 저장" if a_writable
+            else "JSON/uasset은 비교 전용 — 저장은 Excel(.xlsx/.xls/.xlsm)만 지원"
+        )
+        self.panel_b.save_btn.setToolTip(
+            "파일 저장" if b_writable
+            else "JSON/uasset은 비교 전용 — 저장은 Excel(.xlsx/.xls/.xlsm)만 지원"
+        )
+
+    def _on_file_loaded(self, side: str, path: str):
+        either = bool(self.panel_a.get_path()) or bool(self.panel_b.get_path())
+        self.refresh_btn.setEnabled(either)
+        both = bool(self.panel_a.get_path()) and bool(self.panel_b.get_path())
+        if both:
+            self._run_compare()
+        else:
+            self._run_preview(side, path)
+
+    def _set_buttons_enabled(self, enabled: bool):
+        has_diff = enabled and bool(self._diff_matrix)
+        self.diff_only_btn.setEnabled(has_diff)
+        self.prev_diff_btn.setEnabled(has_diff)
+        self.next_diff_btn.setEnabled(has_diff)
+        self._set_find_enabled(has_diff)
+        self._set_save_btn_state(enabled)
+
+    def _set_find_enabled(self, enabled: bool):
+        for w in (self.find_edit, self.find_case_btn, self.find_word_btn,
+                  self.find_prev_btn, self.find_next_btn):
+            w.setEnabled(enabled)
+
