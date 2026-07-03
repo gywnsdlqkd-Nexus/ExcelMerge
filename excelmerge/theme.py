@@ -69,7 +69,7 @@ APP_QSS = """
                 padding: 2px 6px; background: #fff;
             }
             CellEditWidget:disabled { background: #f5f5f5; color: #aaa; }
-            QTableWidget { border: 1px solid #ddd; gridline-color: #e0e0e0; }
+            QTableView { border: 1px solid #ddd; gridline-color: #e0e0e0; }
             QHeaderView::section {
                 background: #e8eaf0; border: none;
                 border-right: 1px solid #ccc; border-bottom: 1px solid #ccc;

@@ -10,7 +10,7 @@ from PyQt5.QtGui import QKeySequence
 
 from .theme import DROP_HIGHLIGHT_QSS, MENU_QSS, ui_font
 from .widgets import (
-    CellEditWidget, DropLineEdit, ExcelTableWidget, _extract_supported_path,
+    CellEditWidget, DropLineEdit, ExcelTableView, _extract_supported_path,
 )
 
 
@@ -86,8 +86,11 @@ class FilePanel(QWidget):
         line.setFrameShadow(QFrame.Sunken)
         layout.addWidget(line)
 
-        self.table = ExcelTableWidget(side)
-        self.table.itemSelectionChanged.connect(self._on_table_selection_changed)
+        self.table = ExcelTableView(side)
+        # QTableView에는 itemSelectionChanged가 없다 — selectionModel은 ctor에서
+        # 1회 생성 후 교체되지 않으므로 여기서 connect해도 안전하다.
+        self.table.selectionModel().selectionChanged.connect(
+            lambda *_: self._on_table_selection_changed())
         self.table.edit_focus_requested.connect(self._focus_cell_edit)
         self.table.delete_cell_requested.connect(self._on_delete_cell_requested)
         layout.addWidget(self.table)
@@ -119,8 +122,7 @@ class FilePanel(QWidget):
         if self._selected_cell is not None:
             current_text = self.cell_edit.text()
             pr, pc = self._selected_cell
-            item = self.table.item(pr, pc)
-            original_text = item.text() if item else ""
+            original_text = self.table.model().display_text(pr, pc)
             original_formula = self._get_formula(pr, pc)
             staged_override = self._staged_display.get((pr, pc))
             if (current_text != original_text
@@ -128,15 +130,20 @@ class FilePanel(QWidget):
                     and (staged_override is None or current_text != staged_override)):
                 self._apply_cell_edit()
 
-        items = self.table.selectedItems()
-        if len(items) == 1:
-            item = items[0]
-            r, c = item.row(), item.column()
+        self._refresh_cell_edit_from_selection()
+
+    def _refresh_cell_edit_from_selection(self):
+        """현재 선택 셀에 맞게 cell_edit 값/활성 상태를 갱신."""
+        model = self.table.model()
+        sm = self.table.selectionModel()
+        indexes = sm.selectedIndexes() if sm is not None else []
+        if len(indexes) == 1:
+            r, c = indexes[0].row(), indexes[0].column()
             self._selected_cell = (r, c)
-            rgb = ExcelTableWidget._rgb(item)
-            if rgb in (ExcelTableWidget._STAGED_RGB, ExcelTableWidget._MERGED_RGB):
+            display = model.display_text(r, c)
+            if model.cell_kind(r, c) in ("staged", "merged"):
                 override = self._staged_display.get((r, c))
-                self.cell_edit.setText(override if override is not None else item.text())
+                self.cell_edit.setText(override if override is not None else display)
             else:
                 # 직접 편집된 값이 있으면 최우선 표시
                 edited_val = self._edited_values.get((r, c))
@@ -144,7 +151,7 @@ class FilePanel(QWidget):
                     self.cell_edit.setText(edited_val)
                 else:
                     formula = self._get_formula(r, c)
-                    self.cell_edit.setText(formula if formula else item.text())
+                    self.cell_edit.setText(formula if formula else display)
             self.cell_edit.setEnabled(True)
         else:
             self._selected_cell = None
@@ -161,27 +168,7 @@ class FilePanel(QWidget):
 
     def _sync_cell_edit(self):
         """mirror_selection 후 cell_edit 값을 현재 선택 셀에 맞게 갱신 (포커스 이동 없음)."""
-        items = self.table.selectedItems()
-        if len(items) == 1:
-            item = items[0]
-            r, c = item.row(), item.column()
-            self._selected_cell = (r, c)
-            rgb = ExcelTableWidget._rgb(item)
-            if rgb in (ExcelTableWidget._STAGED_RGB, ExcelTableWidget._MERGED_RGB):
-                override = self._staged_display.get((r, c))
-                self.cell_edit.setText(override if override is not None else item.text())
-            else:
-                edited_val = self._edited_values.get((r, c))
-                if edited_val is not None:
-                    self.cell_edit.setText(edited_val)
-                else:
-                    formula = self._get_formula(r, c)
-                    self.cell_edit.setText(formula if formula else item.text())
-            self.cell_edit.setEnabled(True)
-        else:
-            self._selected_cell = None
-            self.cell_edit.clear()
-            self.cell_edit.setEnabled(False)
+        self._refresh_cell_edit_from_selection()
 
     def dragEnterEvent(self, event):
         if _extract_supported_path(event.mimeData()):
@@ -238,23 +225,21 @@ class FilePanel(QWidget):
 
     def _copy_selection_as_tsv(self):
         """선택 셀들을 bounding box 기준 TSV로 클립보드에 복사."""
-        items = self.table.selectedItems()
-        if not items:
+        model = self.table.model()
+        sm = self.table.selectionModel()
+        indexes = sm.selectedIndexes() if sm is not None else []
+        if not indexes:
             return
-        rows = [it.row() for it in items]
-        cols = [it.column() for it in items]
+        rows = [idx.row() for idx in indexes]
+        cols = [idx.column() for idx in indexes]
         r1, r2 = min(rows), max(rows)
         c1, c2 = min(cols), max(cols)
-        sel_set = {(it.row(), it.column()) for it in items}
+        sel_set = {(idx.row(), idx.column()) for idx in indexes}
         lines = []
         for r in range(r1, r2 + 1):
             cells = []
             for c in range(c1, c2 + 1):
-                if (r, c) in sel_set:
-                    it = self.table.item(r, c)
-                    cells.append(it.text() if it is not None else "")
-                else:
-                    cells.append("")
+                cells.append(model.display_text(r, c) if (r, c) in sel_set else "")
             lines.append("\t".join(cells))
         QApplication.clipboard().setText("\r\n".join(lines))
 

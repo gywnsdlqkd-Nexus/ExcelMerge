@@ -2,24 +2,20 @@
 import os
 
 from PyQt5.QtWidgets import (
-    QApplication, QTableWidget, QTableWidgetItem, QLineEdit, QPlainTextEdit,
+    QApplication, QTableView, QAbstractItemView, QLineEdit, QPlainTextEdit,
     QHeaderView, QMenu, QStyle, QScrollBar, QStyleOptionSlider,
 )
 from PyQt5.QtCore import (
     Qt, pyqtSignal, QItemSelection, QItemSelectionRange, QItemSelectionModel,
 )
-from PyQt5.QtGui import QColor, QPainter
+from PyQt5.QtGui import QPainter
 from openpyxl.utils import get_column_letter
 
+from .diff_model import DiffTableModel
+from .diff_model import EXTRA_ROWS as EXTRA_ROWS, EXTRA_COLS as EXTRA_COLS  # 재노출
 from .loaders import _SUPPORTED_EXTS
-from .theme import (
-    CHANGED_RGBS, DIFF_COLORS, MENU_QSS, MERGED_RGB, MINIMAP_MARKER_COLOR,
-    STAGED_RGB, ui_font,
-)
+from .theme import MENU_QSS, MINIMAP_MARKER_COLOR, ui_font
 
-
-EXTRA_ROWS = 20   # 데이터 끝에 추가할 빈 행 수
-EXTRA_COLS = 5    # 데이터 끝에 추가할 빈 열 수
 
 # 자동 컬럼 너비 상한 — 150px
 # 데이터가 긴 셀 때문에 열이 화면을 가리지 않도록 제한.
@@ -80,7 +76,7 @@ class MinimapScrollBar(QScrollBar):
         painter.end()
 
 
-class ExcelTableWidget(QTableWidget):
+class ExcelTableView(QTableView):
     stage_requested   = pyqtSignal(str)   # direction: 'a_to_b' | 'b_to_a'
     unstage_requested = pyqtSignal()
     key_col_changed   = pyqtSignal(int)   # 키 열 변경 요청
@@ -90,14 +86,11 @@ class ExcelTableWidget(QTableWidget):
     edit_focus_requested = pyqtSignal()   # F2 — 패널 cell_edit 으로 포커스 이동 요청
     delete_cell_requested = pyqtSignal(int, int)   # (row, col) — Delete 키로 셀 값 비우기 요청
 
-    # theme 파생 별칭 — Step 4(모델/뷰 전환)에서 제거 예정
-    _STAGED_RGB  = STAGED_RGB
-    _MERGED_RGB  = MERGED_RGB
-    _CHANGED_RGBS = CHANGED_RGBS
-
     def __init__(self, side: str, parent=None):
         super().__init__(parent)
         self.side = side
+        self._model = DiffTableModel(side, self)
+        self.setModel(self._model)   # selectionModel은 여기서 1회 생성 — 이후 교체 없음
         self._populating = False
         self._key_col: int = 0
         self._excluded_cols: set[int] = set()   # 변경 검사 제외 열 (display 인덱스)
@@ -113,9 +106,9 @@ class ExcelTableWidget(QTableWidget):
         self.horizontalHeader().setSectionResizeMode(QHeaderView.Interactive)
         self.verticalHeader().setDefaultSectionSize(22)
         self.setAlternatingRowColors(False)
-        self.setEditTriggers(QTableWidget.NoEditTriggers)
-        self.setSelectionBehavior(QTableWidget.SelectItems)
-        self.setSelectionMode(QTableWidget.ExtendedSelection)
+        self.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        self.setSelectionBehavior(QAbstractItemView.SelectItems)
+        self.setSelectionMode(QAbstractItemView.ExtendedSelection)
         self.setContextMenuPolicy(Qt.CustomContextMenu)
         self.customContextMenuRequested.connect(self._show_context_menu)
         self.horizontalHeader().setContextMenuPolicy(Qt.CustomContextMenu)
@@ -130,6 +123,25 @@ class ExcelTableWidget(QTableWidget):
         # 헤더 클릭 시 anchor 갱신 (Shift 없는 클릭 → 새 anchor / Shift 클릭 → 기존 유지)
         self.horizontalHeader().sectionPressed.connect(self._on_h_section_pressed)
         self.verticalHeader().sectionPressed.connect(self._on_v_section_pressed)
+
+    # ── QTableWidget 호환 헬퍼 ───────────────────────────────────────────────
+    def rowCount(self) -> int:
+        return self._model.rowCount()
+
+    def columnCount(self) -> int:
+        return self._model.columnCount()
+
+    def _current_cell(self) -> tuple:
+        """QTableWidget.currentRow()/currentColumn() 대응 — 무효 시 (-1, -1)."""
+        idx = self.currentIndex()
+        return (idx.row(), idx.column()) if idx.isValid() else (-1, -1)
+
+    def _set_current_cell(self, r: int, c: int):
+        """QTableWidget.setCurrentCell() 대응.
+        setCurrentIndex()는 호출 시점의 키보드 수정자에 따라 선택을 확장/클리어하는
+        기존 setCurrentCell과 완전히 같은 경로(selectionCommand)를 탄다."""
+        if 0 <= r < self.rowCount() and 0 <= c < self.columnCount():
+            self.setCurrentIndex(self._model.index(r, c))
 
     # ── 사용자 헤더 크기 추적 ────────────────────────────────────────────────
     def _on_section_h_resized(self, logical_index: int, _old: int, new_size: int):
@@ -199,82 +211,81 @@ class ExcelTableWidget(QTableWidget):
         finally:
             self._applying_sizes = False
 
-    def _clip_auto_column_widths(self):
-        """자동 너비 계산 결과를 MAX_AUTO_COL_WIDTH_PX 로 상한 클립.
-        sectionResized 시그널이 사용자 변경으로 오해해 _user_col_widths 에
-        저장하지 않도록 _applying_sizes 플래그로 차단한다."""
+    def _auto_size_columns(self, max_samples: int = 200):
+        """resizeColumnsToContents() 대체 — 셀 텍스트를 샘플링해 QFontMetrics로 측정.
+        모든 자동 폭이 MAX_AUTO_COL_WIDTH_PX로 클립되므로 상한 도달 시 조기 종료해
+        전체 셀 스캔을 피한다. sectionResized가 사용자 변경으로 기록되지 않도록
+        _applying_sizes 플래그로 차단."""
+        m = self._model
+        rows = m.data_rows
+        cols = self.columnCount()
+        if cols <= 0:
+            return
+        fm = self.fontMetrics()
+        adv = fm.horizontalAdvance
+        pad = 14   # 셀 좌우 여백+그리드 근사
+        if rows <= max_samples:
+            sample_rows = range(rows)
+        else:
+            stride = max(1, rows // (max_samples - 100))
+            sample_rows = list(range(100)) + list(range(100, rows, stride))
+        hdr_fm = self.horizontalHeader().fontMetrics()
         self._applying_sizes = True
         try:
-            for c in range(self.columnCount()):
-                if self.columnWidth(c) > MAX_AUTO_COL_WIDTH_PX:
-                    self.setColumnWidth(c, MAX_AUTO_COL_WIDTH_PX)
+            for c in range(cols):
+                w = hdr_fm.horizontalAdvance(get_column_letter(c + 1)) + 24
+                for r in sample_rows:
+                    text = m.display_text(r, c)
+                    if not text:
+                        continue
+                    if "\n" in text:
+                        tw = max(adv(line) for line in text.split("\n"))
+                    else:
+                        tw = adv(text)
+                    if tw + pad > w:
+                        w = tw + pad
+                        if w >= MAX_AUTO_COL_WIDTH_PX:
+                            break
+                self.setColumnWidth(c, min(w, MAX_AUTO_COL_WIDTH_PX))
         finally:
             self._applying_sizes = False
 
-    @staticmethod
-    def _rgb(item) -> tuple:
-        c = item.background().color()
-        return (c.red(), c.green(), c.blue())
-
     def set_key_col(self, col: int):
         self._key_col = col
-        self._refresh_key_col_header()
+        self._model.set_key_col(col)
 
     def set_excluded_cols(self, cols: set):
-        """외부(MainWindow)에서 제외 열 집합을 갱신하고 헤더를 다시 칠한다."""
+        """외부(MainWindow)에서 제외 열 집합을 갱신하고 헤더/셀을 다시 칠한다."""
         self._excluded_cols = set(cols)
-        self._refresh_key_col_header()
+        self._model.set_excluded_cols(self._excluded_cols)
 
-    def _refresh_key_col_header(self):
-        for c in range(self.columnCount()):
-            item = self.horizontalHeaderItem(c)
-            if item is None:
-                item = QTableWidgetItem()
-                self.setHorizontalHeaderItem(c, item)
-            col_letter = get_column_letter(c + 1)
-            if c == self._key_col:
-                item.setText(f"🔑 {col_letter}")
-                item.setBackground(QColor(255, 213, 0))
-                item.setForeground(QColor(0, 0, 0))
-                item.setFont(ui_font(9, bold=True))
-            elif c in self._excluded_cols:
-                item.setText(f"⊘ {col_letter}")
-                item.setBackground(QColor(220, 220, 220))
-                item.setForeground(QColor(140, 140, 140))
-                item.setFont(ui_font(9))
-            else:
-                item.setText(col_letter)
-                item.setBackground(QColor(232, 234, 240))
-                item.setForeground(QColor(0, 0, 0))
-                item.setFont(ui_font(9))
+    def _col_stage_kinds(self, col: int) -> tuple:
+        """지정 열에 변경/스테이징 셀이 있는지 (has_changed, has_staged) 반환."""
+        m = self._model
+        has_changed = has_staged = False
+        for r in range(m.data_rows):
+            kind = m.cell_kind(r, col)
+            if kind == "changed":
+                has_changed = True
+            elif kind == "staged":
+                has_staged = True
+            if has_changed and has_staged:
+                break
+        return has_changed, has_staged
 
-    def _col_stage_items(self, col: int):
-        """지정 열의 변경·스테이징된 아이템 목록 반환."""
-        changed, staged = [], []
-        for r in range(self.rowCount()):
-            item = self.item(r, col)
-            if item is None:
-                continue
-            rgb = self._rgb(item)
-            if rgb in self._CHANGED_RGBS:
-                changed.append(item)
-            elif rgb == self._STAGED_RGB:
-                staged.append(item)
-        return changed, staged
-
-    def _row_stage_items(self, row: int):
-        """지정 행의 변경·스테이징된 아이템 목록 반환."""
-        changed, staged = [], []
-        for c in range(self.columnCount()):
-            item = self.item(row, c)
-            if item is None:
-                continue
-            rgb = self._rgb(item)
-            if rgb in self._CHANGED_RGBS:
-                changed.append(item)
-            elif rgb == self._STAGED_RGB:
-                staged.append(item)
-        return changed, staged
+    def _row_stage_kinds(self, row: int) -> tuple:
+        """지정 행에 변경/스테이징 셀이 있는지 (has_changed, has_staged) 반환."""
+        m = self._model
+        has_changed = has_staged = False
+        for c in range(m.data_cols):
+            kind = m.cell_kind(row, c)
+            if kind == "changed":
+                has_changed = True
+            elif kind == "staged":
+                has_staged = True
+            if has_changed and has_staged:
+                break
+        return has_changed, has_staged
 
     def _select_col(self, col: int):
         """해당 열 전체 셀을 선택 상태로 설정."""
@@ -338,11 +349,11 @@ class ExcelTableWidget(QTableWidget):
         else:
             multi_action_exclude = not is_excluded
 
-        changed, staged = self._col_stage_items(col)
+        col_changed, col_staged = self._col_stage_kinds(col)
         # 제외된 열은 stage/unstage 액션을 표시하지 않는다 — 변경이 'same'으로 노출되므로 의미 없음.
         # 다중 선택일 땐 stage/key 액션은 단순화를 위해 노출하지 않는다 (제외 토글만 일괄 처리).
-        has_changed = bool(changed) and not is_excluded and not multi
-        has_staged  = bool(staged) and not is_excluded and not multi
+        has_changed = col_changed and not is_excluded and not multi
+        has_staged  = col_staged and not is_excluded and not multi
 
         menu = QMenu(self)
         menu.setStyleSheet(MENU_QSS)
@@ -406,9 +417,7 @@ class ExcelTableWidget(QTableWidget):
         if row < 0:
             return
 
-        changed, staged = self._row_stage_items(row)
-        has_changed = bool(changed)
-        has_staged  = bool(staged)
+        has_changed, has_staged = self._row_stage_kinds(row)
 
         if not has_changed and not has_staged:
             return
@@ -440,12 +449,15 @@ class ExcelTableWidget(QTableWidget):
             self.unstage_requested.emit()
 
     def _show_context_menu(self, pos):
-        selected = self.selectedItems()
+        sm = self.selectionModel()
+        selected = sm.selectedIndexes() if sm is not None else []
         if not selected:
             return
 
-        has_changed = any(self._rgb(item) in self._CHANGED_RGBS for item in selected)
-        has_staged  = any(self._rgb(item) == self._STAGED_RGB   for item in selected)
+        m = self._model
+        kinds = {m.cell_kind(idx.row(), idx.column()) for idx in selected}
+        has_changed = "changed" in kinds
+        has_staged  = "staged" in kinds
 
         if not has_changed and not has_staged:
             return
@@ -475,8 +487,7 @@ class ExcelTableWidget(QTableWidget):
     def _is_empty_cell(self, r: int, c: int) -> bool:
         if r < 0 or r >= self.rowCount() or c < 0 or c >= self.columnCount():
             return True
-        item = self.item(r, c)
-        return item is None or item.text() == ""
+        return self._model.display_text(r, c) == ""
 
     def _jump_target(self, r: int, c: int, dr: int, dc: int) -> tuple:
         """엑셀의 Ctrl+방향키 시맨틱으로 점프 대상 (row, col) 반환."""
@@ -512,21 +523,32 @@ class ExcelTableWidget(QTableWidget):
         return (nr, nc)
 
     def _select_range(self, r1: int, c1: int, r2: int, c2: int):
-        """(r1,c1)~(r2,c2) 직사각형의 셀들을 모두 선택 상태로 설정 (기존 선택은 클리어)."""
+        """(r1,c1)~(r2,c2) 직사각형의 셀들을 모두 선택 상태로 설정 (기존 선택은 클리어).
+        기존 구현은 아이템이 있는 셀만 선택됐으므로 데이터 영역으로 클램프한다."""
+        sm = self.selectionModel()
+        m = self._model
+        if sm is None:
+            return
         rs, re_ = sorted((r1, r2))
         cs, ce_ = sorted((c1, c2))
-        self.clearSelection()
-        for rr in range(rs, re_ + 1):
-            for cc in range(cs, ce_ + 1):
-                item = self.item(rr, cc)
-                if item is not None:
-                    item.setSelected(True)
+        rs, cs = max(0, rs), max(0, cs)
+        re_ = min(re_, m.data_rows - 1)
+        ce_ = min(ce_, m.data_cols - 1)
+        if rs > re_ or cs > ce_:
+            self.clearSelection()
+            return
+        sel = QItemSelection(m.index(rs, cs), m.index(re_, ce_))
+        sm.select(sel, QItemSelectionModel.ClearAndSelect)
 
     def _has_changed_selection(self) -> bool:
-        return any(self._rgb(it) in self._CHANGED_RGBS for it in self.selectedItems())
+        m = self._model
+        return any(m.cell_kind(idx.row(), idx.column()) == "changed"
+                   for idx in self.selectionModel().selectedIndexes())
 
     def _has_staged_selection(self) -> bool:
-        return any(self._rgb(it) == self._STAGED_RGB for it in self.selectedItems())
+        m = self._model
+        return any(m.cell_kind(idx.row(), idx.column()) == "staged"
+                   for idx in self.selectionModel().selectedIndexes())
 
     # ── 헤더 다중 선택 지원 ──────────────────────────────────────────────────
     def _full_columns_selected(self) -> list[int]:
@@ -581,8 +603,7 @@ class ExcelTableWidget(QTableWidget):
         shift = bool(mods & Qt.ShiftModifier)
         alt = bool(mods & Qt.AltModifier)
 
-        cur_r = self.currentRow()
-        cur_c = self.currentColumn()
+        cur_r, cur_c = self._current_cell()
 
         # ── 헤더 다중 선택 확장 (Shift / Ctrl+Shift + 방향키) ──
         # 열 전체가 선택된 상태에서 Shift+←/→ 는 열 단위 확장,
@@ -615,7 +636,7 @@ class ExcelTableWidget(QTableWidget):
                     delta = -1 if key == Qt.Key_Left else 1
                     target = max(0, min(self.columnCount() - 1, cur_end + delta))
                 self._select_column_range(self._header_anchor_col, target)
-                self.setCurrentCell(max(0, cur_r if cur_r >= 0 else 0), target)
+                self._set_current_cell(max(0, cur_r if cur_r >= 0 else 0), target)
                 event.accept(); return
 
             if is_row_mode and self.columnCount() > 0 and self.rowCount() > 0:
@@ -637,7 +658,7 @@ class ExcelTableWidget(QTableWidget):
                     delta = -1 if key == Qt.Key_Up else 1
                     target = max(0, min(self.rowCount() - 1, cur_end + delta))
                 self._select_row_range(self._header_anchor_row, target)
-                self.setCurrentCell(target, max(0, cur_c if cur_c >= 0 else 0))
+                self._set_current_cell(target, max(0, cur_c if cur_c >= 0 else 0))
                 event.accept(); return
 
         # 헤더 anchor 라이프사이클: 헤더 모드 분기에 들어가지 않은 일반 키는 anchor 무효화
@@ -669,10 +690,11 @@ class ExcelTableWidget(QTableWidget):
 
         # ── Delete: 단일 셀 값 비우기 ──
         if key == Qt.Key_Delete and not ctrl and not shift and not alt:
-            sel = self.selectedItems()
+            sm = self.selectionModel()
+            sel = sm.selectedIndexes() if sm is not None else []
             if len(sel) == 1:
-                it = sel[0]
-                self.delete_cell_requested.emit(it.row(), it.column())
+                idx = sel[0]
+                self.delete_cell_requested.emit(idx.row(), idx.column())
                 event.accept(); return
             # 다중 선택 일괄 삭제는 사고 위험 — 무시 (기본 동작도 막음)
             event.accept(); return
@@ -680,7 +702,7 @@ class ExcelTableWidget(QTableWidget):
         # ── Enter/Return: 엑셀처럼 아래 칸으로 이동 ──
         if key in (Qt.Key_Return, Qt.Key_Enter) and not ctrl and not alt:
             if cur_r >= 0 and cur_c >= 0 and cur_r + 1 < self.rowCount():
-                self.setCurrentCell(cur_r + 1, cur_c)
+                self._set_current_cell(cur_r + 1, cur_c)
             event.accept(); return
 
         # ── Shift+Space: 행 전체, Ctrl+Space: 열 전체 ──
@@ -704,9 +726,9 @@ class ExcelTableWidget(QTableWidget):
                 ar = anchor.row() if anchor.isValid() else cur_r
                 ac = anchor.column() if anchor.isValid() else cur_c
                 self._select_range(ar, ac, tr, tc)
-                self.setCurrentCell(tr, tc)
+                self._set_current_cell(tr, tc)
             else:
-                self.setCurrentCell(tr, tc)
+                self._set_current_cell(tr, tc)
             event.accept(); return
 
         # ── Ctrl+Home / Ctrl+End ──
@@ -714,13 +736,13 @@ class ExcelTableWidget(QTableWidget):
             tr, tc = 0, 0
             if shift and cur_r >= 0 and cur_c >= 0:
                 self._select_range(cur_r, cur_c, tr, tc)
-            self.setCurrentCell(tr, tc)
+            self._set_current_cell(tr, tc)
             event.accept(); return
         if ctrl and not alt and key == Qt.Key_End:
             tr, tc = max(0, self.rowCount() - 1), max(0, self.columnCount() - 1)
             if shift and cur_r >= 0 and cur_c >= 0:
                 self._select_range(cur_r, cur_c, tr, tc)
-            self.setCurrentCell(tr, tc)
+            self._set_current_cell(tr, tc)
             event.accept(); return
 
         super().keyPressEvent(event)
@@ -732,86 +754,25 @@ class ExcelTableWidget(QTableWidget):
             self._safe_clear()
             return
 
-        merged_set = merged_set or set()
-        staged     = staged or {}
-        excluded_cols = set(excluded_cols) if excluded_cols else set()
-        self._excluded_cols = set(excluded_cols)
-        rows = len(diff_matrix)
-        cols = len(diff_matrix[0])
-        side_idx = 0 if which == "a" else 1
-
-        total_cols = cols + EXTRA_COLS
-        total_rows = rows + EXTRA_ROWS
+        self._excluded_cols = set(excluded_cols) if excluded_cols else set()
         self._populating = True
         self._header_anchor_col = None
         self._header_anchor_row = None
-        # 렌더 최적화: 매 setItem 마다 발생하는 리페인트/시그널/정렬 갱신을 차단
         prev_updates = self.updatesEnabled()
-        prev_sorting = self.isSortingEnabled()
         self.setUpdatesEnabled(False)
-        self.setSortingEnabled(False)
-        self.blockSignals(True)
         try:
-            self.setRowCount(0)           # 기존 셀·selectionModel 완전 초기화
-            self.setColumnCount(total_cols)
-            self.setRowCount(total_rows)
-            self.setHorizontalHeaderLabels([get_column_letter(c + 1) for c in range(total_cols)])
-            if row_meta:
-                labels = []
-                for r in range(rows):
-                    orig = row_meta[r][side_idx] if r < len(row_meta) else None
-                    labels.append(str(orig + 1) if orig is not None else "-")
-                for r in range(EXTRA_ROWS):
-                    labels.append(str(rows + r + 1))
-                self.setVerticalHeaderLabels(labels)
-            else:
-                self.setVerticalHeaderLabels([str(r + 1) for r in range(total_rows)])
-
-            # 핫루프 — 지역변수 바인딩으로 속성 조회 비용 절감
-            _set_item = self.setItem
-            _is_a = (which == "a")
-            _align = Qt.AlignVCenter | Qt.AlignLeft
-            _color_merged = DIFF_COLORS["merged"]
-            _color_staged = DIFF_COLORS["staged"]
-            _diff_colors = DIFF_COLORS
-            for r in range(rows):
-                row_data = diff_matrix[r]
-                for c in range(cols):
-                    status, a_val, b_val = row_data[c]
-                    direction = staged.get((r, c))
-                    if direction == "a_to_b":
-                        text = a_val
-                    elif direction == "b_to_a":
-                        text = b_val
-                    else:
-                        text = a_val if _is_a else b_val
-                    item = QTableWidgetItem(text)
-                    if c in excluded_cols:
-                        # 제외 열은 status 무관하게 흰색(same) 처리
-                        color = _diff_colors["same"]
-                    elif (r, c) in merged_set:
-                        color = _color_merged
-                    elif direction is not None:
-                        color = _color_staged
-                    else:
-                        color = _diff_colors[status]
-                    item.setBackground(color)
-                    item.setTextAlignment(_align)
-                    _set_item(r, c, item)
-            # 1) 모든 열에 자동 너비 계산 → 2) MAX_AUTO_COL_WIDTH_PX 상한 클립
-            # → 3) 사용자가 직접 조정한 열/행만 그 위에 덮어쓰기 (상한 무시).
-            # 이렇게 해야 "사용자가 만진 적 없는 열"은 재비교 후에도 상한 유지된다.
-            # 새로고침(_run_refresh)은 _user_col_widths/_user_row_heights를 미리 비우므로
-            # 그 경로에서는 3)이 건너뛰어져 모든 열이 디폴트(자동+상한)로 복귀한다.
-            # ※ resizeColumnsToContents()가 sectionResized를 발화시키므로 _populating=True 유지 필수.
-            self.resizeColumnsToContents()
-            self._clip_auto_column_widths()
+            # 모델 리셋 한 번 — 셀 아이템 생성 없음(O(1)). 리셋이 selectionModel
+            # 시그널(선택 해제)을 발화시키므로 _populating 플래그 유지가 필수.
+            self._model.set_diff_data(diff_matrix, row_meta, staged or {},
+                                      merged_set or set(), self._excluded_cols)
+            # 1) 샘플 기반 자동 너비(상한 클립 포함)
+            # → 2) 사용자가 직접 조정한 열/행만 그 위에 덮어쓰기 (상한 무시).
+            # 새로고침(_run_refresh)은 _user_col_widths/_user_row_heights를 미리
+            # 비우므로 그 경로에서는 2)가 건너뛰어져 디폴트로 복귀한다.
+            self._auto_size_columns()
             if self._user_col_widths or self._user_row_heights:
                 self._apply_user_sizes()
-            self._refresh_key_col_header()
         finally:
-            self.blockSignals(False)
-            self.setSortingEnabled(prev_sorting)
             self.setUpdatesEnabled(prev_updates)
             self._populating = False
 
@@ -819,63 +780,34 @@ class ExcelTableWidget(QTableWidget):
         if not data:
             self._safe_clear()
             return
-        rows = len(data)
-        cols = max((len(r) for r in data), default=0)
-        total_cols = cols + EXTRA_COLS
-        total_rows = rows + EXTRA_ROWS
-
         self._populating = True
         self._header_anchor_col = None
         self._header_anchor_row = None
         prev_updates = self.updatesEnabled()
-        prev_sorting = self.isSortingEnabled()
         self.setUpdatesEnabled(False)
-        self.setSortingEnabled(False)
-        self.blockSignals(True)
         try:
-            self.setRowCount(0)
-            self.setColumnCount(total_cols)
-            self.setRowCount(total_rows)
-            self.setHorizontalHeaderLabels([get_column_letter(c + 1) for c in range(total_cols)])
-            self.setVerticalHeaderLabels([str(r + 1) for r in range(total_rows)])
-            _set_item = self.setItem
-            _align = Qt.AlignVCenter | Qt.AlignLeft
-            _bg = DIFF_COLORS["same"]
-            for r in range(rows):
-                row = data[r]
-                row_len = len(row)
-                for c in range(cols):
-                    val = row[c] if c < row_len else ""
-                    item = QTableWidgetItem(val)
-                    item.setBackground(_bg)
-                    item.setTextAlignment(_align)
-                    _set_item(r, c, item)
-
-            # populate()와 동일: 자동 너비 → 상한 클립 → 사용자 수동값 복원.
-            # resizeColumnsToContents()의 sectionResized가 사용자 변경으로
-            # 오해되지 않도록 _populating=True 상태에서 수행한다.
-            self.resizeColumnsToContents()
-            self._clip_auto_column_widths()
+            self._model.set_preview_data(data)
+            self._auto_size_columns()
             if self._user_col_widths or self._user_row_heights:
                 self._apply_user_sizes()
         finally:
-            self.blockSignals(False)
-            self.setSortingEnabled(prev_sorting)
             self.setUpdatesEnabled(prev_updates)
             self._populating = False
 
     def _safe_clear(self):
         self._populating = True
         try:
-            self.setRowCount(0)
-            self.setColumnCount(0)
+            self._model.clear()
         finally:
             self._populating = False
         self._header_anchor_col = None
         self._header_anchor_row = None
 
     def get_selected_cells(self) -> set:
-        return {(item.row(), item.column()) for item in self.selectedItems()}
+        sm = self.selectionModel()
+        if sm is None:
+            return set()
+        return {(idx.row(), idx.column()) for idx in sm.selectedIndexes()}
 
     def mirror_selection(self, cells: set):
         # 셀 집합을 row별로 묶고 연속 column 구간을 QItemSelectionRange로 만들어

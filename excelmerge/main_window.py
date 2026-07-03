@@ -15,7 +15,7 @@ from .diff_engine import _cell_status, compute_diff
 from .loaders import _EXCEL_EXTS, _eval_formula_with_row
 from .panels import FilePanel
 from .theme import APP_QSS, DIFF_COLORS, load_app_icon, ui_font
-from .widgets import ExcelTableWidget, MinimapScrollBar
+from .widgets import EXTRA_ROWS, ExcelTableView, MinimapScrollBar
 from .workers import LoadWorker, PreviewWorker, StagedMergeWorker
 from .xlsx_writer import _is_file_locked
 
@@ -244,13 +244,15 @@ class MainWindow(QMainWindow):
         self.panel_a.table.columns_exclude_set.connect(self._on_columns_exclude_set)
         self.panel_b.table.columns_exclude_set.connect(self._on_columns_exclude_set)
 
-        # 선택 셀 동기화
+        # 선택 셀 동기화 — QTableView는 itemSelectionChanged가 없으므로
+        # selectionModel().selectionChanged 사용 (selectionModel은 ctor에서 1회 생성)
         self._syncing_selection = False
-        self.panel_a.table.itemSelectionChanged.connect(
-            lambda: self._sync_selection(self.panel_a.table, self.panel_b.table)
+        self._hidden_rows = set()   # '변경 행만 보기' 필터의 델타 캐시
+        self.panel_a.table.selectionModel().selectionChanged.connect(
+            lambda *_: self._sync_selection(self.panel_a.table, self.panel_b.table)
         )
-        self.panel_b.table.itemSelectionChanged.connect(
-            lambda: self._sync_selection(self.panel_b.table, self.panel_a.table)
+        self.panel_b.table.selectionModel().selectionChanged.connect(
+            lambda *_: self._sync_selection(self.panel_b.table, self.panel_a.table)
         )
 
         # 패널 내 저장 버튼 연결
@@ -279,6 +281,7 @@ class MainWindow(QMainWindow):
         self._edited = {"a": {}, "b": {}}
         self._preview_data = {"a": [], "b": []}
         self._formula_data = {"a": [], "b": []}
+        self._clear_row_filter()   # diff 모드의 숨김 행이 미리보기에 남지 않도록 해제
         self._excluded_cols.clear()
         self.panel_a.table.set_excluded_cols(self._excluded_cols)
         self.panel_b.table.set_excluded_cols(self._excluded_cols)
@@ -460,27 +463,57 @@ class MainWindow(QMainWindow):
         if not self._diff_matrix:
             self._update_minimap()
             return
-        # setRowHidden은 sectionResized(_, _, 0)을 emit해 _user_row_heights를 0으로
-        # 오염시킨다. _applying_sizes 플래그로 _on_section_v_resized 측 기록을 차단.
-        tables = (self.panel_a.table, self.panel_b.table)
-        for tbl in tables:
-            tbl._applying_sizes = True
-        try:
-            excl = self._excluded_cols
+        # 목표 숨김 집합 계산 후, 캐시(_hidden_rows)와 달라진 행만 토글한다.
+        # QTableView는 모델 리셋 후에도 숨김 상태를 유지하므로 캐시는 리셋과 무관하게
+        # 유효하다. 현재 뷰 범위 밖 캐시 항목은 나중에 행이 다시 늘어날 때를 위해 보존.
+        excl = self._excluded_cols
+        desired = set()
+        if self._diff_only:
             for r, row in enumerate(self._diff_matrix):
-                is_header = (r == 0)   # 최상단 행은 항상 표시
+                if r == 0:   # 최상단 행(헤더)은 항상 표시
+                    continue
                 is_changed = any(
                     status != "same"
                     for c, (status, *_) in enumerate(row)
                     if c not in excl
                 )
-                hidden = self._diff_only and not is_changed and not is_header
-                self.panel_a.table.setRowHidden(r, hidden)
-                self.panel_b.table.setRowHidden(r, hidden)
+                if not is_changed:
+                    desired.add(r)
+        view_rows = len(self._diff_matrix) + EXTRA_ROWS
+        flips = {r for r in (self._hidden_rows ^ desired) if r < view_rows}
+        if flips:
+            # setRowHidden은 sectionResized(_, _, 0)을 emit해 _user_row_heights를
+            # 오염시킨다. _applying_sizes 플래그로 _on_section_v_resized 기록을 차단.
+            tables = (self.panel_a.table, self.panel_b.table)
+            for tbl in tables:
+                tbl._applying_sizes = True
+            try:
+                for r in flips:
+                    hidden = r in desired
+                    self.panel_a.table.setRowHidden(r, hidden)
+                    self.panel_b.table.setRowHidden(r, hidden)
+            finally:
+                for tbl in tables:
+                    tbl._applying_sizes = False
+        self._hidden_rows = {r for r in self._hidden_rows if r >= view_rows} | desired
+        self._update_minimap()
+
+    def _clear_row_filter(self):
+        """숨김 행을 전부 해제 — 미리보기 전환 등 diff 모드를 떠날 때 호출.
+        QTableView는 리셋 후에도 숨김을 기억하므로 명시적으로 풀어야 한다."""
+        if not self._hidden_rows:
+            return
+        tables = (self.panel_a.table, self.panel_b.table)
+        for tbl in tables:
+            tbl._applying_sizes = True
+        try:
+            for r in self._hidden_rows:
+                self.panel_a.table.setRowHidden(r, False)
+                self.panel_b.table.setRowHidden(r, False)
         finally:
             for tbl in tables:
                 tbl._applying_sizes = False
-        self._update_minimap()
+        self._hidden_rows = set()
 
     # ── 변경 셀 탐색(이전/다음) ───────────────────────────────────────────────
 
@@ -510,7 +543,7 @@ class MainWindow(QMainWindow):
         """현재 선택 셀(우선순위: panel_a → panel_b).
         없으면 (0, -1) 반환 — A1부터 검사하기 위한 sentinel."""
         for tbl in (self.panel_a.table, self.panel_b.table):
-            r, c = tbl.currentRow(), tbl.currentColumn()
+            r, c = tbl._current_cell()
             if r >= 0 and c >= 0:
                 return (r, c)
         return (0, -1)
@@ -537,10 +570,9 @@ class MainWindow(QMainWindow):
         r, c = target
         # 양쪽 패널 동기 선택 + 화면 중앙으로 스크롤
         for tbl in (self.panel_a.table, self.panel_b.table):
-            tbl.setCurrentCell(r, c)
-            item = tbl.item(r, c)
-            if item:
-                tbl.scrollToItem(item, QAbstractItemView.PositionAtCenter)
+            tbl._set_current_cell(r, c)
+            if tbl.model().is_data_cell(r, c):
+                tbl.scrollTo(tbl.model().index(r, c), QAbstractItemView.PositionAtCenter)
 
     # ── 찾기 ──
     def _make_find_icon(self, kind: str) -> QIcon:
@@ -609,16 +641,16 @@ class MainWindow(QMainWindow):
         if not self._diff_matrix:
             return
         excl = self._excluded_cols
-        tbl_a, tbl_b = self.panel_a.table, self.panel_b.table
+        tbl_a = self.panel_a.table
+        models = (tbl_a.model(), self.panel_b.table.model())
         for r, row in enumerate(self._diff_matrix):
             if tbl_a.isRowHidden(r):
                 continue
             for c in range(len(row)):
                 if c in excl:
                     continue
-                for tbl in (tbl_a, tbl_b):
-                    item = tbl.item(r, c)
-                    if item is not None and match(item.text()):
+                for model in models:
+                    if match(model.display_text(r, c)):
                         yield (r, c)
                         break
 
@@ -646,10 +678,9 @@ class MainWindow(QMainWindow):
         r, c = target
         # 양쪽 패널 동기 선택 + 화면 중앙으로 스크롤
         for tbl in (self.panel_a.table, self.panel_b.table):
-            tbl.setCurrentCell(r, c)
-            item = tbl.item(r, c)
-            if item:
-                tbl.scrollToItem(item, QAbstractItemView.PositionAtCenter)
+            tbl._set_current_cell(r, c)
+            if tbl.model().is_data_cell(r, c):
+                tbl.scrollTo(tbl.model().index(r, c), QAbstractItemView.PositionAtCenter)
         idx = cells.index(target) + 1
         self.status.showMessage(f'찾기: "{term}" {idx}/{len(cells)}개 일치{wrapped}')
 
@@ -774,9 +805,8 @@ class MainWindow(QMainWindow):
             self.panel_a._staged_display[r, c] = a_display
             self.panel_b._staged_display[r, c] = b_display
 
-        self._refresh_tables()
-        self.panel_a.table.clearSelection()
-        self.panel_b.table.clearSelection()
+        self._notify_cells(cells)
+        self._silent_clear_selection()
         self.panel_a._selected_cell = None
         self.panel_b._selected_cell = None
         self.panel_a.cell_edit.clear()
@@ -807,7 +837,9 @@ class MainWindow(QMainWindow):
             self.panel_b._staged_display.pop(cell, None)
         sel_a = self.panel_a.table.get_selected_cells()
         sel_b = self.panel_b.table.get_selected_cells()
-        self._refresh_tables()
+        self._notify_cells(removed)
+        # 부분 갱신이라 선택이 유지되지만, 기존 복원 경로를 그대로 태워
+        # cell_edit 동기화까지 동일하게 맞춘다.
         if sel_a:
             self.panel_a.table.mirror_selection(sel_a)
         if sel_b:
@@ -967,7 +999,8 @@ class MainWindow(QMainWindow):
         self._edited[side] = {}
         self._merged_cells |= staged_cells
 
-        self._refresh_tables()
+        self._notify_cells(staged_cells)
+        self._silent_clear_selection()
         self._set_buttons_enabled(True)
         self.status.showMessage(f"저장 완료 — {count}개 셀 저장됨")
         QMessageBox.information(self, "저장 완료", f"{count}개 셀이 파일에 저장됐습니다.")
@@ -1073,9 +1106,10 @@ class MainWindow(QMainWindow):
             if status != "same":
                 self._merged_cells.discard((r, c))
 
-        self._refresh_tables()
+        self._notify_cells({(r, c)})
+        self._silent_clear_selection()
 
-        # _refresh_tables 후 populate가 선택을 초기화하므로 cell_edit 값 복원
+        # 선택 초기화 후에도 cell_edit에는 방금 입력한 값을 유지 (기존 동작)
         panel.cell_edit.setText(new_val)
 
         self._set_save_btn_state()
@@ -1095,11 +1129,10 @@ class MainWindow(QMainWindow):
                 self._staged.pop(cell, None)
                 self.panel_a._staged_display.pop(cell, None)
                 self.panel_b._staged_display.pop(cell, None)
-            self.panel_a.table.clearSelection()
-            self.panel_b.table.clearSelection()
+            self._silent_clear_selection()
             self.panel_a._selected_cell = None
             self.panel_b._selected_cell = None
-            self._refresh_tables()
+            self._notify_cells(cells)
             self._set_save_btn_state()
             return
 
@@ -1129,14 +1162,12 @@ class MainWindow(QMainWindow):
             self._diff_matrix[r][c] = (status, a_val, b_val)
             if (r, c) in self._merged_cells and status != "same":
                 self._merged_cells.discard((r, c))
-            # _refresh_tables 전에 선택 상태를 초기화해야
-            # populate 후 itemSelectionChanged 발화 시 자동 적용 로직이 cell_edit 값을
-            # 엉뚱한 셀에 쓰는 것을 막을 수 있다.
-            self.panel_a.table.clearSelection()
-            self.panel_b.table.clearSelection()
+            # 갱신 전에 선택 상태를 조용히 초기화해야 selectionChanged 발화 시
+            # 자동 적용 로직이 cell_edit 값을 엉뚱한 셀에 쓰는 것을 막을 수 있다.
+            self._silent_clear_selection()
             self.panel_a._selected_cell = None
             self.panel_b._selected_cell = None
-            self._refresh_tables()
+            self._notify_cells({(r, c)})
             panel.cell_edit.clear()
             panel.cell_edit.setEnabled(False)
             self._set_save_btn_state()
@@ -1144,11 +1175,30 @@ class MainWindow(QMainWindow):
     # ── 유틸 ──────────────────────────────────────────────────────────────────
 
     def _refresh_tables(self):
+        """전체 리셋 경로 — 매트릭스 자체가 재계산됐을 때만 사용.
+        stage/unstage/편집/저장확정/undo는 _notify_cells()로 부분 갱신한다."""
         self.panel_a.populate(self._diff_matrix, self._merged_cells, self._staged,
                               self._diff_row_meta, self._excluded_cols)
         self.panel_b.populate(self._diff_matrix, self._merged_cells, self._staged,
                               self._diff_row_meta, self._excluded_cols)
         self._apply_diff_filter()
+
+    def _notify_cells(self, cells):
+        """부분 갱신 경로 — 상태(dict/set)는 이미 변형된 뒤 호출된다.
+        양쪽 모델에 최소 범위 dataChanged만 방출해 전체 repopulate를 피한다."""
+        self.panel_a.table.model().notify_cells(cells)
+        self.panel_b.table.model().notify_cells(cells)
+        self._apply_diff_filter()   # 행 가시성은 status에 의존 — 델타 방식이라 저렴
+
+    def _silent_clear_selection(self):
+        """기존 populate가 선택을 조용히 초기화하던 동작 재현.
+        _populating 플래그로 selectionChanged 핸들러(자동 편집 적용)를 차단한다."""
+        for tbl in (self.panel_a.table, self.panel_b.table):
+            tbl._populating = True
+            try:
+                tbl.clearSelection()
+            finally:
+                tbl._populating = False
 
     def _effective_status(self, r: int, c: int) -> str:
         """제외 열은 강제로 'same' 으로 노출 — _diff_matrix 원본은 보존."""
@@ -1174,9 +1224,11 @@ class MainWindow(QMainWindow):
         else:
             for c in cols:
                 self._excluded_cols.discard(c)
+        # set_excluded_cols가 모델에 열 단위 dataChanged + 헤더 갱신을 방출한다
         self.panel_a.table.set_excluded_cols(self._excluded_cols)
         self.panel_b.table.set_excluded_cols(self._excluded_cols)
-        self._refresh_tables()
+        self._silent_clear_selection()
+        self._apply_diff_filter()
         self._set_save_btn_state()
         changed = self._count_changed()
         excl_letters = ", ".join(get_column_letter(c + 1) for c in sorted(self._excluded_cols))
@@ -1185,7 +1237,7 @@ class MainWindow(QMainWindow):
             f"검사 제외 열: {excl_msg}  |  변경된 셀: {changed}개"
         )
 
-    def _sync_selection(self, src: ExcelTableWidget, dst: ExcelTableWidget):
+    def _sync_selection(self, src: ExcelTableView, dst: ExcelTableView):
         if self._syncing_selection or src._populating or dst._populating:
             return
         self._syncing_selection = True
