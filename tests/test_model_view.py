@@ -209,10 +209,57 @@ def test_view_behaviors():
     print("PASS test_view_behaviors")
 
 
+def test_header_multiselect_extension():
+    """헤더 선택 후 Shift+방향키(한 칸)·Ctrl+Shift+방향키(끝까지) 확장 회귀 테스트.
+    수정 전에는 setCurrentIndex의 SelectCurrent가 범위 선택을 1셀로 붕괴시켰다."""
+    from PyQt5.QtTest import QTest
+    from excelmerge.main_window import MainWindow
+    app = QApplication.instance() or QApplication([])
+    win = MainWindow()
+    dm = [[("same", f"h{c}", f"h{c}") for c in range(5)]]
+    for r in range(1, 8):
+        dm.append([("same", f"a{r}{c}", f"a{r}{c}") for c in range(5)])
+    meta = [(r, r) for r in range(len(dm))]
+    win._diff_matrix, win._diff_row_meta = dm, meta
+    win._refresh_tables()
+    tbl = win.panel_a.table
+    win.show()
+    app.processEvents()
+    row_n = tbl.rowCount()
+    col_n = tbl.columnCount()
+
+    # 열 헤더: B열 선택 → Shift+→ 두 번 → [1,2,3]
+    tbl._select_col(1)
+    tbl._on_h_section_pressed(1)
+    QTest.keyClick(tbl, Qt.Key_Right, Qt.ShiftModifier)
+    assert tbl._full_columns_selected() == [1, 2], tbl._full_columns_selected()
+    QTest.keyClick(tbl, Qt.Key_Right, Qt.ShiftModifier)
+    assert tbl._full_columns_selected() == [1, 2, 3], tbl._full_columns_selected()
+    assert len(tbl.selectionModel().selectedIndexes()) == 3 * row_n
+    # Shift+← 로 앵커 방향 축소
+    QTest.keyClick(tbl, Qt.Key_Left, Qt.ShiftModifier)
+    assert tbl._full_columns_selected() == [1, 2], tbl._full_columns_selected()
+    # Ctrl+Shift+→ 끝까지
+    QTest.keyClick(tbl, Qt.Key_Right, Qt.ControlModifier | Qt.ShiftModifier)
+    assert tbl._full_columns_selected() == list(range(1, col_n)), tbl._full_columns_selected()
+
+    # 행 헤더: 3행 선택 → Shift+↓ → [2,3], Ctrl+Shift+↓ 끝까지
+    tbl._select_row(2)
+    tbl._on_v_section_pressed(2)
+    QTest.keyClick(tbl, Qt.Key_Down, Qt.ShiftModifier)
+    assert tbl._full_rows_selected() == [2, 3], tbl._full_rows_selected()
+    QTest.keyClick(tbl, Qt.Key_Down, Qt.ControlModifier | Qt.ShiftModifier)
+    assert tbl._full_rows_selected() == list(range(2, row_n)), tbl._full_rows_selected()
+
+    win.close()
+    print("PASS test_header_multiselect_extension")
+
+
 if __name__ == "__main__":
     test_golden_roles()
     test_headers()
     test_notify_equals_fresh_populate()
     test_cell_kind()
     test_view_behaviors()
+    test_header_multiselect_extension()
     print("ALL MODEL/VIEW TESTS PASS")

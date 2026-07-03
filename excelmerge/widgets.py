@@ -143,6 +143,15 @@ class ExcelTableView(QTableView):
         if 0 <= r < self.rowCount() and 0 <= c < self.columnCount():
             self.setCurrentIndex(self._model.index(r, c))
 
+    def _set_current_cell_no_update(self, r: int, c: int):
+        """선택을 건드리지 않고 currentIndex만 이동.
+        헤더 범위 선택 직후에 사용 — setCurrentIndex()는 눌려 있는 Shift를 보고
+        SelectCurrent(앵커 사각형으로 선택 대체)를 적용해 방금 만든 열/행 전체
+        선택을 붕괴시키므로, NoUpdate로 현재 셀만 옮긴다."""
+        sm = self.selectionModel()
+        if sm is not None and 0 <= r < self.rowCount() and 0 <= c < self.columnCount():
+            sm.setCurrentIndex(self._model.index(r, c), QItemSelectionModel.NoUpdate)
+
     # ── 사용자 헤더 크기 추적 ────────────────────────────────────────────────
     def _on_section_h_resized(self, logical_index: int, _old: int, new_size: int):
         # populate 중이거나 다른 패널에서 강제 적용 중인 변경은 무시
@@ -636,7 +645,7 @@ class ExcelTableView(QTableView):
                     delta = -1 if key == Qt.Key_Left else 1
                     target = max(0, min(self.columnCount() - 1, cur_end + delta))
                 self._select_column_range(self._header_anchor_col, target)
-                self._set_current_cell(max(0, cur_r if cur_r >= 0 else 0), target)
+                self._set_current_cell_no_update(max(0, cur_r if cur_r >= 0 else 0), target)
                 event.accept(); return
 
             if is_row_mode and self.columnCount() > 0 and self.rowCount() > 0:
@@ -658,7 +667,7 @@ class ExcelTableView(QTableView):
                     delta = -1 if key == Qt.Key_Up else 1
                     target = max(0, min(self.rowCount() - 1, cur_end + delta))
                 self._select_row_range(self._header_anchor_row, target)
-                self._set_current_cell(target, max(0, cur_c if cur_c >= 0 else 0))
+                self._set_current_cell_no_update(target, max(0, cur_c if cur_c >= 0 else 0))
                 event.accept(); return
 
         # 헤더 anchor 라이프사이클: 헤더 모드 분기에 들어가지 않은 일반 키는 anchor 무효화
