@@ -436,6 +436,53 @@ def test_find_in_preview_mode():
     print("PASS test_find_in_preview_mode")
 
 
+def test_load_xlsx_with_empty_fill():
+    """styles.xml에 빈 <fill/>이 있는 파일도 로드되는지 회귀 테스트.
+    openpyxl은 빈 fill에 'expected Fill' TypeError를 던진다 — 정제 후 재시도해야 함."""
+    import io
+    import re
+    import zipfile
+    import tempfile
+    import datetime
+    import openpyxl
+    from excelmerge.loaders import load_sheet_with_formulas_any, _open_workbook
+
+    tmpdir = tempfile.mkdtemp()
+    good = os.path.join(tmpdir, "good.xlsx")
+    wb = openpyxl.Workbook(); ws = wb.active
+    ws.append(["날짜", "값", "수식"])
+    ws.append([datetime.datetime(2026, 7, 3), 10, "=B2*2"])
+    wb.save(good)
+
+    # styles.xml의 fills를 빈 <fill/>로 손상
+    with zipfile.ZipFile(good) as z:
+        styles = z.read("xl/styles.xml").decode("utf-8")
+    bad_styles = re.sub(r"<fills.*?</fills>", '<fills count="1"><fill/></fills>',
+                        styles, flags=re.S)
+    bad = os.path.join(tmpdir, "bad.xlsx")
+    with zipfile.ZipFile(good) as zin, zipfile.ZipFile(bad, "w") as zout:
+        for it in zin.infolist():
+            data = bad_styles.encode() if it.filename == "xl/styles.xml" else zin.read(it.filename)
+            zout.writestr(it, data)
+
+    # 손상 파일이 표준 openpyxl 로드에선 실패함을 확인
+    failed = False
+    try:
+        openpyxl.load_workbook(bad, read_only=True, data_only=True)
+    except TypeError:
+        failed = True
+    assert failed, "테스트 전제(빈 fill이 openpyxl을 깨뜨림) 불성립"
+
+    # _open_workbook / 디스패처는 정제 후 성공해야 함
+    _open_workbook(bad, data_only=True).close()
+    values, formulas = load_sheet_with_formulas_any(bad)
+    assert values[0] == ["날짜", "값", "수식"], values[0]
+    assert values[1][1] == "10", values[1]
+    assert "2026" in values[1][0], f"날짜 보존 실패: {values[1][0]}"
+    assert formulas[1][2] == "=B2*2", formulas[1]
+    print("PASS test_load_xlsx_with_empty_fill")
+
+
 def test_cell_status_one_sided_is_added():
     """한쪽 파일에만 값이 있으면 방향과 무관하게 'added'로 분류."""
     from excelmerge.diff_engine import _cell_status
@@ -488,4 +535,5 @@ if __name__ == "__main__":
     test_find_in_preview_mode()
     test_cell_status_one_sided_is_added()
     test_filter_keeps_merged_rows_visible()
+    test_load_xlsx_with_empty_fill()
     print("ALL MODEL/VIEW TESTS PASS")

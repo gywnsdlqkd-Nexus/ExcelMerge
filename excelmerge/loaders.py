@@ -1,7 +1,9 @@
 """파일 로더 — xlsx/json 로딩과 확장자 디스패처 (excel_diff_merge.py에서 분리)."""
+import io
 import os
 import re
 import json
+import zipfile
 
 import openpyxl
 from openpyxl.utils import column_index_from_string
@@ -11,6 +13,37 @@ from .uasset_parser import load_uasset_as_matrix
 
 _EXCEL_EXTS = {".xlsx", ".xls", ".xlsm", ".xlsb"}
 _SUPPORTED_EXTS = _EXCEL_EXTS | {".json", ".uasset"}
+
+# 빈 <fill/> — openpyxl이 로드 시 거부(TypeError: expected ...Fill)하는 요소
+_EMPTY_FILL_RE = re.compile(r"<fill\s*/>|<fill>\s*</fill>")
+
+
+def _sanitize_xlsx_bytes(path: str) -> io.BytesIO:
+    """styles.xml의 빈 <fill/>을 유효한 최소 형태로 치환한 zip 사본을 메모리로 반환.
+    비-Excel 툴이 만든 파일에서 openpyxl이 fill 파싱에 실패하는 경우의 폴백.
+    numFmt 등 나머지는 그대로라 날짜/숫자 파싱은 정상 유지된다."""
+    buf = io.BytesIO()
+    with zipfile.ZipFile(path) as zin, \
+         zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zout:
+        for item in zin.infolist():
+            data = zin.read(item.filename)
+            if item.filename == "xl/styles.xml":
+                text = data.decode("utf-8", errors="replace")
+                text = _EMPTY_FILL_RE.sub("<fill><patternFill/></fill>", text)
+                data = text.encode("utf-8")
+            zout.writestr(item, data)
+    buf.seek(0)
+    return buf
+
+
+def _open_workbook(path: str, data_only: bool):
+    """openpyxl 워크북 로드 — 빈 fill 등으로 스타일 파싱이 실패하면 styles.xml을
+    정제한 사본으로 1회 재시도한다. 정상 파일은 예외 경로를 타지 않는다."""
+    try:
+        return openpyxl.load_workbook(path, read_only=True, data_only=data_only)
+    except TypeError:
+        return openpyxl.load_workbook(
+            _sanitize_xlsx_bytes(path), read_only=True, data_only=data_only)
 
 
 def _cell_to_str(v) -> str:
@@ -25,7 +58,7 @@ def _cell_to_str(v) -> str:
 def _load_values_pass(path: str, progress=None) -> list[list[str]]:
     """data_only=True 패스 — 캐시된 계산값 시트.
     progress(done_rows, total_rows_or_None)를 500행마다 호출한다."""
-    wb = openpyxl.load_workbook(path, read_only=True, data_only=True)
+    wb = _open_workbook(path, data_only=True)
     try:
         ws = wb.worksheets[0]
         # read_only 모드의 max_row는 dimension 헤더에서 읽는다 — 없으면 None(불확정)
@@ -47,7 +80,7 @@ def _load_values_pass(path: str, progress=None) -> list[list[str]]:
 
 def _load_formulas_pass(path: str) -> tuple[list[list[str]], list[tuple[int, int, str]]]:
     """data_only=False 패스 — 수식 텍스트 시트 + '='로 시작하는 셀 좌표 목록."""
-    wb = openpyxl.load_workbook(path, read_only=True, data_only=False)
+    wb = _open_workbook(path, data_only=False)
     try:
         ws = wb.worksheets[0]
         formulas: list[list[str]] = []
