@@ -550,6 +550,8 @@ class MainWindow(QMainWindow):
             tbl._set_current_cell(r, c)
             if tbl.model().is_data_cell(r, c):
                 tbl.scrollTo(tbl.model().index(r, c), QAbstractItemView.PositionAtCenter)
+        # 이동 후 테이블에 키보드 포커스를 줘 방향키로 이어서 탐색 가능하게 한다
+        self.panel_a.table.setFocus()
 
     # ── 찾기 ──
     def _make_find_icon(self, kind: str) -> QIcon:

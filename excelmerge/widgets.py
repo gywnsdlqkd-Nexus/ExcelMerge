@@ -8,7 +8,7 @@ from PyQt5.QtWidgets import (
 from PyQt5.QtCore import (
     Qt, pyqtSignal, QItemSelection, QItemSelectionRange, QItemSelectionModel,
 )
-from PyQt5.QtGui import QPainter
+from PyQt5.QtGui import QPainter, QPalette
 from openpyxl.utils import get_column_letter
 
 from .diff_model import DiffTableModel
@@ -107,6 +107,15 @@ class ExcelTableView(QTableView):
         self.setEditTriggers(QAbstractItemView.NoEditTriggers)
         self.setSelectionBehavior(QAbstractItemView.SelectItems)
         self.setSelectionMode(QAbstractItemView.ExtendedSelection)
+        # 선택색 통일: 포커스가 없어도(버튼/단축키로 이동 시) 비활성 하이라이트가
+        # 회색으로 흐려지지 않고 활성(클릭 선택)과 같은 파랑으로 보이게 한다.
+        pal = self.palette()
+        for grp in (QPalette.Inactive, QPalette.Disabled):
+            pal.setColor(grp, QPalette.Highlight,
+                         pal.color(QPalette.Active, QPalette.Highlight))
+            pal.setColor(grp, QPalette.HighlightedText,
+                         pal.color(QPalette.Active, QPalette.HighlightedText))
+        self.setPalette(pal)
         self.setContextMenuPolicy(Qt.CustomContextMenu)
         self.customContextMenuRequested.connect(self._show_context_menu)
         self.horizontalHeader().setContextMenuPolicy(Qt.CustomContextMenu)

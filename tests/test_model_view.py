@@ -436,6 +436,46 @@ def test_find_in_preview_mode():
     print("PASS test_find_in_preview_mode")
 
 
+def test_goto_changed_focus_and_selection_color():
+    """이전/다음 변경점 이동 후: 테이블 포커스 이동 + 선택색이 활성/비활성 동일(파랑)."""
+    from PyQt5.QtGui import QPalette
+    from excelmerge.main_window import MainWindow
+    app = QApplication.instance() or QApplication([])
+    win = MainWindow()
+    dm = [[("same", "h", "h")]]
+    for r in range(1, 6):
+        ch = r in (1, 3, 5)
+        dm.append([("modified" if ch else "same", f"a{r}", f"b{r}" if ch else f"a{r}")])
+    win._diff_matrix = dm
+    win._diff_row_meta = [(r, r) for r in range(len(dm))]
+    win._refresh_tables()
+    win._set_buttons_enabled(True)
+    win.show()
+    app.processEvents()
+
+    for tbl in (win.panel_a.table, win.panel_b.table):
+        pal = tbl.palette()
+        act = pal.color(QPalette.Active, QPalette.Highlight).getRgb()
+        for grp in (QPalette.Inactive, QPalette.Disabled):
+            assert pal.color(grp, QPalette.Highlight).getRgb() == act, grp
+            assert (pal.color(grp, QPalette.HighlightedText).getRgb()
+                    == pal.color(QPalette.Active, QPalette.HighlightedText).getRgb())
+
+    # '전체 보기'에서 이동
+    win._diff_only = False
+    win._apply_diff_filter()
+    win._goto_changed(+1)
+    assert win.panel_a.table._current_cell() == (1, 0)
+    assert win.panel_a.table.get_selected_cells() == {(1, 0)}
+    assert win.panel_a.table.hasFocus(), "이동 후 테이블 포커스 안 됨"
+    win._goto_changed(+1)
+    assert win.panel_a.table._current_cell() == (3, 0)
+    # 반대 패널도 동일 셀 선택(동기화) — 색은 팔레트 통일로 동일 파랑
+    assert win.panel_b.table.get_selected_cells() == {(3, 0)}
+    win.close()
+    print("PASS test_goto_changed_focus_and_selection_color")
+
+
 def test_load_xlsx_with_empty_fill():
     """styles.xml에 빈 <fill/>이 있는 파일도 로드되는지 회귀 테스트.
     openpyxl은 빈 fill에 'expected Fill' TypeError를 던진다 — 정제 후 재시도해야 함."""
@@ -536,4 +576,5 @@ if __name__ == "__main__":
     test_cell_status_one_sided_is_added()
     test_filter_keeps_merged_rows_visible()
     test_load_xlsx_with_empty_fill()
+    test_goto_changed_focus_and_selection_color()
     print("ALL MODEL/VIEW TESTS PASS")
