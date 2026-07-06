@@ -183,15 +183,9 @@ def test_view_behaviors():
     assert max(r for r, _ in sel) == len(dm) - 1
     assert max(c for _, c in sel) == len(dm[0]) - 1
 
-    # 3. 모델 리셋 중 cell_edit 자동 적용 오발동 없음
-    fired = []
-    win.panel_a.cell_value_edited.connect(lambda r, c, v: fired.append((r, c, v)))
-    tbl._set_current_cell(1, 1)
-    app.processEvents()
-    win.panel_a.cell_edit.setText("draft-value")   # Enter 없이 입력만
-    win._refresh_tables()                          # 모델 리셋 → 선택 해제
-    app.processEvents()
-    assert not fired, f"리셋 중 자동 적용 발화: {fired}"
+    # 3. 셀 값 표시란은 읽기전용 (직접 편집 기능 제거됨)
+    assert win.panel_a.cell_edit.isReadOnly()
+    assert not hasattr(win.panel_a, "cell_value_edited")
 
     # 4. staged 오버라이드 텍스트가 표시/TSV에 반영
     assert tbl.model().display_text(1, 1) == "b1"   # a_to_b → a_val
@@ -370,6 +364,78 @@ def test_selection_mirror_compact_ranges():
     print("PASS test_selection_mirror_compact_ranges")
 
 
+def test_staging_color_with_empty_initial_state():
+    """비교 직후(스테이징 0개) 상태에서 병합 준비 시 색이 바뀌는지 회귀 테스트.
+    populate의 `staged or {}` falsy 체크가 빈 dict일 때 새 객체를 만들어
+    모델이 MainWindow 상태와 분리되던 버그."""
+    from excelmerge.main_window import MainWindow
+    from excelmerge.theme import DIFF_COLORS
+    app = QApplication.instance() or QApplication([])
+    win = MainWindow()
+    dm = [[("same", "h", "h")], [("modified", "x", "y")]]
+    win._diff_matrix = dm
+    win._diff_row_meta = [(0, 0), (1, 1)]
+    win._staged = {}            # 실제 흐름: 비교 직후엔 빈 dict
+    win._merged_cells = set()
+    win._refresh_tables()
+    model = win.panel_a.table.model()
+    assert model._staged is win._staged, "모델이 MainWindow staged와 분리됨"
+    assert model._merged is win._merged_cells, "모델이 merged_cells와 분리됨"
+    win._staged[(1, 0)] = "a_to_b"
+    win._notify_cells({(1, 0)})
+    bg = model.data(model.index(1, 0), Qt.BackgroundRole)
+    assert bg.getRgb() == DIFF_COLORS["staged"].getRgb(), bg.getRgb()
+    win.close()
+    print("PASS test_staging_color_with_empty_initial_state")
+
+
+def test_ctrl_jump_skips_hidden_rows():
+    """'변경 행만 보기' 상태에서 Ctrl+↓ 점프가 숨겨진 행에 착지하지 않는지."""
+    from PyQt5.QtTest import QTest
+    from excelmerge.main_window import MainWindow
+    app = QApplication.instance() or QApplication([])
+    win = MainWindow()
+    # 행 1, 4만 변경 — 필터 켜면 2, 3, 5는 숨겨짐 (행 0은 헤더로 항상 표시)
+    dm = [[("same", "h", "h")]]
+    for r in range(1, 6):
+        changed = r in (1, 4)
+        dm.append([("modified" if changed else "same", f"a{r}", f"b{r}" if changed else f"a{r}")])
+    win._diff_matrix = dm
+    win._diff_row_meta = [(r, r) for r in range(len(dm))]
+    win._refresh_tables()
+    win._diff_only = True
+    win._apply_diff_filter()
+    tbl = win.panel_a.table
+    win.show()
+    app.processEvents()
+    assert tbl.isRowHidden(2) and tbl.isRowHidden(3), "필터 전제 불성립"
+
+    tbl._move_current_cell(1, 0)
+    QTest.keyClick(tbl, Qt.Key_Down, Qt.ControlModifier)
+    r, c = tbl._current_cell()
+    assert not tbl.isRowHidden(r), f"숨겨진 행 {r}에 착지"
+    assert r == 4, f"기대 4행, 실제 {r}행"   # 1 다음 보이는 값 행
+    win.close()
+    print("PASS test_ctrl_jump_skips_hidden_rows")
+
+
+def test_find_in_preview_mode():
+    """파일 하나만 로드된 미리보기 상태에서도 Ctrl+F 검색이 동작하는지."""
+    from excelmerge.main_window import MainWindow
+    app = QApplication.instance() or QApplication([])
+    win = MainWindow()
+    win.panel_a.preview([["id", "name"], ["1", "apple"], ["2", "banana"]])
+    matches = list(win._iter_find_matches(win._make_find_matcher("banana")))
+    assert matches == [(2, 1)], matches
+    # diff 없이도 _goto_find가 이동시키는지
+    win.find_edit.setText("apple")
+    win._set_find_enabled(True)
+    win._goto_find(+1)
+    assert win.panel_a.table._current_cell() == (1, 1)
+    win.close()
+    print("PASS test_find_in_preview_mode")
+
+
 if __name__ == "__main__":
     test_golden_roles()
     test_headers()
@@ -379,4 +445,7 @@ if __name__ == "__main__":
     test_header_multiselect_extension()
     test_ctrl_jump_single_selection()
     test_selection_mirror_compact_ranges()
+    test_staging_color_with_empty_initial_state()
+    test_ctrl_jump_skips_hidden_rows()
+    test_find_in_preview_mode()
     print("ALL MODEL/VIEW TESTS PASS")

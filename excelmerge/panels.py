@@ -16,7 +16,6 @@ from .widgets import (
 
 class FilePanel(QWidget):
     file_loaded = pyqtSignal(str)
-    cell_value_edited = pyqtSignal(int, int, str)   # row, col, new_value
 
     def __init__(self, label: str, side: str, parent=None):
         super().__init__(parent)
@@ -66,20 +65,18 @@ class FilePanel(QWidget):
         file_row.addWidget(self.save_btn)
         layout.addLayout(file_row)
 
-        # 셀 값 편집 행 — 라벨은 표시하지 않고 입력란만 노출
+        # 셀 값 표시 행 — 선택 셀의 값/수식 확인용 (읽기전용, 직접 수정 불가)
         edit_row = QHBoxLayout()
         self.cell_edit = CellEditWidget()
-        self.cell_edit.setPlaceholderText("셀 선택 후 F2로 편집 (Enter 적용 / Alt+Enter 줄바꿈)")
+        self.cell_edit.setPlaceholderText("셀을 선택하면 값/수식이 여기에 표시됩니다")
         self.cell_edit.setFont(ui_font(9))
         self.cell_edit.setEnabled(False)
-        self.cell_edit.apply_requested.connect(self._apply_cell_edit)
         edit_row.addWidget(self.cell_edit)
         layout.addLayout(edit_row)
         self._selected_cell: tuple | None = None   # (row, col) 현재 선택 셀
         self._formula_data: list[list] = []
         self._row_meta: list = []   # [(orig_a_row, orig_b_row), ...]
         self._staged_display: dict[tuple, str] = {}   # (r,c) → 병합 준비 셀의 셀값란 표시 문자열
-        self._edited_values: dict[tuple, str] = {}   # (r,c) → 직접 편집된 값 (셀값란 표시 우선)
 
         line = QFrame()
         line.setFrameShape(QFrame.HLine)
@@ -91,8 +88,6 @@ class FilePanel(QWidget):
         # 1회 생성 후 교체되지 않으므로 여기서 connect해도 안전하다.
         self.table.selectionModel().selectionChanged.connect(
             lambda *_: self._on_table_selection_changed())
-        self.table.edit_focus_requested.connect(self._focus_cell_edit)
-        self.table.delete_cell_requested.connect(self._on_delete_cell_requested)
         layout.addWidget(self.table)
 
         copy_sc = QShortcut(QKeySequence("Ctrl+C"), self)
@@ -117,19 +112,6 @@ class FilePanel(QWidget):
     def _on_table_selection_changed(self):
         if self.table._populating:
             return
-        # 다른 셀로 이동 시 편집 중인 값 자동 적용
-        # cell_edit 값과 비교할 때 수식 표시 중일 수 있으므로 원래 표시값도 함께 확인
-        if self._selected_cell is not None:
-            current_text = self.cell_edit.text()
-            pr, pc = self._selected_cell
-            original_text = self.table.model().display_text(pr, pc)
-            original_formula = self._get_formula(pr, pc)
-            staged_override = self._staged_display.get((pr, pc))
-            if (current_text != original_text
-                    and current_text != original_formula
-                    and (staged_override is None or current_text != staged_override)):
-                self._apply_cell_edit()
-
         self._refresh_cell_edit_from_selection()
 
     def _refresh_cell_edit_from_selection(self):
@@ -144,26 +126,13 @@ class FilePanel(QWidget):
                 override = self._staged_display.get((r, c))
                 self.cell_edit.setText(override if override is not None else display)
             else:
-                # 직접 편집된 값이 있으면 최우선 표시
-                edited_val = self._edited_values.get((r, c))
-                if edited_val is not None:
-                    self.cell_edit.setText(edited_val)
-                else:
-                    formula = self._get_formula(r, c)
-                    self.cell_edit.setText(formula if formula else display)
+                formula = self._get_formula(r, c)
+                self.cell_edit.setText(formula if formula else display)
             self.cell_edit.setEnabled(True)
         else:
             self._selected_cell = None
             self.cell_edit.clear()
             self.cell_edit.setEnabled(False)
-
-    def _apply_cell_edit(self):
-        if self._selected_cell is None:
-            return
-        r, c = self._selected_cell
-        new_val = self.cell_edit.text()
-        self.cell_value_edited.emit(r, c, new_val)
-        self.cell_edit.clearFocus()
 
     def _sync_cell_edit(self):
         """mirror_selection 후 cell_edit 값을 현재 선택 셀에 맞게 갱신 (포커스 이동 없음)."""
@@ -241,18 +210,6 @@ class FilePanel(QWidget):
                 cells.append(model.display_text(r, c) if (r, c) in sel_set else "")
             lines.append("\t".join(cells))
         QApplication.clipboard().setText("\r\n".join(lines))
-
-    def _focus_cell_edit(self):
-        if self.cell_edit.isEnabled():
-            self.cell_edit.setFocus()
-            # 전체 선택해서 바로 덮어쓰기 가능하게
-            cursor = self.cell_edit.textCursor()
-            cursor.select(cursor.Document)
-            self.cell_edit.setTextCursor(cursor)
-
-    def _on_delete_cell_requested(self, r: int, c: int):
-        """Delete 키로 단일 셀 값 비우기 — 기존 편집 흐름(cell_value_edited) 재사용."""
-        self.cell_value_edited.emit(r, c, "")
 
     def _on_path_context_menu(self, pos):
         menu = QMenu(self)

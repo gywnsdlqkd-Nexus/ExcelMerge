@@ -83,8 +83,6 @@ class ExcelTableView(QTableView):
     columns_exclude_set = pyqtSignal(list, bool)   # (cols, exclude) — True: 제외 추가, False: 제외 해제
     column_resized    = pyqtSignal(int, int)   # (col, new_width) — 사용자 조작에 의한 변경만
     row_resized       = pyqtSignal(int, int)   # (row, new_height) — 사용자 조작에 의한 변경만
-    edit_focus_requested = pyqtSignal()   # F2 — 패널 cell_edit 으로 포커스 이동 요청
-    delete_cell_requested = pyqtSignal(int, int)   # (row, col) — Delete 키로 셀 값 비우기 요청
 
     def __init__(self, side: str, parent=None):
         super().__init__(parent)
@@ -512,38 +510,49 @@ class ExcelTableView(QTableView):
             return True
         return self._model.display_text(r, c) == ""
 
+    def _next_visible_row(self, r: int, dr: int) -> int:
+        """dr 방향의 다음 '보이는' 행 — 숨겨진 행(변경 행만 보기)은 건너뛴다.
+        범위 밖이면 범위 밖 인덱스를 그대로 반환한다."""
+        max_r = self.rowCount() - 1
+        n = r + dr
+        while 0 <= n <= max_r and self.isRowHidden(n):
+            n += dr
+        return n
+
     def _jump_target(self, r: int, c: int, dr: int, dc: int) -> tuple:
-        """엑셀의 Ctrl+방향키 시맨틱으로 점프 대상 (row, col) 반환."""
+        """엑셀의 Ctrl+방향키 시맨틱으로 점프 대상 (row, col) 반환.
+        세로 이동은 보이는 행만 밟는다 — 숨겨진 행에는 착지하지 않는다."""
         max_r = self.rowCount() - 1
         max_c = self.columnCount() - 1
         if max_r < 0 or max_c < 0:
             return (max(0, r), max(0, c))
-        nr, nc = r + dr, c + dc
-        # 범위 밖이면 그대로
-        if nr < 0 or nr > max_r or nc < 0 or nc > max_c:
+
+        def step(rr, cc):
+            if dr:
+                return self._next_visible_row(rr, dr), cc
+            return rr, cc + dc
+
+        def in_range(rr, cc):
+            return 0 <= rr <= max_r and 0 <= cc <= max_c
+
+        nr, nc = step(r, c)
+        if not in_range(nr, nc):
             return (max(0, min(r, max_r)), max(0, min(c, max_c)))
-        cur_empty = self._is_empty_cell(r, c)
-        next_empty = self._is_empty_cell(nr, nc)
-        if cur_empty:
-            # 다음 비어있지 않은 셀까지
-            while 0 <= nr <= max_r and 0 <= nc <= max_c and self._is_empty_cell(nr, nc):
-                nr += dr; nc += dc
-            if nr < 0 or nr > max_r or nc < 0 or nc > max_c:
-                # 못 찾으면 끝까지
-                return (max(0, min(nr - dr, max_r)), max(0, min(nc - dc, max_c)))
-            return (nr, nc)
-        if next_empty:
-            # 빈 구간 건너 다음 비어있지 않은 셀까지
-            while 0 <= nr <= max_r and 0 <= nc <= max_c and self._is_empty_cell(nr, nc):
-                nr += dr; nc += dc
-            if nr < 0 or nr > max_r or nc < 0 or nc > max_c:
-                return (max(0, min(nr - dr, max_r)), max(0, min(nc - dc, max_c)))
+        if self._is_empty_cell(r, c) or self._is_empty_cell(nr, nc):
+            # 빈 구간 건너 다음 비어있지 않은 셀까지 — 못 찾으면 마지막 보이는 셀
+            prev = (r, c)
+            while in_range(nr, nc) and self._is_empty_cell(nr, nc):
+                prev = (nr, nc)
+                nr, nc = step(nr, nc)
+            if not in_range(nr, nc):
+                return prev
             return (nr, nc)
         # 연속 데이터의 마지막 비어있지 않은 셀까지
-        while 0 <= nr + dr <= max_r and 0 <= nc + dc <= max_c \
-                and not self._is_empty_cell(nr + dr, nc + dc):
-            nr += dr; nc += dc
-        return (nr, nc)
+        while True:
+            r2, c2 = step(nr, nc)
+            if not in_range(r2, c2) or self._is_empty_cell(r2, c2):
+                return (nr, nc)
+            nr, nc = r2, c2
 
     @staticmethod
     def _header_jump_target(cur: int, d: int, last: int, is_empty) -> int:
@@ -736,20 +745,6 @@ class ExcelTableView(QTableView):
                     self.unstage_requested.emit()
                 event.accept(); return
 
-        # ── F2: 셀 편집란 포커스 요청 ──
-        if key == Qt.Key_F2 and not ctrl and not shift and not alt:
-            self.edit_focus_requested.emit()
-            event.accept(); return
-
-        # ── Delete: 단일 셀 값 비우기 ──
-        if key == Qt.Key_Delete and not ctrl and not shift and not alt:
-            cell = self._single_selected_cell()
-            if cell is not None:
-                self.delete_cell_requested.emit(cell[0], cell[1])
-                event.accept(); return
-            # 다중 선택 일괄 삭제는 사고 위험 — 무시 (기본 동작도 막음)
-            event.accept(); return
-
         # ── Enter/Return: 엑셀처럼 아래 칸으로 이동 ──
         if key in (Qt.Key_Return, Qt.Key_Enter) and not ctrl and not alt:
             if cur_r >= 0 and cur_c >= 0 and cur_r + 1 < self.rowCount():
@@ -818,8 +813,14 @@ class ExcelTableView(QTableView):
         try:
             # 모델 리셋 한 번 — 셀 아이템 생성 없음(O(1)). 리셋이 selectionModel
             # 시그널(선택 해제)을 발화시키므로 _populating 플래그 유지가 필수.
-            self._model.set_diff_data(diff_matrix, row_meta, staged or {},
-                                      merged_set or set(), self._excluded_cols)
+            # ※ `staged or {}`처럼 falsy 체크를 쓰면 '빈 dict'일 때 새 객체가
+            #   만들어져 모델이 MainWindow 상태와 분리된다(이후 스테이징 색 미반영).
+            #   반드시 is None 체크로 원본 참조를 공유해야 한다.
+            self._model.set_diff_data(
+                diff_matrix, row_meta,
+                staged if staged is not None else {},
+                merged_set if merged_set is not None else set(),
+                self._excluded_cols)
             # 1) 샘플 기반 자동 너비(상한 클립 포함)
             # → 2) 사용자가 직접 조정한 열/행만 그 위에 덮어쓰기 (상한 무시).
             # 새로고침(_run_refresh)은 _user_col_widths/_user_row_heights를 미리
@@ -1017,10 +1018,9 @@ class DropLineEdit(QLineEdit):
 
 
 class CellEditWidget(QPlainTextEdit):
-    """셀 값 편집란 — Enter: 적용, Alt+Enter: 줄바꿈 입력.
+    """선택 셀의 값/수식 표시란 — 읽기전용 뷰어 (직접 수정 기능 제거됨).
     항상 2줄 고정 높이. 3줄 이상은 세로 스크롤.
     """
-    apply_requested = pyqtSignal()
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -1030,51 +1030,7 @@ class CellEditWidget(QPlainTextEdit):
         self.setLineWrapMode(QPlainTextEdit.WidgetWidth)
         self.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
         self.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
-        self._inserting_newline = False
-        self._block_auto_scroll = False   # ensureCursorVisible 차단 플래그
-
-    def ensureCursorVisible(self):
-        # Alt+Enter 삽입 중에는 Qt 자동 스크롤을 차단
-        if self._block_auto_scroll:
-            return
-        super().ensureCursorVisible()
-
-    def keyPressEvent(self, event):
-        if event.key() in (Qt.Key_Return, Qt.Key_Enter) and not (event.modifiers() & Qt.AltModifier):
-            self.apply_requested.emit()
-        elif event.key() in (Qt.Key_Return, Qt.Key_Enter) and (event.modifiers() & Qt.AltModifier):
-            vsb = self.verticalScrollBar()
-            cur_scroll = vsb.value()
-            line_h = self.fontMetrics().lineSpacing()
-            # 문서 전체에서 텍스트가 있는 줄이 2줄 이상일 때 스크롤 대상
-            doc = self.document()
-            non_empty_lines = sum(
-                1 for i in range(doc.blockCount())
-                if doc.findBlockByNumber(i).text().strip()
-            )
-            has_two_or_more_lines = non_empty_lines >= 2
-            # 이미 최하단에 도달한 경우 스크롤 생략
-            at_bottom = cur_scroll >= vsb.maximum()
-            should_scroll = has_two_or_more_lines and not at_bottom
-            # 자동 스크롤 차단 후 삽입, 직접 스크롤 값 설정
-            self._block_auto_scroll = True
-            self.textCursor().insertText("\n")
-            self._block_auto_scroll = False
-            if should_scroll:
-                vsb.setValue(cur_scroll + line_h)
-        else:
-            super().keyPressEvent(event)
-            # 일반 타이핑 시 스크롤 위치 유지 (현재 블록이 2번째 이내면 맨 위 고정)
-            self._clamp_scroll_if_not_last()
-
-
-
-    def _clamp_scroll_if_not_last(self):
-        """커서가 마지막 블록이 아니면 스크롤을 상단으로 고정."""
-        cursor = self.textCursor()
-        doc = self.document()
-        if cursor.blockNumber() < doc.blockCount() - 1:
-            self.verticalScrollBar().setValue(0)
+        self.setReadOnly(True)   # 값 확인·복사 전용
 
     def text(self):
         return self.toPlainText()
@@ -1083,7 +1039,4 @@ class CellEditWidget(QPlainTextEdit):
         self.setPlainText(val if val is not None else "")
         # 텍스트 설정 후 항상 맨 위부터 표시
         self.verticalScrollBar().setValue(0)
-
-    def clear(self):
-        super().clear()
 

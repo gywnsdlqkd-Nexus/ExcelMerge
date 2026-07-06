@@ -106,14 +106,13 @@ class LoadWorker(QThread):
 
 
 class StagedMergeWorker(QThread):
-    """staged 병합 + 직접 편집값을 한 번에 파일에 기록."""
+    """staged(병합 준비) 셀을 파일에 기록."""
     done = pyqtSignal(int)
     error = pyqtSignal(str)
 
-    def __init__(self, path_a, path_b, diff_matrix, row_meta, staged: dict, edited: dict,
+    def __init__(self, path_a, path_b, diff_matrix, row_meta, staged: dict,
                  formula_data_a: list = None, formula_data_b: list = None):
         # staged:   {(display_r, c): 'a_to_b'|'b_to_a'}
-        # edited:   {'a': {(display_r, c): new_val}, 'b': {(display_r, c): new_val}}
         # row_meta: [(orig_a_row, orig_b_row), ...]
         super().__init__()
         self.path_a = path_a
@@ -121,7 +120,6 @@ class StagedMergeWorker(QThread):
         self.diff_matrix = diff_matrix
         self.row_meta = row_meta
         self.staged = staged
-        self.edited = edited
         self.formula_data_a = formula_data_a or []
         self.formula_data_b = formula_data_b or []
 
@@ -159,32 +157,17 @@ class StagedMergeWorker(QThread):
 
                 if b_orig is not None:
                     # 스테이징된 셀을 patches에 추가
-                    # 편집된 값 > 수식 데이터 > diff_matrix a_val 순으로 우선 사용
+                    # 수식 데이터 > diff_matrix a_val 순으로 우선 사용
                     for (_, c) in row_cells_in_a2b:
                         _, a_val, _ = self.diff_matrix[r][c]
-                        edited_a = self.edited.get("a", {}).get((r, c))
-                        if edited_a is not None:
-                            val = edited_a
-                        else:
-                            val = self._formula_val(self.formula_data_a, a_orig, c, a_val)
+                        val = self._formula_val(self.formula_data_a, a_orig, c, a_val)
                         patches_b[_cell_ref(b_orig, c)] = val
                 else:
                     # B에 행 없음(삭제됨 행) → 새 행 삽입
                     for (_, c) in row_cells_in_a2b:
                         _, a_val, _ = self.diff_matrix[r][c]
-                        edited_a = self.edited.get("a", {}).get((r, c))
-                        if edited_a is not None:
-                            val = edited_a
-                        else:
-                            val = self._formula_val(self.formula_data_a, a_orig, c, a_val)
+                        val = self._formula_val(self.formula_data_a, a_orig, c, a_val)
                         insert_rows_b.setdefault(r, []).append((c, val))
-
-            for (r, c), val in self.edited.get("b", {}).items():
-                if (r, c) in a2b:
-                    continue
-                _, b_orig = self._meta(r)
-                if b_orig is not None:
-                    patches_b[_cell_ref(b_orig, c)] = val
 
             # 패치 후 빈 열 감지 및 삭제 준비 (쓸 내용이 있을 때만 파일 접근)
             if (patches_b or insert_rows_b or delete_rows_b) and self.path_b:
@@ -214,32 +197,17 @@ class StagedMergeWorker(QThread):
 
                 if a_orig is not None:
                     # 스테이징된 셀을 patches에 추가
-                    # 편집된 값 > 수식 데이터 > diff_matrix b_val 순으로 우선 사용
+                    # 수식 데이터 > diff_matrix b_val 순으로 우선 사용
                     for (_, c) in row_cells_in_b2a:
                         _, _, b_val = self.diff_matrix[r][c]
-                        edited_b = self.edited.get("b", {}).get((r, c))
-                        if edited_b is not None:
-                            val = edited_b
-                        else:
-                            val = self._formula_val(self.formula_data_b, b_orig, c, b_val)
+                        val = self._formula_val(self.formula_data_b, b_orig, c, b_val)
                         patches_a[_cell_ref(a_orig, c)] = val
                 else:
                     # A에 행 없음(추가됨 행) → 새 행 삽입
                     for (_, c) in row_cells_in_b2a:
                         _, _, b_val = self.diff_matrix[r][c]
-                        edited_b = self.edited.get("b", {}).get((r, c))
-                        if edited_b is not None:
-                            val = edited_b
-                        else:
-                            val = self._formula_val(self.formula_data_b, b_orig, c, b_val)
+                        val = self._formula_val(self.formula_data_b, b_orig, c, b_val)
                         insert_rows_a.setdefault(r, []).append((c, val))
-
-            for (r, c), val in self.edited.get("a", {}).items():
-                if (r, c) in b2a:
-                    continue
-                a_orig, _ = self._meta(r)
-                if a_orig is not None:
-                    patches_a[_cell_ref(a_orig, c)] = val
 
             if (patches_a or insert_rows_a or delete_rows_a) and self.path_a:
                 patches_a, delete_rows_a, del_cols_a = _promote_empty_cols_to_delete(
