@@ -2,10 +2,9 @@
 
 
 def _cell_status(a_val: str, b_val: str) -> str:
-    if a_val == "" and b_val != "":
+    """added: 한쪽 파일에만 값이 있음 (A 전용/B 전용 모두) / modified: 양쪽 값이 다름."""
+    if (a_val == "") != (b_val == ""):
         return "added"
-    if a_val != "" and b_val == "":
-        return "modified"
     if a_val != b_val:
         return "modified"
     return "same"

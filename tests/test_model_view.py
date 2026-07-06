@@ -436,6 +436,44 @@ def test_find_in_preview_mode():
     print("PASS test_find_in_preview_mode")
 
 
+def test_cell_status_one_sided_is_added():
+    """한쪽 파일에만 값이 있으면 방향과 무관하게 'added'로 분류."""
+    from excelmerge.diff_engine import _cell_status
+    assert _cell_status("", "new") == "added"      # B 전용
+    assert _cell_status("old", "") == "added"      # A 전용 (기존엔 modified)
+    assert _cell_status("a", "b") == "modified"
+    assert _cell_status("x", "x") == "same"
+    assert _cell_status("", "") == "same"
+    print("PASS test_cell_status_one_sided_is_added")
+
+
+def test_filter_keeps_merged_rows_visible():
+    """저장(병합 확정) 후에도 '변경 행만 보기'가 병합됨 행을 숨기지 않는지.
+    저장 시 상태가 same이 되면서 행이 즉시 사라져 병합 결과를 볼 수 없던 문제."""
+    from excelmerge.main_window import MainWindow
+    app = QApplication.instance() or QApplication([])
+    win = MainWindow()
+    dm = [
+        [("same", "h", "h")],
+        [("same", "m", "m")],    # 병합 확정된 행 (merged 셀 보유)
+        [("same", "u", "u")],    # 그냥 동일한 행
+        [("modified", "x", "y")],
+    ]
+    win._diff_matrix = dm
+    win._diff_row_meta = [(r, r) for r in range(len(dm))]
+    win._merged_cells = {(1, 0)}
+    win._refresh_tables()
+    win._diff_only = True
+    win._apply_diff_filter()
+    tbl = win.panel_a.table
+    assert not tbl.isRowHidden(0), "헤더 행"
+    assert not tbl.isRowHidden(1), "병합됨 행이 숨겨짐"
+    assert tbl.isRowHidden(2), "동일 행은 숨겨져야 함"
+    assert not tbl.isRowHidden(3), "변경 행"
+    win.close()
+    print("PASS test_filter_keeps_merged_rows_visible")
+
+
 if __name__ == "__main__":
     test_golden_roles()
     test_headers()
@@ -448,4 +486,6 @@ if __name__ == "__main__":
     test_staging_color_with_empty_initial_state()
     test_ctrl_jump_skips_hidden_rows()
     test_find_in_preview_mode()
+    test_cell_status_one_sided_is_added()
+    test_filter_keeps_merged_rows_visible()
     print("ALL MODEL/VIEW TESTS PASS")

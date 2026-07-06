@@ -440,8 +440,14 @@ class MainWindow(QMainWindow):
         excl = self._excluded_cols
         desired = set()
         if self._diff_only:
+            # 병합됨(연파랑) 셀이 있는 행은 값이 같아졌어도 계속 표시 —
+            # 저장 직후 행이 사라져 병합 결과를 확인할 수 없던 문제 방지.
+            # (새 비교/새로고침으로 _merged_cells가 리셋되면 일반 규칙으로 복귀)
+            merged_rows = {r for (r, c) in self._merged_cells if c not in excl}
             for r, row in enumerate(self._diff_matrix):
                 if r == 0:   # 최상단 행(헤더)은 항상 표시
+                    continue
+                if r in merged_rows:
                     continue
                 is_changed = any(
                     status != "same"
