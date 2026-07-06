@@ -130,33 +130,30 @@ class DiffTableModel(QAbstractTableModel):
     def is_data_cell(self, r: int, c: int) -> bool:
         return 0 <= r < self._data_rows and 0 <= c < self._data_cols
 
-    def last_nonempty_col(self) -> int:
-        """값이 하나라도 있는 마지막 열 인덱스 (없으면 0).
-        엑셀 유령 셀(서식만 있고 값 없음) 때문에 매트릭스 폭이 실제 데이터보다
-        넓을 수 있어, Ctrl+Shift 헤더 확장은 이 값을 경계로 쓴다."""
+    def col_has_values(self, c: int) -> bool:
+        """열에 값이 하나라도 있는지 (A/B 어느 쪽이든).
+        엑셀 유령 셀(서식만 있고 값 없음) 열과 여분 열은 False —
+        헤더 단위 Ctrl+Shift 점프의 빈/값 판정에 쓴다."""
         if self._mode == "diff":
-            for c in range(self._data_cols - 1, -1, -1):
-                for row in self._diff_matrix:
-                    if c < len(row) and (row[c][1] != "" or row[c][2] != ""):
-                        return c
-        elif self._mode == "preview":
-            for c in range(self._data_cols - 1, -1, -1):
-                for row in self._preview:
-                    if c < len(row) and row[c] != "":
-                        return c
-        return 0
+            for row in self._diff_matrix:
+                if c < len(row) and (row[c][1] != "" or row[c][2] != ""):
+                    return True
+            return False
+        if self._mode == "preview":
+            for row in self._preview:
+                if c < len(row) and row[c] != "":
+                    return True
+        return False
 
-    def last_nonempty_row(self) -> int:
-        """값이 하나라도 있는 마지막 행 인덱스 (없으면 0)."""
+    def row_has_values(self, r: int) -> bool:
+        """행에 값이 하나라도 있는지 (A/B 어느 쪽이든)."""
+        if not (0 <= r < self._data_rows):
+            return False
         if self._mode == "diff":
-            for r in range(self._data_rows - 1, -1, -1):
-                if any(a != "" or b != "" for (_, a, b) in self._diff_matrix[r]):
-                    return r
-        elif self._mode == "preview":
-            for r in range(self._data_rows - 1, -1, -1):
-                if any(v != "" for v in self._preview[r]):
-                    return r
-        return 0
+            return any(a != "" or b != "" for (_, a, b) in self._diff_matrix[r])
+        if self._mode == "preview":
+            return any(v != "" for v in self._preview[r])
+        return False
 
     def display_text(self, r: int, c: int) -> str:
         if not self.is_data_cell(r, c):

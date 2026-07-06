@@ -247,18 +247,29 @@ def test_header_multiselect_extension():
     assert tbl._full_columns_selected() == [1, 2], tbl._full_columns_selected()
     # Ctrl+Shift+→ : '값이 있는' 마지막 열(4)까지 — 매트릭스 폭(7)이나
     # 그리드 폭이 아닌 실제 값 기준 (유령 셀 열 5~6 제외)
-    assert tbl.model().data_cols == 7 and tbl.model().last_nonempty_col() == 4
+    assert tbl.model().data_cols == 7
+    assert tbl.model().col_has_values(4) and not tbl.model().col_has_values(5)
     QTest.keyClick(tbl, Qt.Key_Right, Qt.ControlModifier | Qt.ShiftModifier)
     assert tbl._full_columns_selected() == [1, 2, 3, 4], tbl._full_columns_selected()
+    # 경계에서 한 번 더 → 엑셀처럼 현재 위치 기준 재판정해 그리드 끝까지
+    QTest.keyClick(tbl, Qt.Key_Right, Qt.ControlModifier | Qt.ShiftModifier)
+    assert tbl._full_columns_selected() == list(range(1, col_n)), tbl._full_columns_selected()
+    # 그리드 끝에서 한 번 더 → 변화 없음
+    QTest.keyClick(tbl, Qt.Key_Right, Qt.ControlModifier | Qt.ShiftModifier)
+    assert tbl._full_columns_selected() == list(range(1, col_n)), tbl._full_columns_selected()
 
     # 행 헤더: 3행 선택 → Shift+↓ → [2,3], Ctrl+Shift+↓ 값 있는 마지막 행(7)까지
-    assert tbl.model().data_rows == 9 and tbl.model().last_nonempty_row() == 7
+    assert tbl.model().data_rows == 9
+    assert tbl.model().row_has_values(7) and not tbl.model().row_has_values(8)
     tbl._select_row(2)
     tbl._on_v_section_pressed(2)
     QTest.keyClick(tbl, Qt.Key_Down, Qt.ShiftModifier)
     assert tbl._full_rows_selected() == [2, 3], tbl._full_rows_selected()
     QTest.keyClick(tbl, Qt.Key_Down, Qt.ControlModifier | Qt.ShiftModifier)
     assert tbl._full_rows_selected() == list(range(2, 8)), tbl._full_rows_selected()
+    # 경계에서 한 번 더 → 그리드 끝까지
+    QTest.keyClick(tbl, Qt.Key_Down, Qt.ControlModifier | Qt.ShiftModifier)
+    assert tbl._full_rows_selected() == list(range(2, row_n)), tbl._full_rows_selected()
 
     win.close()
     print("PASS test_header_multiselect_extension")

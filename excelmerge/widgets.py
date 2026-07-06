@@ -545,6 +545,28 @@ class ExcelTableView(QTableView):
             nr += dr; nc += dc
         return (nr, nc)
 
+    @staticmethod
+    def _header_jump_target(cur: int, d: int, last: int, is_empty) -> int:
+        """엑셀 Ctrl+Shift 시맨틱의 열/행 단위 점프 대상 — _jump_target의 1차원 버전.
+        매 호출마다 현재 위치(cur) 기준으로 재판정하므로 경계에서 한 번 더 누르면
+        다음 값 블록 또는 그리드 끝으로 계속 이동한다."""
+        if last < 0:
+            return max(0, cur)
+        n = cur + d
+        if n < 0 or n > last:
+            return min(max(cur, 0), last)
+        if is_empty(cur) or is_empty(n):
+            # 빈 구간 건너 다음 값 블록의 첫 열/행까지 — 없으면 그리드 끝
+            while 0 <= n <= last and is_empty(n):
+                n += d
+            if n < 0 or n > last:
+                return 0 if d < 0 else last
+            return n
+        # 연속 값 블록의 마지막 열/행까지
+        while 0 <= n + d <= last and not is_empty(n + d):
+            n += d
+        return n
+
     def _select_range(self, r1: int, c1: int, r2: int, c2: int):
         """(r1,c1)~(r2,c2) 직사각형의 셀들을 모두 선택 상태로 설정 (기존 선택은 클리어).
         기존 구현은 아이템이 있는 셀만 선택됐으므로 데이터 영역으로 클램프한다."""
@@ -653,12 +675,14 @@ class ExcelTableView(QTableView):
                     cur_end = cur_c
                 else:
                     cur_end = full_cols[-1] if self._header_anchor_col == full_cols[0] else full_cols[0]
+                delta = -1 if key == Qt.Key_Left else 1
                 if ctrl:
-                    # 엑셀처럼 '값이 있는' 마지막 열까지만 확장 — 매트릭스 폭이 아닌
-                    # 실제 값 기준 (유령 셀로 생긴 빈 열 제외)
-                    target = 0 if key == Qt.Key_Left else self._model.last_nonempty_col()
+                    # 엑셀처럼 현재 위치 기준 재판정 — 값 블록 끝 → 다음 블록 → 그리드 끝
+                    m = self._model
+                    target = self._header_jump_target(
+                        cur_end, delta, self.columnCount() - 1,
+                        lambda c: not m.col_has_values(c))
                 else:
-                    delta = -1 if key == Qt.Key_Left else 1
                     target = max(0, min(self.columnCount() - 1, cur_end + delta))
                 self._select_column_range(self._header_anchor_col, target)
                 self._set_current_cell_no_update(max(0, cur_r if cur_r >= 0 else 0), target)
@@ -677,11 +701,14 @@ class ExcelTableView(QTableView):
                     cur_end = cur_r
                 else:
                     cur_end = full_rows[-1] if self._header_anchor_row == full_rows[0] else full_rows[0]
+                delta = -1 if key == Qt.Key_Up else 1
                 if ctrl:
-                    # 엑셀처럼 '값이 있는' 마지막 행까지만 확장
-                    target = 0 if key == Qt.Key_Up else self._model.last_nonempty_row()
+                    # 엑셀처럼 현재 위치 기준 재판정 — 값 블록 끝 → 다음 블록 → 그리드 끝
+                    m = self._model
+                    target = self._header_jump_target(
+                        cur_end, delta, self.rowCount() - 1,
+                        lambda r: not m.row_has_values(r))
                 else:
-                    delta = -1 if key == Qt.Key_Up else 1
                     target = max(0, min(self.rowCount() - 1, cur_end + delta))
                 self._select_row_range(self._header_anchor_row, target)
                 self._set_current_cell_no_update(target, max(0, cur_c if cur_c >= 0 else 0))
