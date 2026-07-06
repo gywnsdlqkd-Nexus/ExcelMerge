@@ -172,8 +172,8 @@ class MainWindow(QMainWindow):
 
         # 범례
         for lbl, key in [
-            ("추가됨", "added"),
-            ("변경됨", "modified"), ("준비 중", "staged"), ("병합됨", "merged"),
+            ("신규", "added"),
+            ("변경", "modified"), ("준비", "staged"), ("병합", "merged"),
         ]:
             dot = QLabel("  ")
             dot.setFixedSize(20, 20)
