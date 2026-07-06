@@ -239,17 +239,21 @@ def test_header_multiselect_extension():
     # Shift+← 로 앵커 방향 축소
     QTest.keyClick(tbl, Qt.Key_Left, Qt.ShiftModifier)
     assert tbl._full_columns_selected() == [1, 2], tbl._full_columns_selected()
-    # Ctrl+Shift+→ 끝까지
+    # Ctrl+Shift+→ : 엑셀처럼 데이터가 있는 마지막 열까지 (여분 빈 열 제외)
+    data_cols = tbl.model().data_cols
     QTest.keyClick(tbl, Qt.Key_Right, Qt.ControlModifier | Qt.ShiftModifier)
-    assert tbl._full_columns_selected() == list(range(1, col_n)), tbl._full_columns_selected()
+    assert tbl._full_columns_selected() == list(range(1, data_cols)), tbl._full_columns_selected()
+    assert col_n > data_cols   # 여분 열이 실제로 존재해야 의미 있는 검증
 
-    # 행 헤더: 3행 선택 → Shift+↓ → [2,3], Ctrl+Shift+↓ 끝까지
+    # 행 헤더: 3행 선택 → Shift+↓ → [2,3], Ctrl+Shift+↓ 데이터 마지막 행까지
+    data_rows = tbl.model().data_rows
     tbl._select_row(2)
     tbl._on_v_section_pressed(2)
     QTest.keyClick(tbl, Qt.Key_Down, Qt.ShiftModifier)
     assert tbl._full_rows_selected() == [2, 3], tbl._full_rows_selected()
     QTest.keyClick(tbl, Qt.Key_Down, Qt.ControlModifier | Qt.ShiftModifier)
-    assert tbl._full_rows_selected() == list(range(2, row_n)), tbl._full_rows_selected()
+    assert tbl._full_rows_selected() == list(range(2, data_rows)), tbl._full_rows_selected()
+    assert row_n > data_rows
 
     win.close()
     print("PASS test_header_multiselect_extension")
