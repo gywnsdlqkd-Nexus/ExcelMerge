@@ -307,6 +307,49 @@ def test_ctrl_jump_single_selection():
     print("PASS test_ctrl_jump_single_selection")
 
 
+def test_selection_mirror_compact_ranges():
+    """선택 미러가 range를 직사각형으로 압축하는지 회귀 테스트.
+    수정 전에는 열 전체 미러가 행마다 range를 만들어(수천 개) 이후 모든
+    선택 질의·페인팅이 느려졌다 (헤더 클릭 딜레이의 주범)."""
+    from excelmerge.main_window import MainWindow
+    app = QApplication.instance() or QApplication([])
+    win = MainWindow()
+    dm = [[("same", f"v{r}{c}", f"v{r}{c}") for c in range(6)] for r in range(120)]
+    meta = [(r, r) for r in range(len(dm))]
+    win._diff_matrix, win._diff_row_meta = dm, meta
+    win._refresh_tables()
+    src, dst = win.panel_a.table, win.panel_b.table
+    win.show()
+    app.processEvents()
+
+    # 열 전체 선택 → 동기화된 반대 패널도 range 1개 + 셀 집합 동일
+    src._select_col(2)
+    app.processEvents()
+    assert len(dst.selectionModel().selection()) == 1, \
+        len(dst.selectionModel().selection())
+    assert dst.get_selected_cells() == src.get_selected_cells()
+
+    # mirror_selection(셀 집합) 경로도 직사각형 병합: 2×3 블록 → range 1개
+    block = {(r, c) for r in range(10, 12) for c in range(1, 4)}
+    dst.mirror_selection(block)
+    assert dst.get_selected_cells() == block
+    assert len(dst.selectionModel().selection()) == 1
+
+    # 비직사각형(L자)도 셀 집합은 정확히 보존
+    lshape = {(0, 0), (1, 0), (1, 1)}
+    dst.mirror_selection(lshape)
+    assert dst.get_selected_cells() == lshape
+
+    # 단일 셀 판정 헬퍼
+    src._move_current_cell(5, 5)
+    assert src._single_selected_cell() == (5, 5)
+    src._select_col(1)
+    assert src._single_selected_cell() is None
+
+    win.close()
+    print("PASS test_selection_mirror_compact_ranges")
+
+
 if __name__ == "__main__":
     test_golden_roles()
     test_headers()
@@ -315,4 +358,5 @@ if __name__ == "__main__":
     test_view_behaviors()
     test_header_multiselect_extension()
     test_ctrl_jump_single_selection()
+    test_selection_mirror_compact_ranges()
     print("ALL MODEL/VIEW TESTS PASS")

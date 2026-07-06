@@ -135,10 +135,9 @@ class FilePanel(QWidget):
     def _refresh_cell_edit_from_selection(self):
         """현재 선택 셀에 맞게 cell_edit 값/활성 상태를 갱신."""
         model = self.table.model()
-        sm = self.table.selectionModel()
-        indexes = sm.selectedIndexes() if sm is not None else []
-        if len(indexes) == 1:
-            r, c = indexes[0].row(), indexes[0].column()
+        cell = self.table._single_selected_cell()   # 대량 선택에서도 O(range 수)
+        if cell is not None:
+            r, c = cell
             self._selected_cell = (r, c)
             display = model.display_text(r, c)
             if model.cell_kind(r, c) in ("staged", "merged"):

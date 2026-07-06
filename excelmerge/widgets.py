@@ -467,15 +467,20 @@ class ExcelTableView(QTableView):
             self.unstage_requested.emit()
 
     def _show_context_menu(self, pos):
-        sm = self.selectionModel()
-        selected = sm.selectedIndexes() if sm is not None else []
-        if not selected:
-            return
-
         m = self._model
-        kinds = {m.cell_kind(idx.row(), idx.column()) for idx in selected}
-        has_changed = "changed" in kinds
-        has_staged  = "staged" in kinds
+        has_changed = has_staged = False
+        empty = True
+        for (r, c) in self._iter_selected_cells():
+            empty = False
+            kind = m.cell_kind(r, c)
+            if kind == "changed":
+                has_changed = True
+            elif kind == "staged":
+                has_staged = True
+            if has_changed and has_staged:
+                break
+        if empty:
+            return
 
         if not has_changed and not has_staged:
             return
@@ -560,13 +565,13 @@ class ExcelTableView(QTableView):
 
     def _has_changed_selection(self) -> bool:
         m = self._model
-        return any(m.cell_kind(idx.row(), idx.column()) == "changed"
-                   for idx in self.selectionModel().selectedIndexes())
+        return any(m.cell_kind(r, c) == "changed"
+                   for (r, c) in self._iter_selected_cells())
 
     def _has_staged_selection(self) -> bool:
         m = self._model
-        return any(m.cell_kind(idx.row(), idx.column()) == "staged"
-                   for idx in self.selectionModel().selectedIndexes())
+        return any(m.cell_kind(r, c) == "staged"
+                   for (r, c) in self._iter_selected_cells())
 
     # ── 헤더 다중 선택 지원 ──────────────────────────────────────────────────
     def _full_columns_selected(self) -> list[int]:
@@ -708,11 +713,9 @@ class ExcelTableView(QTableView):
 
         # ── Delete: 단일 셀 값 비우기 ──
         if key == Qt.Key_Delete and not ctrl and not shift and not alt:
-            sm = self.selectionModel()
-            sel = sm.selectedIndexes() if sm is not None else []
-            if len(sel) == 1:
-                idx = sel[0]
-                self.delete_cell_requested.emit(idx.row(), idx.column())
+            cell = self._single_selected_cell()
+            if cell is not None:
+                self.delete_cell_requested.emit(cell[0], cell[1])
                 event.accept(); return
             # 다중 선택 일괄 삭제는 사고 위험 — 무시 (기본 동작도 막음)
             event.accept(); return
@@ -826,14 +829,69 @@ class ExcelTableView(QTableView):
         self._header_anchor_row = None
 
     def get_selected_cells(self) -> set:
+        return set(self._iter_selected_cells())
+
+    def _iter_selected_cells(self):
+        """선택 셀 (r, c)를 range 단위로 순회.
+        selectedIndexes()처럼 전체 QModelIndex 리스트를 먼저 만들지 않아
+        대량 선택 + 조기 종료 조합에서 훨씬 가볍다."""
         sm = self.selectionModel()
         if sm is None:
-            return set()
-        return {(idx.row(), idx.column()) for idx in sm.selectedIndexes()}
+            return
+        for rng in sm.selection():
+            for r in range(rng.top(), rng.bottom() + 1):
+                for c in range(rng.left(), rng.right() + 1):
+                    yield (r, c)
+
+    def _single_selected_cell(self):
+        """정확히 1개 셀이 선택돼 있으면 (r, c), 아니면 None — O(range 수)."""
+        sm = self.selectionModel()
+        if sm is None:
+            return None
+        total = 0
+        first = None
+        for rng in sm.selection():
+            if first is None:
+                first = (rng.top(), rng.left())
+            total += rng.width() * rng.height()
+            if total > 1:
+                return None
+        return first if total == 1 else None
+
+    def mirror_selection_from(self, src: "ExcelTableView"):
+        """반대 패널의 선택을 range 단위로 그대로 복제 — O(range 수).
+        헤더 클릭(열/행 전체 선택)은 range 1개라 셀 수와 무관하게 즉시 끝난다.
+        (셀 집합으로 풀었다 재조립하면 행마다 range가 생겨 이후 모든 선택
+        질의/페인팅이 느려진다 — 헤더 클릭 딜레이의 주범이었다.)"""
+        src_sm = src.selectionModel()
+        sm = self.selectionModel()
+        if src_sm is None or sm is None:
+            return
+        self._populating = True
+        prev_updates = self.updatesEnabled()
+        self.setUpdatesEnabled(False)
+        try:
+            row_max = self.rowCount() - 1
+            col_max = self.columnCount() - 1
+            sel = QItemSelection()
+            model = self.model()
+            for rng in src_sm.selection():
+                if rng.top() > row_max or rng.left() > col_max:
+                    continue
+                sel.append(QItemSelectionRange(
+                    model.index(rng.top(), rng.left()),
+                    model.index(min(rng.bottom(), row_max),
+                                min(rng.right(), col_max))))
+            sm.select(sel, QItemSelectionModel.ClearAndSelect)
+        finally:
+            self.setUpdatesEnabled(prev_updates)
+            self._populating = False
 
     def mirror_selection(self, cells: set):
-        # 셀 집합을 row별로 묶고 연속 column 구간을 QItemSelectionRange로 만들어
-        # 한 번의 select() 호출로 일괄 적용 — 헤더 클릭처럼 N=수천 셀일 때 결정적.
+        # 셀 집합을 row별 연속 column 구간(span)으로 묶고, 연속 행의 span이
+        # 동일하면 직사각형으로 수직 병합해 range 수를 최소화한다.
+        # (열 전체 선택 = range 1개. range 수천 개짜리 selection model은
+        # 이후 모든 질의·페인팅·선택 병합을 느리게 만든다.)
         self._populating = True
         prev_updates = self.updatesEnabled()
         self.setUpdatesEnabled(False)
@@ -850,18 +908,41 @@ class ExcelTableView(QTableView):
             for (r, c) in cells:
                 if 0 <= r <= row_max and 0 <= c <= col_max:
                     by_row.setdefault(r, []).append(c)
-            sel = QItemSelection()
-            model = self.model()
-            for r, cs in by_row.items():
+
+            def _spans(cs: list) -> tuple:
                 cs.sort()
+                out = []
                 start = prev = cs[0]
                 for c in cs[1:]:
                     if c == prev + 1:
                         prev = c
                         continue
-                    sel.append(QItemSelectionRange(model.index(r, start), model.index(r, prev)))
+                    out.append((start, prev))
                     start = prev = c
-                sel.append(QItemSelectionRange(model.index(r, start), model.index(r, prev)))
+                out.append((start, prev))
+                return tuple(out)
+
+            sel = QItemSelection()
+            model = self.model()
+            run_start = prev_r = None
+            run_spans = None
+
+            def _flush(end_r):
+                for (c1, c2) in run_spans:
+                    sel.append(QItemSelectionRange(
+                        model.index(run_start, c1), model.index(end_r, c2)))
+
+            for r in sorted(by_row):
+                sp = _spans(by_row[r])
+                if run_spans is not None and sp == run_spans and r == prev_r + 1:
+                    prev_r = r
+                    continue
+                if run_spans is not None:
+                    _flush(prev_r)
+                run_start = prev_r = r
+                run_spans = sp
+            if run_spans is not None:
+                _flush(prev_r)
             sm.select(sel, QItemSelectionModel.ClearAndSelect)
         finally:
             self.setUpdatesEnabled(prev_updates)

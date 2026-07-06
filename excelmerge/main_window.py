@@ -1219,7 +1219,7 @@ class MainWindow(QMainWindow):
             return
         self._syncing_selection = True
         try:
-            dst.mirror_selection(src.get_selected_cells())
+            dst.mirror_selection_from(src)
             # mirror_selection 중 _populating=True라 _on_table_selection_changed가 막히므로
             # 반대쪽 패널의 cell_edit을 수동으로 갱신
             dst_panel = self.panel_a if dst is self.panel_a.table else self.panel_b
