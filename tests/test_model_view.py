@@ -216,9 +216,15 @@ def test_header_multiselect_extension():
     from excelmerge.main_window import MainWindow
     app = QApplication.instance() or QApplication([])
     win = MainWindow()
-    dm = [[("same", f"h{c}", f"h{c}") for c in range(5)]]
+
+    # 값은 0~4열/0~7행에만 존재. 5~6열과 8행은 엑셀 유령 셀처럼 빈 값으로 채워
+    # '값 기준 마지막' 경계 검증에 쓴다.
+    def row_vals(vals):
+        return [("same", v, v) for v in vals]
+    dm = [row_vals([f"h{c}" for c in range(5)] + ["", ""])]
     for r in range(1, 8):
-        dm.append([("same", f"a{r}{c}", f"a{r}{c}") for c in range(5)])
+        dm.append(row_vals([f"a{r}{c}" for c in range(5)] + ["", ""]))
+    dm.append(row_vals([""] * 7))
     meta = [(r, r) for r in range(len(dm))]
     win._diff_matrix, win._diff_row_meta = dm, meta
     win._refresh_tables()
@@ -239,21 +245,20 @@ def test_header_multiselect_extension():
     # Shift+← 로 앵커 방향 축소
     QTest.keyClick(tbl, Qt.Key_Left, Qt.ShiftModifier)
     assert tbl._full_columns_selected() == [1, 2], tbl._full_columns_selected()
-    # Ctrl+Shift+→ : 엑셀처럼 데이터가 있는 마지막 열까지 (여분 빈 열 제외)
-    data_cols = tbl.model().data_cols
+    # Ctrl+Shift+→ : '값이 있는' 마지막 열(4)까지 — 매트릭스 폭(7)이나
+    # 그리드 폭이 아닌 실제 값 기준 (유령 셀 열 5~6 제외)
+    assert tbl.model().data_cols == 7 and tbl.model().last_nonempty_col() == 4
     QTest.keyClick(tbl, Qt.Key_Right, Qt.ControlModifier | Qt.ShiftModifier)
-    assert tbl._full_columns_selected() == list(range(1, data_cols)), tbl._full_columns_selected()
-    assert col_n > data_cols   # 여분 열이 실제로 존재해야 의미 있는 검증
+    assert tbl._full_columns_selected() == [1, 2, 3, 4], tbl._full_columns_selected()
 
-    # 행 헤더: 3행 선택 → Shift+↓ → [2,3], Ctrl+Shift+↓ 데이터 마지막 행까지
-    data_rows = tbl.model().data_rows
+    # 행 헤더: 3행 선택 → Shift+↓ → [2,3], Ctrl+Shift+↓ 값 있는 마지막 행(7)까지
+    assert tbl.model().data_rows == 9 and tbl.model().last_nonempty_row() == 7
     tbl._select_row(2)
     tbl._on_v_section_pressed(2)
     QTest.keyClick(tbl, Qt.Key_Down, Qt.ShiftModifier)
     assert tbl._full_rows_selected() == [2, 3], tbl._full_rows_selected()
     QTest.keyClick(tbl, Qt.Key_Down, Qt.ControlModifier | Qt.ShiftModifier)
-    assert tbl._full_rows_selected() == list(range(2, data_rows)), tbl._full_rows_selected()
-    assert row_n > data_rows
+    assert tbl._full_rows_selected() == list(range(2, 8)), tbl._full_rows_selected()
 
     win.close()
     print("PASS test_header_multiselect_extension")

@@ -654,8 +654,9 @@ class ExcelTableView(QTableView):
                 else:
                     cur_end = full_cols[-1] if self._header_anchor_col == full_cols[0] else full_cols[0]
                 if ctrl:
-                    # 엑셀처럼 데이터가 있는 마지막 열까지만 확장 (여분 빈 열 제외)
-                    target = 0 if key == Qt.Key_Left else max(0, self._model.data_cols - 1)
+                    # 엑셀처럼 '값이 있는' 마지막 열까지만 확장 — 매트릭스 폭이 아닌
+                    # 실제 값 기준 (유령 셀로 생긴 빈 열 제외)
+                    target = 0 if key == Qt.Key_Left else self._model.last_nonempty_col()
                 else:
                     delta = -1 if key == Qt.Key_Left else 1
                     target = max(0, min(self.columnCount() - 1, cur_end + delta))
@@ -677,8 +678,8 @@ class ExcelTableView(QTableView):
                 else:
                     cur_end = full_rows[-1] if self._header_anchor_row == full_rows[0] else full_rows[0]
                 if ctrl:
-                    # 엑셀처럼 데이터가 있는 마지막 행까지만 확장 (여분 빈 행 제외)
-                    target = 0 if key == Qt.Key_Up else max(0, self._model.data_rows - 1)
+                    # 엑셀처럼 '값이 있는' 마지막 행까지만 확장
+                    target = 0 if key == Qt.Key_Up else self._model.last_nonempty_row()
                 else:
                     delta = -1 if key == Qt.Key_Up else 1
                     target = max(0, min(self.rowCount() - 1, cur_end + delta))

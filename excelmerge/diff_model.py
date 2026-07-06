@@ -130,6 +130,34 @@ class DiffTableModel(QAbstractTableModel):
     def is_data_cell(self, r: int, c: int) -> bool:
         return 0 <= r < self._data_rows and 0 <= c < self._data_cols
 
+    def last_nonempty_col(self) -> int:
+        """값이 하나라도 있는 마지막 열 인덱스 (없으면 0).
+        엑셀 유령 셀(서식만 있고 값 없음) 때문에 매트릭스 폭이 실제 데이터보다
+        넓을 수 있어, Ctrl+Shift 헤더 확장은 이 값을 경계로 쓴다."""
+        if self._mode == "diff":
+            for c in range(self._data_cols - 1, -1, -1):
+                for row in self._diff_matrix:
+                    if c < len(row) and (row[c][1] != "" or row[c][2] != ""):
+                        return c
+        elif self._mode == "preview":
+            for c in range(self._data_cols - 1, -1, -1):
+                for row in self._preview:
+                    if c < len(row) and row[c] != "":
+                        return c
+        return 0
+
+    def last_nonempty_row(self) -> int:
+        """값이 하나라도 있는 마지막 행 인덱스 (없으면 0)."""
+        if self._mode == "diff":
+            for r in range(self._data_rows - 1, -1, -1):
+                if any(a != "" or b != "" for (_, a, b) in self._diff_matrix[r]):
+                    return r
+        elif self._mode == "preview":
+            for r in range(self._data_rows - 1, -1, -1):
+                if any(v != "" for v in self._preview[r]):
+                    return r
+        return 0
+
     def display_text(self, r: int, c: int) -> str:
         if not self.is_data_cell(r, c):
             return ""
