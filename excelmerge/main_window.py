@@ -15,7 +15,7 @@ from .diff_engine import compute_diff
 from .loaders import _EXCEL_EXTS
 from .panels import FilePanel
 from .theme import APP_QSS, DIFF_COLORS, load_app_icon, ui_font
-from .widgets import EXTRA_ROWS, ExcelTableView, MinimapScrollBar
+from .widgets import ExcelTableView, MinimapScrollBar
 from .workers import LoadWorker, PreviewWorker, StagedMergeWorker
 from .xlsx_writer import _is_file_locked
 
@@ -215,7 +215,6 @@ class MainWindow(QMainWindow):
         )
 
         self._syncing_selection = False
-        self._hidden_rows = set()   # '변경 행만 보기' 필터의 델타 캐시
 
         # A↔B 대칭 배선 — 스크롤/크기/선택 동기화 (src → dst 양방향 루프)
         # ※ 람다의 루프 변수는 기본값 인자(s=..., d=...)로 바인딩해야 한다.
@@ -434,9 +433,10 @@ class MainWindow(QMainWindow):
         if not self._diff_matrix:
             self._update_minimap()
             return
-        # 목표 숨김 집합 계산 후, 캐시(_hidden_rows)와 달라진 행만 토글한다.
-        # QTableView는 모델 리셋 후에도 숨김 상태를 유지하므로 캐시는 리셋과 무관하게
-        # 유효하다. 현재 뷰 범위 밖 캐시 항목은 나중에 행이 다시 늘어날 때를 위해 보존.
+        # 목표 숨김 집합(desired)을 계산하고, 각 행의 '실제' 뷰 숨김 상태와 다를 때만
+        # setRowHidden을 호출한다. 캐시(과거 _hidden_rows) 대신 isRowHidden으로 실제
+        # 상태를 조회하므로, 모델 리셋이 숨김 상태를 초기화하는 플랫폼(실 Windows)에서도
+        # 항상 정확하다. 키 열 변경으로 매트릭스가 재계산돼도 어긋나지 않음.
         excl = self._excluded_cols
         desired = set()
         if self._diff_only:
@@ -456,41 +456,31 @@ class MainWindow(QMainWindow):
                 )
                 if not is_changed:
                     desired.add(r)
-        view_rows = len(self._diff_matrix) + EXTRA_ROWS
-        flips = {r for r in (self._hidden_rows ^ desired) if r < view_rows}
-        if flips:
-            # setRowHidden은 sectionResized(_, _, 0)을 emit해 _user_row_heights를
-            # 오염시킨다. _applying_sizes 플래그로 _on_section_v_resized 기록을 차단.
-            tables = (self.panel_a.table, self.panel_b.table)
-            for tbl in tables:
-                tbl._applying_sizes = True
+        # setRowHidden은 sectionResized(_, _, 0)을 emit해 _user_row_heights를
+        # 오염시킨다. _applying_sizes 플래그로 _on_section_v_resized 기록을 차단.
+        for tbl in (self.panel_a.table, self.panel_b.table):
+            tbl._applying_sizes = True
             try:
-                for r in flips:
-                    hidden = r in desired
-                    self.panel_a.table.setRowHidden(r, hidden)
-                    self.panel_b.table.setRowHidden(r, hidden)
+                nrows = tbl.rowCount()
+                for r in range(nrows):
+                    want = r in desired   # 여분(EXTRA) 행은 desired에 없으므로 항상 표시
+                    if tbl.isRowHidden(r) != want:
+                        tbl.setRowHidden(r, want)
             finally:
-                for tbl in tables:
-                    tbl._applying_sizes = False
-        self._hidden_rows = {r for r in self._hidden_rows if r >= view_rows} | desired
+                tbl._applying_sizes = False
         self._update_minimap()
 
     def _clear_row_filter(self):
         """숨김 행을 전부 해제 — 미리보기 전환 등 diff 모드를 떠날 때 호출.
-        QTableView는 리셋 후에도 숨김을 기억하므로 명시적으로 풀어야 한다."""
-        if not self._hidden_rows:
-            return
-        tables = (self.panel_a.table, self.panel_b.table)
-        for tbl in tables:
+        QTableView는 리셋 후에도 숨김을 기억할 수 있어 명시적으로 풀어야 한다."""
+        for tbl in (self.panel_a.table, self.panel_b.table):
             tbl._applying_sizes = True
-        try:
-            for r in self._hidden_rows:
-                self.panel_a.table.setRowHidden(r, False)
-                self.panel_b.table.setRowHidden(r, False)
-        finally:
-            for tbl in tables:
+            try:
+                for r in range(tbl.rowCount()):
+                    if tbl.isRowHidden(r):
+                        tbl.setRowHidden(r, False)
+            finally:
                 tbl._applying_sizes = False
-        self._hidden_rows = set()
 
     # ── 변경 셀 탐색(이전/다음) ───────────────────────────────────────────────
 

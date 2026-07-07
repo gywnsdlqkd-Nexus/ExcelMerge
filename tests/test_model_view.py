@@ -436,6 +436,50 @@ def test_find_in_preview_mode():
     print("PASS test_find_in_preview_mode")
 
 
+def test_diff_filter_after_key_change():
+    """키 열 변경(매트릭스 재계산) 후에도 '변경 행만 보기'가 정확히 적용되는지.
+    _apply_diff_filter가 캐시가 아닌 실제 isRowHidden을 조회하므로, 모델 리셋이
+    숨김 상태를 초기화하는 플랫폼에서도 변경 안 된 행이 새어 나오지 않아야 한다."""
+    from excelmerge.main_window import MainWindow
+    from excelmerge.diff_engine import compute_diff
+    app = QApplication.instance() or QApplication([])
+    win = MainWindow()
+    a = [["ID", "Name"], ["1", "a"], ["2", "b"], ["3", "c"], ["4", "d"]]
+    b = [["ID", "Name"], ["1", "a"], ["2", "b"], ["3", "C"], ["4", "d"]]
+    win._raw_data["a"], win._raw_data["b"] = a, b
+    win._diff_matrix, win._diff_row_meta = compute_diff(a, b, 0)
+    win.panel_a._row_meta = win.panel_b._row_meta = win._diff_row_meta
+    win._refresh_tables()
+    win._set_buttons_enabled(True)
+    win.diff_only_btn.setChecked(True)
+    win.show()
+    app.processEvents()
+    tbl = win.panel_a.table
+
+    def hidden():
+        return {r for r in range(len(win._diff_matrix)) if tbl.isRowHidden(r)}
+
+    # key=0: 행 3만 변경 → 1,2,4 숨김
+    assert hidden() == {1, 2, 4}, hidden()
+
+    # 모델 리셋이 숨김을 초기화하는 플랫폼을 흉내: 실제로 다 보이게 만든 뒤 필터 재적용
+    for r in range(tbl.rowCount()):
+        if tbl.isRowHidden(r):
+            tbl.setRowHidden(r, False)
+    win._apply_diff_filter()
+    assert hidden() == {1, 2, 4}, f"필터 재적용 실패: {hidden()}"
+
+    # 키 열 변경 경로 전체
+    win._on_key_col_changed(1)
+    app.processEvents()
+    # key=1(Name): a/b Name이 c vs C로 갈려 3(A전용)·5(B전용) 신규, 1,2,4 동일 → 숨김
+    hid = hidden()
+    for r in (1, 2, 4):
+        assert r in hid, f"key변경 후 동일 행 {r}이 숨겨지지 않음: {hid}"
+    win.close()
+    print("PASS test_diff_filter_after_key_change")
+
+
 def test_goto_changed_focus_and_selection_color():
     """이전/다음 변경점 이동 후: 테이블 포커스 이동 + 선택색이 활성/비활성 동일(파랑)."""
     from PyQt5.QtGui import QPalette
@@ -577,4 +621,5 @@ if __name__ == "__main__":
     test_filter_keeps_merged_rows_visible()
     test_load_xlsx_with_empty_fill()
     test_goto_changed_focus_and_selection_color()
+    test_diff_filter_after_key_change()
     print("ALL MODEL/VIEW TESTS PASS")
