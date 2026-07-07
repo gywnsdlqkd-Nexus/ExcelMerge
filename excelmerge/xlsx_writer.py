@@ -138,6 +138,9 @@ def _write_patches_to_file(
         with zipfile.ZipFile(path_base, "r") as zin, \
              zipfile.ZipFile(tmp, "w", zipfile.ZIP_DEFLATED) as zout:
             sheet_name = _find_active_sheet_path(zin)
+            # 시트를 해결하지 못하면 패치가 조용히 유실된다 — 데이터 손실 대신 오류로 노출.
+            if sheet_name not in zin.namelist():
+                raise ValueError(f"워크시트를 찾을 수 없습니다: {sheet_name}")
             for item in zin.infolist():
                 # calcChain.xml 항상 제거 — 수식 패치/삽입/삭제 모두 계산 체인을 무효화함
                 if item.filename == "xl/calcChain.xml":
@@ -177,7 +180,11 @@ def _find_active_sheet_path(zin: zipfile.ZipFile) -> str:
         for rel in rels_root:
             if rel.get("Id") == rid and rel.get("Type", "").endswith("/worksheet"):
                 target = rel.get("Target", "")
-                if not target.startswith("xl/"):
+                if target.startswith("/"):
+                    # 절대경로(패키지 루트 기준, openpyxl 등) → 선행 슬래시 제거
+                    target = target[1:]
+                elif not target.startswith("xl/"):
+                    # 상대경로(워크북 기준) → xl/ 접두
                     target = "xl/" + target
                 return target
     except Exception:

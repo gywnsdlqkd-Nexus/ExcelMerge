@@ -334,6 +334,38 @@ class ExcelTableView(QTableView):
         sel = QItemSelection(model.index(row, 0), model.index(row, cols - 1))
         sm.select(sel, QItemSelectionModel.ClearAndSelect)
 
+    def _select_rows(self, rows) -> None:
+        """여러 행 전체 셀을 한 번에 선택 (비연속 지원)."""
+        sm = self.selectionModel()
+        cols = self.columnCount()
+        row_max = self.rowCount() - 1
+        if sm is None or cols == 0 or row_max < 0:
+            return
+        model = self.model()
+        sel = QItemSelection()
+        for r in rows:
+            if 0 <= r <= row_max:
+                sel.append(QItemSelectionRange(
+                    model.index(r, 0), model.index(r, cols - 1)))
+        sm.select(sel, QItemSelectionModel.ClearAndSelect)
+
+    def _selected_header_rows(self, anchor_row: int) -> list[int]:
+        """우클릭 시 대상 행 집합 결정 (열 헤더 _selected_header_cols와 대칭).
+        - 우클릭한 행이 현재 다중 선택에 포함되어 있으면 그 선택 전체.
+        - 아니면 우클릭한 단일 행만.
+        """
+        sel_model = self.selectionModel()
+        rows: set[int] = set()
+        if sel_model is not None:
+            for idx in sel_model.selectedRows():
+                rows.add(idx.row())
+            if not rows:
+                for idx in sel_model.selectedIndexes():
+                    rows.add(idx.row())
+        if anchor_row in rows and len(rows) > 1:
+            return sorted(rows)
+        return [anchor_row]
+
     def _selected_header_cols(self, anchor_col: int) -> list[int]:
         """우클릭 시 대상 열 집합 결정.
         - 우클릭한 열이 현재 헤더 다중 선택에 포함되어 있으면 그 선택 전체.
@@ -442,35 +474,45 @@ class ExcelTableView(QTableView):
         if row < 0:
             return
 
-        has_changed, has_staged = self._row_stage_kinds(row)
+        # 다중 선택된 행 헤더 전체를 대상으로 (열 헤더와 대칭)
+        target_rows = self._selected_header_rows(row)
+        has_changed = has_staged = False
+        for r in target_rows:
+            hc, hs = self._row_stage_kinds(r)
+            has_changed = has_changed or hc
+            has_staged = has_staged or hs
+            if has_changed and has_staged:
+                break
 
         if not has_changed and not has_staged:
             return
 
+        multi = len(target_rows) > 1
+        suffix = f"  [{len(target_rows)}개 행]" if multi else ""
         menu = QMenu(self)
         menu.setStyleSheet(MENU_QSS)
 
         act_a2b = act_b2a = act_unstage = None
         if has_changed:
-            act_a2b = menu.addAction("선택 행: A → B  병합 준비")
-            act_b2a = menu.addAction("선택 행: B → A  병합 준비")
+            act_a2b = menu.addAction(f"선택 행: A → B  병합 준비{suffix}")
+            act_b2a = menu.addAction(f"선택 행: B → A  병합 준비{suffix}")
         if has_staged:
             if has_changed:
                 menu.addSeparator()
-            act_unstage = menu.addAction("선택 행: 병합 준비 취소")
+            act_unstage = menu.addAction(f"선택 행: 병합 준비 취소{suffix}")
 
         act = menu.exec_(self.verticalHeader().mapToGlobal(pos))
         if act is None:
             return
 
         if act_a2b is not None and act == act_a2b:
-            self._select_row(row)
+            self._select_rows(target_rows)
             self.stage_requested.emit("a_to_b")
         elif act_b2a is not None and act == act_b2a:
-            self._select_row(row)
+            self._select_rows(target_rows)
             self.stage_requested.emit("b_to_a")
         elif act_unstage is not None and act == act_unstage:
-            self._select_row(row)
+            self._select_rows(target_rows)
             self.unstage_requested.emit()
 
     def _show_context_menu(self, pos):

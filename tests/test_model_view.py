@@ -436,6 +436,77 @@ def test_find_in_preview_mode():
     print("PASS test_find_in_preview_mode")
 
 
+def test_row_header_multi_stage():
+    """복수 행 헤더 선택 후 병합 준비 시 모든 대상 행의 변경 셀이 staged 되는지."""
+    from excelmerge.main_window import MainWindow
+    from excelmerge.diff_engine import compute_diff
+    app = QApplication.instance() or QApplication([])
+    win = MainWindow()
+    a = [["ID", "V"], ["1", "a1"], ["2", "a2"], ["3", "a3"], ["4", "a4"]]
+    b = [["ID", "V"], ["1", "b1"], ["2", "b2"], ["3", "b3"], ["4", "b4"]]
+    win._raw_data["a"], win._raw_data["b"] = a, b
+    win._formula_data["a"] = [list(r) for r in a]
+    win._formula_data["b"] = [list(r) for r in b]
+    win.panel_a._formula_data = win._formula_data["a"]
+    win.panel_b._formula_data = win._formula_data["b"]
+    win._diff_matrix, win._diff_row_meta = compute_diff(a, b, 0)
+    win.panel_a._row_meta = win.panel_b._row_meta = win._diff_row_meta
+    win._refresh_tables()
+    win.show()
+    app.processEvents()
+    tbl = win.panel_a.table
+
+    # 행 1,2,3 헤더를 다중 선택한 상태를 재현
+    tbl._select_rows([1, 2, 3])
+    app.processEvents()
+    assert tbl._selected_header_rows(2) == [1, 2, 3], tbl._selected_header_rows(2)
+    # 다중 선택 중 한 행 우클릭 = 전체 대상 → 스테이징
+    tbl._select_rows(tbl._selected_header_rows(2))
+    win._stage_selected("b_to_a")
+    assert set(win._staged.keys()) == {(1, 1), (2, 1), (3, 1)}, sorted(win._staged.keys())
+    assert all(v == "b_to_a" for v in win._staged.values())
+
+    # 선택에 없는 행 우클릭 = 그 행만 대상
+    assert tbl._selected_header_rows(4) == [4]
+    win.close()
+    print("PASS test_row_header_multi_stage")
+
+
+def test_sheet_path_absolute_target_saves():
+    """절대경로 rel Target(openpyxl 등) 파일도 저장이 실제 적용되는지 + 시트 미해결 시 raise."""
+    import tempfile
+    import zipfile
+    import openpyxl
+    from excelmerge import xlsx_writer
+
+    tmpdir = tempfile.mkdtemp()
+    p = os.path.join(tmpdir, "abs.xlsx")
+    wb = openpyxl.Workbook(); ws = wb.active
+    ws.append(["ID", "V"]); ws.append(["1", "a1"]); ws.append(["2", "a2"])
+    wb.save(p)   # openpyxl은 Target을 "/xl/worksheets/sheet1.xml"(절대)로 쓴다
+    with zipfile.ZipFile(p) as z:
+        assert b'Target="/xl/' in z.read("xl/_rels/workbook.xml.rels")
+        assert xlsx_writer._find_active_sheet_path(z) == "xl/worksheets/sheet1.xml"
+
+    xlsx_writer._write_patches_to_file(p, {"B2": "b1", "B3": "b2"})
+    rows = [[c.value for c in r] for r in openpyxl.load_workbook(p).active.iter_rows()]
+    assert rows[1][1] == "b1" and rows[2][1] == "b2", rows
+
+    # 시트 미해결 → 명시적 오류(조용한 유실 방지)
+    orig = xlsx_writer._find_active_sheet_path
+    xlsx_writer._find_active_sheet_path = lambda z: "xl/worksheets/nope.xml"
+    try:
+        raised = False
+        try:
+            xlsx_writer._write_patches_to_file(p, {"B2": "x"})
+        except ValueError:
+            raised = True
+        assert raised, "시트 미해결인데 raise 안 함"
+    finally:
+        xlsx_writer._find_active_sheet_path = orig
+    print("PASS test_sheet_path_absolute_target_saves")
+
+
 def test_diff_filter_after_key_change():
     """키 열 변경(매트릭스 재계산) 후에도 '변경 행만 보기'가 정확히 적용되는지.
     _apply_diff_filter가 캐시가 아닌 실제 isRowHidden을 조회하므로, 모델 리셋이
@@ -622,4 +693,6 @@ if __name__ == "__main__":
     test_load_xlsx_with_empty_fill()
     test_goto_changed_focus_and_selection_color()
     test_diff_filter_after_key_change()
+    test_row_header_multi_stage()
+    test_sheet_path_absolute_target_saves()
     print("ALL MODEL/VIEW TESTS PASS")
