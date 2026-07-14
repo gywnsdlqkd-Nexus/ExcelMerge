@@ -1,6 +1,9 @@
-PyQt5>=5.15.0
-openpyxl>=3.1.0
-lxml>=4.9
-formulas>=1.2
-numpy>=1.24
-pyinstaller>=6.0.0
+# 런타임/빌드 의존성 — 하한+상한으로 상위 major 자동 유입 차단.
+# 정확 재현이 필요하면 requirements.lock 사용(pip install -r requirements.lock).
+# 주의: formulas/numpy 는 v163~ 수식 평가 경로 제거로 더 이상 쓰이지 않아 삭제함.
+PyQt5>=5.15.0,<6
+openpyxl>=3.1.0,<4
+python-calamine>=0.2,<1      # pre-1.0 Rust 패키지 — minor 변경도 깨질 수 있어 major 상한 고정
+orjson>=3.9,<4
+lxml>=4.9,<7
+pyinstaller>=6.0.0,<7

@@ -2,8 +2,10 @@
 import base64 as _b64
 import os
 import sys
+import functools
 
-from PyQt5.QtGui import QColor, QFont, QIcon, QPixmap
+from PyQt5.QtCore import Qt
+from PyQt5.QtGui import QColor, QFont, QIcon, QImage, QPalette, QPixmap
 
 FONT_FAMILY = "맑은 고딕"
 
@@ -12,6 +14,19 @@ def ui_font(size: int = 9, bold: bool = False) -> QFont:
     if bold:
         return QFont(FONT_FAMILY, size, QFont.Bold)
     return QFont(FONT_FAMILY, size)
+
+
+def force_active_highlight(widget):
+    """비활성/비포커스 상태에서도 선택 하이라이트를 활성(파랑)과 동일하게 고정한다.
+    포커스가 다른 위젯(버튼/단축키)으로 옮겨가도 선택색이 회색으로 흐려지지 않게 한다.
+    그리드/트리 뷰가 공통으로 쓰는 팔레트 오버라이드(중복 제거용 헬퍼)."""
+    pal = widget.palette()
+    for grp in (QPalette.Inactive, QPalette.Disabled):
+        pal.setColor(grp, QPalette.Highlight,
+                     pal.color(QPalette.Active, QPalette.Highlight))
+        pal.setColor(grp, QPalette.HighlightedText,
+                     pal.color(QPalette.Active, QPalette.HighlightedText))
+    widget.setPalette(pal)
 
 
 # diff 상태별 색상 원본 테이블 — 모든 파생 색 상수는 여기서만 나온다
@@ -24,12 +39,34 @@ DIFF_RGB = {
 }
 DIFF_COLORS = {k: QColor(*v) for k, v in DIFF_RGB.items()}
 
-# RGB 튜플로 비교 — QColor 객체 hash 충돌 크래시 방지 (DIFF_RGB에서 파생, drift 불가)
-STAGED_RGB = DIFF_RGB["staged"]
-MERGED_RGB = DIFF_RGB["merged"]
-CHANGED_RGBS = {DIFF_RGB["added"], DIFF_RGB["modified"]}
+# 변경점이 있는 하단 시트 탭 배경 강조(반투명 노랑) — 기본 탭 렌더 위에 덧칠해 텍스트 가독 유지.
+SHEET_TAB_CHANGED_BG = QColor(255, 235, 156, 140)   # modified 노랑 계열, alpha
 
 MINIMAP_MARKER_COLOR = QColor(255, 140, 0, 220)   # 진한 주황 — 범례의 주황(staged)보다 채도↑
+
+# 셀값란/그리드에서 A/B 값이 다른 문자 구간 배경 강조색 (연핑크).
+CELL_DIFF_HL = QColor(0xFF, 0xC9, 0xC9)   # #FFC9C9
+# 강조 구간의 폰트 색 (빨강) — 선택 셀(흰 글자)에서도 핑크 배경 위 글자가 보이도록.
+CELL_DIFF_FG = QColor(0xC6, 0x28, 0x28)   # #C62828
+# 수식으로 계산된 값 셀의 폰트 색 (파랑) — 값이 수식 결과임을 그리드에서 구분.
+# 변경(diff) 구간은 이 파랑 대신 CELL_DIFF_FG(빨강)로 덮어써 변경 위치를 우선 표시한다.
+CELL_FORMULA_FG = QColor(0x15, 0x65, 0xC0)   # #1565C0
+# 변경 검사에서 제외된 열의 셀 배경(회색) — 흰색과 구분되어 '검사 안 함'을 한눈에 표시.
+EXCLUDED_CELL_BG = QColor(0xD9, 0xD9, 0xD9)   # #D9D9D9
+
+# 폴더 비교(FolderCompareView) 파일 목록 상태별 배경색 — folder_compare 상태 키에 매핑.
+# only_a/only_b(한쪽만) = 연두(added 재사용), modified = 노랑(재사용),
+# same = 옅은 회색(중립), placeholder(반대쪽에 없는 칸) = 더 옅은 회색.
+FOLDER_STATUS_RGB = {
+    "same":     (245, 245, 245),   # 옅은 회색 - 동일
+    "modified": DIFF_RGB["modified"],
+    "only_a":   DIFF_RGB["added"],
+    "only_b":   DIFF_RGB["added"],
+}
+FOLDER_STATUS_COLORS = {k: QColor(*v) for k, v in FOLDER_STATUS_RGB.items()}
+
+# 신규(added) 셀의 반대쪽 빈 칸에 그리는 대각선 해치 색 (Beyond Compare식 매칭 표시).
+HATCH_COLOR = QColor(0xB0, 0xB0, 0xB0)   # 회색
 
 MENU_QSS = f"QMenu {{ font-family: '{FONT_FAMILY}'; font-size: 9pt; }}"
 
@@ -75,6 +112,18 @@ APP_QSS = """
                 border-right: 1px solid #ccc; border-bottom: 1px solid #ccc;
                 padding: 3px 6px; font-weight: bold;
             }
+            QTabBar#sheet_tabs { background: #f0f0f0; }
+            QTabBar#sheet_tabs::tab {
+                background: #e4e6ec; color: #333;
+                border: 1px solid #ccc; border-bottom: none;
+                padding: 3px 14px; margin-right: 2px;
+                min-width: 40px;
+            }
+            QTabBar#sheet_tabs::tab:selected {
+                background: #fff; color: #0078d4;
+                border-top: 2px solid #0078d4;
+            }
+            QTabBar#sheet_tabs::tab:hover:!selected { background: #eef5fc; }
         """
 
 DROP_HIGHLIGHT_QSS = (
@@ -91,14 +140,103 @@ def load_app_icon():
     ICO는 멀티 사이즈(16/32/48/256 등)를 포함하므로 작업 표시줄·타이틀바 모두
     동일 이미지에서 적합한 사이즈를 가져온다. 실패 시 base64 PNG로 폴백.
     """
-    base_dir = getattr(sys, "_MEIPASS", os.path.dirname(os.path.abspath(__file__)))
-    ico_path = os.path.join(base_dir, "app_icon.ico")
-    if os.path.isfile(ico_path):
-        icon = QIcon(ico_path)
-        if not icon.isNull():
-            return icon
+    for d in _icon_search_dirs():
+        ico_path = os.path.join(d, "app_icon.ico")
+        if os.path.isfile(ico_path):
+            icon = QIcon(ico_path)
+            if not icon.isNull():
+                return icon
     # 폴백: 임베디드 base64 PNG (ico 누락 시)
     raw = _b64.b64decode(_APP_ICON_B64)
     pix = QPixmap()
     pix.loadFromData(raw, "PNG")
     return QIcon(pix)
+
+
+# ── PNG 아이콘 로더 (헤더 키/제외 표시, 탭 파일형식 표시) ──────────────────────
+def _icon_search_dirs():
+    """PNG/ICO 아이콘 탐색 후보 디렉터리.
+    이미지는 프로젝트 루트의 images/ 폴더에 있고, spec이 번들 시 _MEIPASS/images/로 넣는다.
+    - 프리즈: sys._MEIPASS/images 및 _MEIPASS 루트
+    - dev: (프로젝트 루트 | excelmerge/)의 images/ 및 각 폴더 자체(구버전 호환)
+    각 후보의 images/ 하위를 먼저 본다.
+    """
+    bases = []
+    mei = getattr(sys, "_MEIPASS", None)
+    if mei:
+        bases.append(mei)
+    here = os.path.dirname(os.path.abspath(__file__))
+    bases.append(here)
+    bases.append(os.path.dirname(here))
+    dirs = []
+    for b in bases:
+        dirs.append(os.path.join(b, "images"))
+        dirs.append(b)
+    return dirs
+
+
+def _icon_with_transparent_white(path: str, thr: int = 240) -> QIcon:
+    """PNG를 로드하되 (거의)흰색 배경 픽셀을 투명 처리한 QIcon 반환.
+    원본이 큰 편(수백 px)이라 128px로 축소 후 픽셀 순회 — 헤더/메뉴 소형 표시에 충분하고
+    순회 비용도 작다(1회 로드·캐시). 실패 시 null QIcon."""
+    img = QImage(path)
+    if img.isNull():
+        return QIcon()
+    img = img.convertToFormat(QImage.Format_ARGB32)
+    if max(img.width(), img.height()) > 128:
+        img = img.scaled(128, 128, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+        img = img.convertToFormat(QImage.Format_ARGB32)
+    w, h = img.width(), img.height()
+    for y in range(h):
+        for x in range(w):
+            c = img.pixelColor(x, y)
+            if c.red() >= thr and c.green() >= thr and c.blue() >= thr:
+                c.setAlpha(0)
+                img.setPixelColor(x, y, c)
+    return QIcon(QPixmap.fromImage(img))
+
+
+@functools.lru_cache(maxsize=None)
+def load_png_icon(name: str, transparent_white: bool = False) -> QIcon:
+    """파일명(예: 'Key.png')으로 QIcon을 1회 로드·캐시. 못 찾으면 null QIcon(폴백).
+    transparent_white=True면 흰색 배경을 투명 처리해 채색 배경(헤더 노랑/회색) 위에서
+    흰 사각형이 보이지 않도록 한다."""
+    for d in _icon_search_dirs():
+        p = os.path.join(d, name)
+        if os.path.isfile(p):
+            if transparent_white:
+                ic = _icon_with_transparent_white(p)
+            else:
+                ic = QIcon(p)
+            if not ic.isNull():
+                return ic
+    return QIcon()
+
+
+def key_header_icon() -> QIcon:
+    """키 열 헤더 표시 아이콘 (흰 배경 투명)."""
+    return load_png_icon("Key.png", True)
+
+
+def exclude_header_icon() -> QIcon:
+    """변경 검사 제외 열 헤더/메뉴 표시 아이콘 (흰 배경 투명)."""
+    return load_png_icon("Exception.png", True)
+
+
+def reset_header_icon() -> QIcon:
+    """초기화/해제(검사 제외 해제 등) 메뉴 표시 아이콘 (흰 배경 투명)."""
+    return load_png_icon("Reset.png", True)
+
+
+# 확장자 → 탭 파일형식 아이콘 파일명. (uasset은 요청대로 Excel.png 사용)
+_TAB_ICON_FILES = {
+    ".xlsx": "Excel.png", ".xls": "Excel.png", ".xlsm": "Excel.png", ".xlsb": "Excel.png",
+    ".json": "JSON.png",
+    ".uasset": "Excel.png",
+}
+
+
+def ext_tab_icon(ext: str) -> QIcon:
+    """확장자에 해당하는 탭 아이콘. 매핑 없으면 null QIcon."""
+    name = _TAB_ICON_FILES.get((ext or "").lower())
+    return load_png_icon(name) if name else QIcon()

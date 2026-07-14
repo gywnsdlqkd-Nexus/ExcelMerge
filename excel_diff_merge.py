@@ -43,33 +43,47 @@ def _set_windows_app_user_model_id():
     try:
         import ctypes
         ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(
-            "Netmarble.ExcelMerge.App")
+            "ExcelMerge.App")
     except Exception:
         pass
 
 
 def main():
+    # 크래시/미처리 예외를 %APPDATA%/ExcelMerge/crash.log 에 기록(재현 어려운 버그 진단용).
+    try:
+        from excelmerge.crashlog import install as _install_crashlog
+        _install_crashlog()
+    except Exception:
+        pass
     _set_windows_app_user_model_id()
     app = QApplication(sys.argv)
     app.setStyle("Fusion")
     app.setWindowIcon(load_app_icon())
     win = MainWindow()
 
-    # P4V 등 외부 도구가 커맨드라인으로 파일을 넘긴 경우 자동 로드
+    # P4V 등 외부 도구가 커맨드라인으로 경로를 넘긴 경우 자동 로드.
+    # 폴더가 하나라도 있으면 폴더 비교 탭, 아니면 파일 비교 탭으로 연다.
     path_a, path_b = _parse_args()
-    if path_a and os.path.isfile(path_a):
-        win.panel_a.set_path(path_a)
-    if path_b and os.path.isfile(path_b):
-        win.panel_b.set_path(path_b)
-    # 두 파일 모두 있으면 preview 없이 바로 비교 (load_sheet 2회로 단축)
-    if path_a and path_b and os.path.isfile(path_a) and os.path.isfile(path_b):
-        win._run_compare()
-    elif path_a and os.path.isfile(path_a):
-        win._run_preview("a", path_a)
-    elif path_b and os.path.isfile(path_b):
-        win._run_preview("b", path_b)
+    a_is_dir = bool(path_a) and os.path.isdir(path_a)
+    b_is_dir = bool(path_b) and os.path.isdir(path_b)
+    a_is_file = bool(path_a) and os.path.isfile(path_a)
+    b_is_file = bool(path_b) and os.path.isfile(path_b)
+    if a_is_dir or b_is_dir:
+        win.open_folder_compare(path_a if a_is_dir else "",
+                                path_b if b_is_dir else "")
+    elif a_is_file or b_is_file:
+        win.open_file_compare(path_a if a_is_file else "",
+                              path_b if b_is_file else "")
 
     win.show()
+
+    # 시작 후 백그라운드로 새 버전 확인(비차단). 서버 미설정/네트워크 문제면 조용히 넘어감.
+    try:
+        from excelmerge.updater import check_for_updates
+        check_for_updates(win)
+    except Exception:
+        pass
+
     sys.exit(app.exec_())
 
 

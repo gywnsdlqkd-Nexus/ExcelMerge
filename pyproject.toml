@@ -1,0 +1,33 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "excelmerge"
+description = "Excel/JSON/uasset A/B 비교·셀 단위 병합 PyQt5 데스크톱 툴"
+dynamic = ["version"]
+requires-python = ">=3.10"
+dependencies = [
+    "PyQt5>=5.15.0,<6",
+    "openpyxl>=3.1.0,<4",
+    "python-calamine>=0.2,<1",
+    "orjson>=3.9,<4",
+    "lxml>=4.9,<7",
+]
+
+[project.optional-dependencies]
+build = ["pyinstaller>=6.0.0,<7"]
+dev = ["pytest>=7"]
+
+[tool.setuptools]
+packages = ["excelmerge"]
+
+[tool.setuptools.dynamic]
+version = { attr = "excelmerge.__version__" }
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+# 헤드리스에서 Qt 위젯 테스트가 돌도록 오프스크린 강제(실제 설정은 tests/conftest.py 에서 수행).
+# smoke_test.py 는 test_ 접두가 아니므로 파일명 패턴에 명시적으로 포함.
+python_files = ["test_*.py", "*_test.py"]
+addopts = "-ra"
