@@ -232,7 +232,7 @@ def copy_pairs(pairs, progress=None):
     """폴더 병합의 물리 복사 — 순수 함수(UI/Qt 비의존, 단위테스트 가능).
 
     pairs: [(src, dst, rel_path), ...]  — 호출부(UI 스레드)에서 미리 해결한 복사 목록.
-    각 항목마다 대상 디렉터리를 만들고, 기존 대상이 있으면 .bak 백업 후 shutil.copy2 로 덮어쓴다.
+    각 항목마다 대상 디렉터리를 만들고 shutil.copy2 로 덮어쓴다(백업 .bak 은 만들지 않음).
     반환: (done, fails, merged_rels)
       done        : 성공 복사 수
       fails        : ["<rel>: <오류>", ...]
@@ -248,13 +248,7 @@ def copy_pairs(pairs, progress=None):
             continue
         try:
             os.makedirs(os.path.dirname(dst), exist_ok=True)
-            # 덮어쓰기 전 대상 원본을 .bak로 백업(복구 수단).
-            if os.path.exists(dst):
-                try:
-                    shutil.copy2(dst, dst + ".bak")
-                except OSError:
-                    pass
-            shutil.copy2(src, dst)
+            shutil.copy2(src, dst)   # 덮어쓰기(백업 .bak 은 만들지 않음)
             done += 1
             merged_rels.append(rel)
         except OSError as ex:

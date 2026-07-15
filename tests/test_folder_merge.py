@@ -5,7 +5,7 @@ import os
 from excelmerge.workers import copy_pairs
 
 
-def test_copies_and_backs_up(tmp_path):
+def test_copies_creating_dirs(tmp_path):
     src = tmp_path / "src.txt"
     src.write_text("new", encoding="utf-8")
     dst = tmp_path / "out" / "dst.txt"          # 아직 없는 대상(디렉터리도 없음)
@@ -15,10 +15,11 @@ def test_copies_and_backs_up(tmp_path):
     assert done == 1 and not fails
     assert merged == ["out/dst.txt"]
     assert dst.read_text(encoding="utf-8") == "new"
-    assert not os.path.exists(str(dst) + ".bak")   # 신규 생성이라 .bak 없음
+    assert not os.path.exists(str(dst) + ".bak")   # 백업 비활성
 
 
-def test_backup_on_overwrite(tmp_path):
+def test_overwrite_no_bak(tmp_path):
+    """기존 대상을 덮어쓸 때 .bak 백업을 만들지 않는다(사용자 요청으로 제거)."""
     src = tmp_path / "src.txt"; src.write_text("new", encoding="utf-8")
     dst = tmp_path / "dst.txt"; dst.write_text("old", encoding="utf-8")
 
@@ -26,8 +27,7 @@ def test_backup_on_overwrite(tmp_path):
 
     assert done == 1 and not fails
     assert dst.read_text(encoding="utf-8") == "new"
-    assert os.path.exists(str(dst) + ".bak"), "덮어쓰기 전 .bak 백업 미생성"
-    assert (tmp_path / "dst.txt.bak").read_text(encoding="utf-8") == "old"
+    assert not os.path.exists(str(dst) + ".bak"), ".bak 를 만들면 안 됨(백업 비활성)"
 
 
 def test_skips_empty_src_and_collects_fails(tmp_path):

@@ -1,7 +1,6 @@
 """xlsx 저장 — sheet XML 직접 패치로 수식 보존 기록 (excel_diff_merge.py에서 분리)."""
 import os
 import re
-import shutil
 import zipfile
 from copy import deepcopy
 from collections import defaultdict
@@ -185,12 +184,7 @@ def _write_patches_to_file(
                         patch_styles,
                     )
                 zout.writestr(item, data)
-        # 덮어쓰기 전 원본을 .bak로 백업 — 잘못 저장 시 복구 수단(원자적 교체와 별개).
-        try:
-            if os.path.exists(path_base):
-                shutil.copy2(path_base, path_base + ".bak")
-        except OSError:
-            pass   # 백업 실패는 저장 자체를 막지 않는다(권한/디스크 등)
+        # 임시 파일을 원자적으로 교체(백업 .bak 은 만들지 않음 — 사용자 요청으로 제거).
         os.replace(tmp, path_base)
     except Exception:
         if os.path.exists(tmp):

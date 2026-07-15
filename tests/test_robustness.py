@@ -30,19 +30,16 @@ def _make_xlsx(path, rows, sheet="Sheet1"):
     wb.save(path)
 
 
-def test_save_roundtrip_and_bak():
-    """값 패치 저장 → 재로드 시 반영 + 원본 .bak 백업 생성 (A2)."""
+def test_save_roundtrip_no_bak():
+    """값 패치 저장 → 재로드 시 반영. .bak 백업은 만들지 않는다(사용자 요청으로 제거)."""
     d = tempfile.mkdtemp()
     p = os.path.join(d, "t.xlsx")
     _make_xlsx(p, [["ID", "V"], ["1", "a1"], ["2", "a2"]], sheet="Data")
     _write_patches_to_file(p, {"B2": "PATCHED"}, sheet_name="Data")
     vals = load_values_any(p, None, "Data")
     assert vals[1][1] == "PATCHED", vals[1]
-    assert os.path.exists(p + ".bak"), ".bak 백업 미생성"
-    # 백업은 패치 전 원본이어야 함
-    bak = load_values_any(p + ".bak", None, "Data")
-    assert bak[1][1] == "a1", bak[1]
-    print("PASS test_save_roundtrip_and_bak")
+    assert not os.path.exists(p + ".bak"), ".bak 를 만들면 안 됨(백업 비활성)"
+    print("PASS test_save_roundtrip_no_bak")
 
 
 def test_save_missing_sheet_raises():
@@ -142,7 +139,7 @@ def test_json_wrapper_renders_as_table():
 
 
 def main():
-    test_save_roundtrip_and_bak()
+    test_save_roundtrip_no_bak()
     test_json_wrapper_renders_as_table()
     test_save_missing_sheet_raises()
     test_count_dropped_key_rows()
