@@ -118,7 +118,7 @@ def test_apply_update_spawns_with_clean_env(monkeypatch):
     captured = {}
 
     def fake_popen(args, **kw):
-        captured["env"] = kw.get("env")
+        captured.update(kw)
         return object()
 
     monkeypatch.setattr(upd.subprocess, "Popen", fake_popen)
@@ -128,6 +128,12 @@ def test_apply_update_spawns_with_clean_env(monkeypatch):
     assert env is not None, "env를 명시적으로 전달하지 않음(상속 위험)"
     assert "_MEIPASS2" not in env and "_PYI_ARCHIVE_FILE" not in env
     assert env.get("KEEP_ME") == "1", "일반 환경변수는 유지돼야 함"
+    # 콘솔 창 번쩍임 방지: CREATE_NO_WINDOW 만(상호배타 DETACHED_PROCESS 제외) + 숨김 STARTUPINFO
+    flags = captured.get("creationflags", 0)
+    assert flags & 0x08000000, "CREATE_NO_WINDOW 미설정"
+    assert not (flags & 0x00000008), "DETACHED_PROCESS 는 CREATE_NO_WINDOW 와 상호배타 — 제거 필요"
+    si = captured.get("startupinfo")
+    assert si is not None and si.wShowWindow == upd.subprocess.SW_HIDE
     print("PASS test_apply_update_spawns_with_clean_env")
 
 

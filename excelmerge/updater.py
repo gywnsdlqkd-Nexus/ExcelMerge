@@ -293,9 +293,16 @@ def apply_update(new_exe: str) -> bool:
     try:
         with open(bat, "w", encoding="mbcs", errors="replace") as f:
             f.write(build_update_bat(new_exe, target))
-        flags = 0x00000008 | 0x08000000   # DETACHED_PROCESS | CREATE_NO_WINDOW
+        # cmd 콘솔 창이 잠깐 떴다 사라지는 것 방지.
+        # CREATE_NO_WINDOW 만 사용한다 — DETACHED_PROCESS 와는 상호 배타(동시 지정 시
+        # Windows가 콘솔을 붙여 창이 번쩍인다). 추가로 STARTUPINFO 로 창을 숨긴다(벨트+멜빵).
+        CREATE_NO_WINDOW = 0x08000000
+        si = subprocess.STARTUPINFO()
+        si.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+        si.wShowWindow = subprocess.SW_HIDE
         # 부트로더 변수를 제거한 환경으로 배치를 띄운다(재실행 exe가 정상 추출하도록).
-        subprocess.Popen(["cmd", "/c", bat], close_fds=True, creationflags=flags,
+        subprocess.Popen(["cmd", "/c", bat], close_fds=True,
+                         creationflags=CREATE_NO_WINDOW, startupinfo=si,
                          env=_clean_child_env())
         return True
     except Exception:
