@@ -1,4 +1,5 @@
 """diff 엔진 — 키 열 기반/행 순서 기반 비교 (excel_diff_merge.py에서 분리)."""
+from .constants import STATUS_SAME, STATUS_ADDED, STATUS_MODIFIED
 
 
 def count_changed(diff_matrix: list, excluded_cols=None) -> int:
@@ -10,7 +11,7 @@ def count_changed(diff_matrix: list, excluded_cols=None) -> int:
         1
         for row in diff_matrix
         for c, (st, *_) in enumerate(row)
-        if st != "same" and c not in excl
+        if st != STATUS_SAME and c not in excl
     )
 
 
@@ -42,10 +43,10 @@ def count_dropped_key_rows(a_data: list, b_data: list, key_col: int,
 def _cell_status(a_val: str, b_val: str) -> str:
     """added: 한쪽 파일에만 값이 있음 (A 전용/B 전용 모두) / modified: 양쪽 값이 다름."""
     if (a_val == "") != (b_val == ""):
-        return "added"
+        return STATUS_ADDED
     if a_val != b_val:
-        return "modified"
-    return "same"
+        return STATUS_MODIFIED
+    return STATUS_SAME
 
 
 def _compute_diff_row_order(

@@ -25,6 +25,8 @@ from .loaders import _EXCEL_EXTS, list_sheet_names, clear_values_cache
 from .panels import FilePanel
 from .prefs import load_key_prefs, save_key_prefs, load_last_sheet, save_last_sheet
 from .theme import APP_QSS, DIFF_COLORS, ui_font, ext_tab_icon
+from .constants import STATUS_SAME, DIR_A2B, DIR_B2A
+from .compare_toolbar import build_find_box, add_legend
 from .widgets import (
     ExcelTableView, MinimapScrollBar, make_find_icon, SheetTabBar, FreezeController,
 )
@@ -143,81 +145,19 @@ class DiffView(QWidget):
         self.next_diff_btn.clicked.connect(lambda: self._goto_changed(+1))
         toolbar.addWidget(self.next_diff_btn)
 
-        # 찾기 — 검색란 + 옵션 토글 + 이전/다음 찾기 버튼
+        # 찾기 — 검색란 + 옵션 토글 + 이전/다음 찾기 버튼 (공용 구성)
         toolbar.addSpacing(16)
-        find_box = QHBoxLayout()
-        find_box.setSpacing(4)
-
-        self.find_edit = QLineEdit()
-        self.find_edit.setObjectName("find_edit")
-        self.find_edit.setPlaceholderText("찾을 내용 (Ctrl+F)")
-        self.find_edit.setFixedHeight(36)
-        self.find_edit.setFixedWidth(200)
-        self.find_edit.setFont(ui_font(10))
-        self.find_edit.setClearButtonEnabled(True)
-        self.find_edit.setEnabled(False)
-        self.find_edit.setToolTip("셀 값 검색 — Enter: 다음 찾기, Shift+Enter: 이전 찾기")
-        self.find_edit.returnPressed.connect(lambda: self._goto_find(+1))
-        find_prev_sc = QShortcut(QKeySequence("Shift+Return"), self.find_edit)
-        find_prev_sc.setContext(Qt.WidgetShortcut)
-        find_prev_sc.activated.connect(lambda: self._goto_find(-1))
-        find_box.addWidget(self.find_edit)
-
-        def _find_btn(kind: str, tooltip: str, checkable: bool) -> QPushButton:
-            btn = QPushButton()
-            btn.setObjectName("find_btn")
-            btn.setFixedSize(36, 36)
-            btn.setIcon(self._make_find_icon(kind))
-            btn.setIconSize(QSize(22, 22))
-            btn.setCheckable(checkable)
-            btn.setEnabled(False)
-            btn.setToolTip(tooltip)
-            find_box.addWidget(btn)
-            return btn
-
-        self.find_case_btn = _find_btn(
-            "case",
-            "대소문자 무시 (Ignore case)\n"
-            "켜짐: 대소문자를 구분하지 않고 검색\n"
-            "꺼짐: 대소문자가 정확히 일치할 때만 검색",
-            checkable=True,
-        )
-        self.find_case_btn.setChecked(True)
-
-        self.find_word_btn = _find_btn(
-            "word",
-            "전체 단어 일치 (Match whole word only)\n"
-            "켜짐: 검색어가 독립된 단어로 존재할 때만 찾음\n"
-            "꺼짐: 부분 문자열도 찾음",
-            checkable=True,
-        )
-
-        self.find_prev_btn = _find_btn("prev", "이전 찾기 (Shift+Enter)", checkable=False)
-        self.find_prev_btn.clicked.connect(lambda: self._goto_find(-1))
-
-        self.find_next_btn = _find_btn("next", "다음 찾기 (Enter)", checkable=False)
-        self.find_next_btn.clicked.connect(lambda: self._goto_find(+1))
-
-        toolbar.addLayout(find_box)
+        toolbar.addLayout(build_find_box(
+            self, "찾을 내용 (Ctrl+F)", self._goto_find,
+            "셀 값 검색 — Enter: 다음 찾기, Shift+Enter: 이전 찾기",
+            with_word=True))
 
         toolbar.addStretch()
 
-        # 범례
-        for lbl, key in [
-            ("신규", "added"),
-            ("변경", "modified"), ("준비", "staged"), ("병합", "merged"),
-        ]:
-            dot = QLabel("  ")
-            dot.setFixedSize(20, 20)
-            dot.setStyleSheet(
-                f"background:{DIFF_COLORS[key].name()};"
-                "border:1px solid #aaa; border-radius:3px;"
-            )
-            txt = QLabel(lbl)
-            txt.setFont(ui_font(9))
-            toolbar.addWidget(dot)
-            toolbar.addWidget(txt)
-            toolbar.addSpacing(8)
+        # 범례 (공용)
+        add_legend(toolbar, [(lbl, DIFF_COLORS[key]) for lbl, key in (
+            ("신규", "added"), ("변경", "modified"),
+            ("준비", "staged"), ("병합", "merged"))])
 
         root.addLayout(toolbar)
 
@@ -790,7 +730,7 @@ class DiffView(QWidget):
                 if r in merged_rows:
                     continue
                 is_changed = any(
-                    status != "same"
+                    status != STATUS_SAME
                     for c, (status, *_) in enumerate(row)
                     if c not in excl
                 )
@@ -856,7 +796,7 @@ class DiffView(QWidget):
             for c, cell in enumerate(row):
                 if c in excl:
                     continue
-                if cell[0] != "same":
+                if cell[0] != STATUS_SAME:
                     yield (r, c)
 
     def _current_anchor(self):
@@ -999,7 +939,7 @@ class DiffView(QWidget):
 
             def _row_has_changed(r):
                 return any(
-                    st != "same"
+                    st != STATUS_SAME
                     for c, (st, *_) in enumerate(self._diff_matrix[r])
                     if c not in excl
                 )
@@ -1018,14 +958,14 @@ class DiffView(QWidget):
             cols_total = len(self._diff_matrix[0]) if self._diff_matrix else 0
             if cols_total > 0 and visible_rows:
                 if cols_total == 1:
-                    if 0 not in excl and any(self._diff_matrix[r][0][0] != "same" for r in visible_rows):
+                    if 0 not in excl and any(self._diff_matrix[r][0][0] != STATUS_SAME for r in visible_rows):
                         col_ratios.append(0.0)
                 else:
                     denom_c = cols_total - 1
                     for c in range(cols_total):
                         if c in excl:
                             continue
-                        if any(self._diff_matrix[r][c][0] != "same" for r in visible_rows):
+                        if any(self._diff_matrix[r][c][0] != STATUS_SAME for r in visible_rows):
                             col_ratios.append(c / denom_c)
         for tbl in (self.panel_a.table, self.panel_b.table):
             v = tbl.verticalScrollBar()
@@ -1050,7 +990,7 @@ class DiffView(QWidget):
             if r < len(self._diff_matrix)
             and c < len(self._diff_matrix[r])
             and c not in self._excluded_cols
-            and self._diff_matrix[r][c][0] != "same"
+            and self._diff_matrix[r][c][0] != STATUS_SAME
         }
         if not cells:
             QMessageBox.information(self, "알림", "선택한 셀 중 변경된 셀이 없습니다.")
@@ -1071,7 +1011,7 @@ class DiffView(QWidget):
             except (IndexError, TypeError):
                 a_val, b_val = "", ""
 
-            display = a_val if dir_ == "a_to_b" else b_val
+            display = a_val if dir_ == DIR_A2B else b_val
             self.panel_a._staged_display[r, c] = display
             self.panel_b._staged_display[r, c] = display
 
@@ -1140,7 +1080,7 @@ class DiffView(QWidget):
 
         # 저장 대상 측이 실제로 쓸 내용이 있는지 확인
         # a 저장: b_to_a (B→A 방향) staged 셀만 / b 저장: a_to_b staged 셀만
-        relevant_direction = "b_to_a" if side == "a" else "a_to_b"
+        relevant_direction = DIR_B2A if side == "a" else DIR_A2B
         staged_for_side = {k: v for k, v in self._staged.items() if v == relevant_direction}
         if not staged_for_side:
             return
@@ -1192,7 +1132,7 @@ class DiffView(QWidget):
         side = getattr(self, "_saving_side", None)
 
         # ── 저장한 side에 해당하는 staged만 확정 반영 ────────────────────────
-        relevant_direction = "b_to_a" if side == "a" else "a_to_b"
+        relevant_direction = DIR_B2A if side == "a" else DIR_A2B
         saved_staged = {k: v for k, v in self._staged.items() if v == relevant_direction}
         staged_cells = set(saved_staged.keys())
 
@@ -1200,11 +1140,11 @@ class DiffView(QWidget):
         for (r, c), direction in saved_staged.items():
             if r < len(self._diff_matrix) and c < len(self._diff_matrix[r]):
                 _, a_val, b_val = self._diff_matrix[r][c]
-                if direction == "a_to_b":
+                if direction == DIR_A2B:
                     b_val = a_val
                 else:
                     a_val = b_val
-                self._diff_matrix[r][c] = ("same", a_val, b_val)
+                self._diff_matrix[r][c] = (STATUS_SAME, a_val, b_val)
 
         # 저장한 side의 staged 제거 (나머지 side는 유지)
         for k in list(self._staged.keys()):
@@ -1355,8 +1295,8 @@ class DiffView(QWidget):
 
     def _set_save_btn_state(self, enabled: bool = True):
         # b_to_a staged → A 파일에 쓸 내용 / a_to_b staged → B 파일에 쓸 내용
-        has_a = any(v == "b_to_a" for v in self._staged.values())
-        has_b = any(v == "a_to_b" for v in self._staged.values())
+        has_a = any(v == DIR_B2A for v in self._staged.values())
+        has_b = any(v == DIR_A2B for v in self._staged.values())
 
         # JSON/uasset 등 비-xlsx 파일은 저장 미지원 → 버튼 강제 비활성화 + 툴팁 안내
         def _xlsx_ok(path: str) -> bool:

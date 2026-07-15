@@ -21,6 +21,7 @@ from openpyxl.utils import get_column_letter
 from .diff_model import DiffTableModel
 from .diff_model import EXTRA_ROWS as EXTRA_ROWS  # smoke_test 재노출
 from .loaders import _SUPPORTED_EXTS
+from .constants import DIR_A2B, DIR_B2A
 from .theme import (
     CELL_DIFF_HL, CELL_DIFF_FG, HATCH_COLOR, MENU_QSS, SHEET_TAB_CHANGED_BG,
     MINIMAP_MARKER_COLOR, ui_font, key_header_icon, exclude_header_icon,
@@ -998,10 +999,10 @@ class ExcelTableView(QTableView):
 
         if act_a2b is not None and act == act_a2b:
             self._select_cols(target_cols)
-            self.stage_requested.emit("a_to_b")
+            self.stage_requested.emit(DIR_A2B)
         elif act_b2a is not None and act == act_b2a:
             self._select_cols(target_cols)
-            self.stage_requested.emit("b_to_a")
+            self.stage_requested.emit(DIR_B2A)
         elif act_unstage is not None and act == act_unstage:
             self._select_cols(target_cols)
             self.unstage_requested.emit()
@@ -1066,10 +1067,10 @@ class ExcelTableView(QTableView):
 
         if act_a2b is not None and act == act_a2b:
             self._select_rows(target_rows)
-            self.stage_requested.emit("a_to_b")
+            self.stage_requested.emit(DIR_A2B)
         elif act_b2a is not None and act == act_b2a:
             self._select_rows(target_rows)
-            self.stage_requested.emit("b_to_a")
+            self.stage_requested.emit(DIR_B2A)
         elif act_unstage is not None and act == act_unstage:
             self._select_rows(target_rows)
             self.unstage_requested.emit()
@@ -1100,9 +1101,9 @@ class ExcelTableView(QTableView):
         if act is None:
             return
         if act_a2b is not None and act == act_a2b:
-            self.stage_requested.emit("a_to_b")
+            self.stage_requested.emit(DIR_A2B)
         elif act_b2a is not None and act == act_b2a:
-            self.stage_requested.emit("b_to_a")
+            self.stage_requested.emit(DIR_B2A)
         elif act_unstage is not None and act == act_unstage:
             self.unstage_requested.emit()
 
@@ -1362,11 +1363,11 @@ class ExcelTableView(QTableView):
         if alt and not ctrl and not shift:
             if key == Qt.Key_Right:
                 if self._has_changed_selection():
-                    self.stage_requested.emit("a_to_b")
+                    self.stage_requested.emit(DIR_A2B)
                 event.accept(); return
             if key == Qt.Key_Left:
                 if self._has_changed_selection():
-                    self.stage_requested.emit("b_to_a")
+                    self.stage_requested.emit(DIR_B2A)
                 event.accept(); return
             if key in (Qt.Key_Backspace, Qt.Key_Delete):
                 if self._has_staged_selection():

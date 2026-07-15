@@ -9,9 +9,9 @@ from PyQt5.QtCore import QThread, pyqtSignal
 from .loaders import load_values_any, load_formula_flags_any
 from .diff_engine import compute_diff, count_changed, count_dropped_key_rows
 from .folder_compare import compare_folders
-from .xlsx_writer import (
-    _cell_ref, _promote_empty_cols_to_delete, _write_patches_to_file,
-)
+from .xlsx_writer import _promote_empty_cols_to_delete, _write_patches_to_file
+from .merge_build import build_side_patches
+from .constants import DIR_A2B, DIR_B2A
 
 _PROGRESS_INTERVAL = 0.1   # 진행률 emit 최소 간격 (초) — 상태바 스팸 방지
 
@@ -312,116 +312,25 @@ class StagedMergeWorker(QThread):
         self.src_path = src_path
         self.src_sheet_name = src_sheet_name
 
-    def _meta(self, display_r: int) -> tuple:
-        if display_r < len(self.row_meta):
-            return self.row_meta[display_r]
-        return (None, None)
-
     def run(self):
         try:
-            a2b = {k for k, v in self.staged.items() if v == "a_to_b"}
-            b2a = {k for k, v in self.staged.items() if v == "b_to_a"}
-
-            # ── B 파일에 쓸 내용 (a2b: 소스=A) ────────────────────────────────
-            patches_b: dict[str, str] = {}
-            insert_rows_b: dict[int, list[tuple]] = {}
-            delete_rows_b: set[int] = set()   # 1-based 행 번호
-            style_src_b: dict[str, str] = {}   # {target_ref(B): source_ref(A)}
-
-            # a2b 병합: display_r 단위로 행 전체가 a2b 대상인지 판별
-            a2b_display_rows = {r for (r, c) in a2b}
-            for r in a2b_display_rows:
-                row = self.diff_matrix[r]
-                a_orig, b_orig = self._meta(r)
-                # 해당 display 행의 모든 셀이 a2b 대상인지 확인
-                row_cells_in_a2b = [(r, c) for c in range(len(row)) if (r, c) in a2b]
-                if not row_cells_in_a2b:
-                    continue
-
-                if b_orig is not None:
-                    # 스테이징된 셀을 patches에 추가
-                    # 값으로 병합 — 수식이 아닌 diff_matrix의 계산값(a_val)을 기록
-                    for (_, c) in row_cells_in_a2b:
-                        _, a_val, _ = self.diff_matrix[r][c]
-                        tref = _cell_ref(b_orig, c)
-                        patches_b[tref] = a_val
-                        if a_orig is not None:
-                            style_src_b[tref] = _cell_ref(a_orig, c)
-                else:
-                    # B에 행 없음(삭제됨 행) → 새 행 삽입 (소스 A 좌표를 3원소로)
-                    for (_, c) in row_cells_in_a2b:
-                        _, a_val, _ = self.diff_matrix[r][c]
-                        src_ref = _cell_ref(a_orig, c) if a_orig is not None else None
-                        insert_rows_b.setdefault(r, []).append((c, a_val, src_ref))
-
-            # 패치 후 빈 열 감지 및 삭제 준비 (쓸 내용이 있을 때만 파일 접근)
-            if (patches_b or insert_rows_b or delete_rows_b) and self.path_b:
-                patches_b, delete_rows_b, del_cols_b = _promote_empty_cols_to_delete(
-                    patches_b, delete_rows_b, self.path_b, self.sheet_name
-                )
-                # 삭제 승격으로 사라진 patch 키의 서식 매핑 제거
-                style_src_b = {k: v for k, v in style_src_b.items() if k in patches_b}
-                if (patches_b or insert_rows_b or delete_rows_b or del_cols_b):
-                    _write_patches_to_file(
-                        self.path_b, patches_b,
-                        list(insert_rows_b.values()),
-                        delete_rows_b,
-                        del_cols_b,
-                        self.sheet_name,
-                        self.src_path,
-                        self.src_sheet_name,
-                        style_src_b,
-                    )
-
-            # ── A 파일에 쓸 내용 (b2a: 소스=B) ────────────────────────────────
-            patches_a: dict[str, str] = {}
-            insert_rows_a: dict[int, list[tuple]] = {}
-            delete_rows_a: set[int] = set()
-            style_src_a: dict[str, str] = {}   # {target_ref(A): source_ref(B)}
-
-            b2a_display_rows = {r for (r, c) in b2a}
-            for r in b2a_display_rows:
-                row = self.diff_matrix[r]
-                a_orig, b_orig = self._meta(r)
-                row_cells_in_b2a = [(r, c) for c in range(len(row)) if (r, c) in b2a]
-                if not row_cells_in_b2a:
-                    continue
-
-                if a_orig is not None:
-                    # 스테이징된 셀을 patches에 추가
-                    # 값으로 병합 — 수식이 아닌 diff_matrix의 계산값(b_val)을 기록
-                    for (_, c) in row_cells_in_b2a:
-                        _, _, b_val = self.diff_matrix[r][c]
-                        tref = _cell_ref(a_orig, c)
-                        patches_a[tref] = b_val
-                        if b_orig is not None:
-                            style_src_a[tref] = _cell_ref(b_orig, c)
-                else:
-                    # A에 행 없음(추가됨 행) → 새 행 삽입 (소스 B 좌표를 3원소로)
-                    for (_, c) in row_cells_in_b2a:
-                        _, _, b_val = self.diff_matrix[r][c]
-                        src_ref = _cell_ref(b_orig, c) if b_orig is not None else None
-                        insert_rows_a.setdefault(r, []).append((c, b_val, src_ref))
-
-            if (patches_a or insert_rows_a or delete_rows_a) and self.path_a:
-                patches_a, delete_rows_a, del_cols_a = _promote_empty_cols_to_delete(
-                    patches_a, delete_rows_a, self.path_a, self.sheet_name
-                )
-                style_src_a = {k: v for k, v in style_src_a.items() if k in patches_a}
-                if (patches_a or insert_rows_a or delete_rows_a or del_cols_a):
-                    _write_patches_to_file(
-                        self.path_a, patches_a,
-                        list(insert_rows_a.values()),
-                        delete_rows_a,
-                        del_cols_a,
-                        self.sheet_name,
-                        self.src_path,
-                        self.src_sheet_name,
-                        style_src_a,
-                    )
-
-            total = (len(patches_b) + len(insert_rows_b) + len(delete_rows_b)
-                     + len(patches_a) + len(insert_rows_a) + len(delete_rows_a))
+            total = 0
+            # a2b는 B 파일에, b2a는 A 파일에 쓴다. 방향별 패치 구성은 순수 모듈에 위임.
+            for direction, path in ((DIR_A2B, self.path_b), (DIR_B2A, self.path_a)):
+                patches, insert_rows, style_src = build_side_patches(
+                    direction, self.diff_matrix, self.row_meta, self.staged)
+                delete_rows: set[int] = set()   # 1-based 행 번호(빈행 승격 결과)
+                if (patches or insert_rows) and path:
+                    patches, delete_rows, del_cols = _promote_empty_cols_to_delete(
+                        patches, delete_rows, path, self.sheet_name)
+                    # 삭제 승격으로 사라진 patch 키의 서식 매핑 제거
+                    style_src = {k: v for k, v in style_src.items() if k in patches}
+                    if patches or insert_rows or delete_rows or del_cols:
+                        _write_patches_to_file(
+                            path, patches, list(insert_rows.values()),
+                            delete_rows, del_cols, self.sheet_name,
+                            self.src_path, self.src_sheet_name, style_src)
+                total += len(patches) + len(insert_rows) + len(delete_rows)
             self.done.emit(total)
         except Exception as e:
             self.error.emit(str(e))

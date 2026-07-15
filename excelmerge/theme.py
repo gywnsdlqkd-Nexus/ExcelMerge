@@ -68,6 +68,13 @@ FOLDER_STATUS_COLORS = {k: QColor(*v) for k, v in FOLDER_STATUS_RGB.items()}
 # 신규(added) 셀의 반대쪽 빈 칸에 그리는 대각선 해치 색 (Beyond Compare식 매칭 표시).
 HATCH_COLOR = QColor(0xB0, 0xB0, 0xB0)   # 회색
 
+# 그리드 헤더(가로/세로) 배경·글자 색 — 키 열/행(노랑)·검사 제외(회색)·일반 구분.
+HEADER_KEY_BG = QColor(255, 213, 0)      # 키 열/행 헤더 배경(노랑)
+HEADER_EXCL_BG = QColor(220, 220, 220)   # 검사 제외 열 헤더 배경(회색)
+HEADER_NORMAL_BG = QColor(232, 234, 240) # 일반 헤더 배경
+HEADER_FG = QColor(0, 0, 0)              # 일반 헤더 글자(검정)
+HEADER_EXCL_FG = QColor(140, 140, 140)   # 검사 제외 열 헤더 글자(회색)
+
 MENU_QSS = f"QMenu {{ font-family: '{FONT_FAMILY}'; font-size: 9pt; }}"
 
 APP_QSS = """

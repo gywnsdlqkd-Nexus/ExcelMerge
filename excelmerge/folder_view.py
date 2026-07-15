@@ -22,11 +22,13 @@ from .folder_compare import (
     summarize, SAME, MODIFIED, ONLY_A, ONLY_B,
 )
 from .workers import FolderScanWorker, FolderMergeWorker
+from .constants import DIR_A2B, DIR_B2A
 from .theme import (
     APP_QSS, ui_font, FOLDER_STATUS_COLORS, DIFF_COLORS, MENU_QSS,
     DROP_HIGHLIGHT_QSS, force_active_highlight,
 )
-from .widgets import _extract_folder_path, make_find_icon, draw_diagonal_hatch
+from .widgets import _extract_folder_path, draw_diagonal_hatch
+from .compare_toolbar import build_find_box, add_legend
 
 _ROLE_PAIR = Qt.UserRole         # 이 항목의 (item_a, item_b) 쌍 인덱스 → self._pairs
 _ROLE_ENTRY = Qt.UserRole + 1    # 파일이면 self._entries 인덱스, 폴더/빈칸이면 -1
@@ -222,65 +224,21 @@ class FolderCompareView(QWidget):
         self.next_change_btn.clicked.connect(lambda: self._goto_change(+1))
         toolbar.addWidget(self.next_change_btn)
 
-        # 찾기 (파일명 검색)
+        # 찾기 (파일명 검색) — 공용 구성. 폴더뷰는 '전체 단어' 토글 없음(with_word=False).
         toolbar.addSpacing(16)
-        find_box = QHBoxLayout()
-        find_box.setSpacing(4)
-        self.find_edit = QLineEdit()
-        self.find_edit.setObjectName("find_edit")
-        self.find_edit.setPlaceholderText("파일명 찾기 (Ctrl+F)")
-        self.find_edit.setFixedHeight(36)
-        self.find_edit.setFixedWidth(200)
-        self.find_edit.setFont(ui_font(10))
-        self.find_edit.setClearButtonEnabled(True)
-        self.find_edit.setEnabled(False)
-        self.find_edit.setToolTip("파일 경로 검색 — Enter: 다음, Shift+Enter: 이전")
-        self.find_edit.returnPressed.connect(lambda: self._goto_find(+1))
-        find_prev_sc = QShortcut(QKeySequence("Shift+Return"), self.find_edit)
-        find_prev_sc.setContext(Qt.WidgetShortcut)
-        find_prev_sc.activated.connect(lambda: self._goto_find(-1))
-        find_box.addWidget(self.find_edit)
-
-        def _find_btn(kind, tip, checkable):
-            b = QPushButton()
-            b.setObjectName("find_btn")
-            b.setFixedSize(36, 36)
-            b.setIcon(make_find_icon(kind))
-            b.setIconSize(QSize(22, 22))
-            b.setCheckable(checkable)
-            b.setEnabled(False)
-            b.setToolTip(tip)
-            find_box.addWidget(b)
-            return b
-
-        self.find_case_btn = _find_btn(
-            "case", "대소문자 무시 (기본 켜짐)", checkable=True)
-        self.find_case_btn.setChecked(True)
-        self.find_prev_btn = _find_btn("prev", "이전 찾기 (Shift+Enter)", checkable=False)
-        self.find_prev_btn.clicked.connect(lambda: self._goto_find(-1))
-        self.find_next_btn = _find_btn("next", "다음 찾기 (Enter)", checkable=False)
-        self.find_next_btn.clicked.connect(lambda: self._goto_find(+1))
-        toolbar.addLayout(find_box)
+        toolbar.addLayout(build_find_box(
+            self, "파일명 찾기 (Ctrl+F)", self._goto_find,
+            "파일 경로 검색 — Enter: 다음, Shift+Enter: 이전",
+            with_word=False))
 
         toolbar.addStretch()
-        # 범례 — 신규(연두)/변경(노랑)/준비(주황)/병합(연파랑)
-        legend = [
+        # 범례 (공용) — 신규(연두)/변경(노랑)/준비(주황)/병합(연파랑)
+        add_legend(toolbar, [
             ("신규", FOLDER_STATUS_COLORS["only_a"]),
             ("변경", FOLDER_STATUS_COLORS["modified"]),
             ("준비", DIFF_COLORS["staged"]),
             ("병합", DIFF_COLORS["merged"]),
-        ]
-        for lbl, color in legend:
-            dot = QLabel("  ")
-            dot.setFixedSize(20, 20)
-            dot.setStyleSheet(
-                f"background:{color.name()};"
-                "border:1px solid #aaa; border-radius:3px;")
-            txt = QLabel(lbl)
-            txt.setFont(ui_font(9))
-            toolbar.addWidget(dot)
-            toolbar.addWidget(txt)
-            toolbar.addSpacing(8)
+        ])
         root.addLayout(toolbar)
 
         # ── 좌/우 패널 (FilePanel과 동형) ──
@@ -792,16 +750,16 @@ class FolderCompareView(QWidget):
         if chosen is None:
             return
         if chosen is act_a2b:
-            self._stage_files(eidxs, "a_to_b")
+            self._stage_files(eidxs, DIR_A2B)
         elif chosen is act_b2a:
-            self._stage_files(eidxs, "b_to_a")
+            self._stage_files(eidxs, DIR_B2A)
         elif chosen is act_unstage:
             self._unstage_files(eidxs)
 
     def _stage_files(self, eidxs, direction: str):
         for e in eidxs:
             entry = self._entries[e]
-            src = entry.path_a if direction == "a_to_b" else entry.path_b
+            src = entry.path_a if direction == DIR_A2B else entry.path_b
             if not src:
                 continue   # 해당 방향 소스 없음 — 건너뜀
             self._staged_files[e] = direction
@@ -831,7 +789,7 @@ class FolderCompareView(QWidget):
         ia, ib = pair
         entry = self._entries[eidx]
         if eidx in self._staged_files:
-            arrow = "A → B" if self._staged_files[eidx] == "a_to_b" else "B → A"
+            arrow = "A → B" if self._staged_files[eidx] == DIR_A2B else "B → A"
             # 반대쪽(비어 있던) 패널에도 파일명을 노출 — 무엇이 복사될지 보이도록.
             for it in (ia, ib):
                 it.setText(0, entry.name)
@@ -844,15 +802,15 @@ class FolderCompareView(QWidget):
 
     def _update_merge_btn(self):
         # A 폴더로 병합 = b_to_a 준비분 / B 폴더로 병합 = a_to_b 준비분.
-        has_to_a = any(d == "b_to_a" for d in self._staged_files.values())
-        has_to_b = any(d == "a_to_b" for d in self._staged_files.values())
+        has_to_a = any(d == DIR_B2A for d in self._staged_files.values())
+        has_to_b = any(d == DIR_A2B for d in self._staged_files.values())
         self.merge_btn_a.setEnabled(has_to_a)
         self.merge_btn_b.setEnabled(has_to_b)
 
     def _merge_execute(self, side: str):
         """side='a'면 B→A(b_to_a) 준비분을, 'b'면 A→B(a_to_b) 준비분을 복사.
         실제 복사는 FolderMergeWorker(백그라운드)에서 — UI 프리즈 방지."""
-        target_dir = "b_to_a" if side == "a" else "a_to_b"
+        target_dir = DIR_B2A if side == "a" else DIR_A2B
         items = [(e, d) for e, d in self._staged_files.items() if d == target_dir]
         if not items:
             return
@@ -870,7 +828,7 @@ class FolderCompareView(QWidget):
         for eidx, direction in items:
             entry = self._entries[eidx]
             rel = entry.rel_path.replace("/", os.sep)
-            if direction == "a_to_b":
+            if direction == DIR_A2B:
                 src, dst = entry.path_a, os.path.join(self._root_b, rel)
             else:
                 src, dst = entry.path_b, os.path.join(self._root_a, rel)
