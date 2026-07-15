@@ -977,6 +977,22 @@ class DiffView(QWidget):
 
     # ── 선택 셀 스테이징 (우클릭) ─────────────────────────────────────────────
 
+    def _key_cells_for_selection(self, cells: set) -> set:
+        """선택 셀 집합에 대해 보충할 키 열/행 셀 좌표를 반환.
+        선택된 각 행 r 에는 키 열 0..key_col, 선택된 각 열 c 에는 키 행 0..key_row 를 더한다.
+        (틀 고정으로 본체에서 숨겨져 러버밴드 선택에 안 잡히는 키 셀 보충용.)"""
+        if not cells:
+            return set()
+        extra = set()
+        kc, kr = self._key_col, self._key_row
+        if kc is not None and kc >= 0:
+            for r in {r for (r, _c) in cells}:
+                extra.update((r, c) for c in range(kc + 1))
+        if kr is not None and kr >= 0:
+            for c in {c for (_r, c) in cells}:
+                extra.update((r, c) for r in range(kr + 1))
+        return extra
+
     def _stage_selected(self, direction: str):
         if not self._diff_matrix:
             return
@@ -985,6 +1001,12 @@ class DiffView(QWidget):
             self.panel_a.table.get_selected_cells()
             | self.panel_b.table.get_selected_cells()
         )
+        # 키 열/행 보충 — 본체에서 키 열(0..key_col)·키 행(0..key_row)은 '틀 고정'으로 숨겨져
+        # 러버밴드 셀 선택 range에 들어가지 않는다. '행 전체 병합 준비'(_select_rows)가 키 열을
+        # 포함하는 것과 동일하게, 선택된 행에는 키 열을, 선택된 열에는 키 행을 보충한다.
+        # (아래 status != same 필터가 매칭 행의 동일 키 셀은 자동으로 제외하고, 신규 행의
+        #  키 셀만 남긴다 — 신규 행을 복사할 때 UniqueID 등 키 값이 빠지지 않도록.)
+        cells |= self._key_cells_for_selection(cells)
         cells = {
             (r, c) for (r, c) in cells
             if r < len(self._diff_matrix)
