@@ -534,14 +534,22 @@ class FreezeController(QObject):
             for v in self._views:
                 v.hide()
             return
+        # 본체는 스크롤바가 뜨면 그만큼 셀 렌더 영역이 줄어드는데, 고정 헬퍼 뷰는 스크롤바가
+        # 항상 꺼져 있어(ScrollBarAlwaysOff) 그만큼 더 많은 행/열을 그린다. 그러면 ScrollPerItem
+        # 최댓값이 서로 달라져 스크롤 끝(하단/우단)에서 고정 열/행이 본체와 한 칸 어긋난다.
+        # → 헬퍼 뷰 크기에서 본체 스크롤바 두께를 빼 '보이는 행/열 수'를 본체와 맞춘다.
+        hbar = host.horizontalScrollBar()
+        vbar = host.verticalScrollBar()
+        hbar_h = hbar.height() if hbar.isVisible() else 0
+        vbar_w = vbar.width() if vbar.isVisible() else 0
         self.corner.verticalHeader().setFixedWidth(hdrW)
         self.corner.horizontalHeader().setFixedHeight(hdrH)
         self.corner.setGeometry(fr, fr, hdrW + fw, hdrH + fh)
         self.corner.setVisible(True)
-        self.top.setGeometry(fr + hdrW + fw, fr + hdrH, body_w, fh)
+        self.top.setGeometry(fr + hdrW + fw, fr + hdrH, max(0, body_w - vbar_w), fh)
         self.top.setVisible(True)
         if self._n_cols > 0:
-            self.left.setGeometry(fr + hdrW, fr + hdrH + fh, fw, body_h)
+            self.left.setGeometry(fr + hdrW, fr + hdrH + fh, fw, max(0, body_h - hbar_h))
             self.left.setVisible(True)
         else:
             self.left.hide()
