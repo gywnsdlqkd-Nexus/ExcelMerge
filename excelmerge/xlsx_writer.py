@@ -13,6 +13,15 @@ from openpyxl.utils import get_column_letter, column_index_from_string
 _NS = "http://schemas.openxmlformats.org/spreadsheetml/2006/main"
 _COL_RE = re.compile(r"([A-Z]+)(\d+)")
 
+# 자주 쓰는 네임스페이스 태그(Clark 표기) — 반복 f-string 생성 제거.
+_TAG_SHEETDATA = f"{{{_NS}}}sheetData"
+_TAG_ROW = f"{{{_NS}}}row"
+_TAG_C = f"{{{_NS}}}c"
+_TAG_F = f"{{{_NS}}}f"
+_TAG_IS = f"{{{_NS}}}is"
+_TAG_T = f"{{{_NS}}}t"
+_TAG_V = f"{{{_NS}}}v"
+
 
 def _cell_ref(r: int, c: int) -> str:
     return f"{get_column_letter(c + 1)}{r + 1}"
@@ -401,14 +410,9 @@ class _StyleMerger:
     def _set_count(self, container):
         container.set("count", str(len(container)))
 
-    def _map_container(self, src_container, dst_container, idx_map, cache, src_idx):
-        """fonts/fills/borders/cellStyleXfs 공통 remap — dst 인덱스 반환."""
-        if src_idx in cache:
-            return cache[src_idx]
-        if src_container is None or src_idx < 0 or src_idx >= len(src_container):
-            cache[src_idx] = 0
-            return 0
-        el = deepcopy(src_container[src_idx])
+    def _dedup_append(self, el, dst_container, idx_map, cache, cache_key):
+        """el 을 dst_container 에 c14n-dedup 삽입하고, 그 인덱스를 cache[cache_key]에
+        기록·반환한다. 세 remap 메서드(_map_container/_map_style_xf/map_index)의 공통 꼬리."""
         key = _canon(el)
         i = idx_map.get(key)
         if i is None:
@@ -417,8 +421,18 @@ class _StyleMerger:
             idx_map[key] = i
             self._set_count(dst_container)
             self.modified = True
-        cache[src_idx] = i
+        cache[cache_key] = i
         return i
+
+    def _map_container(self, src_container, dst_container, idx_map, cache, src_idx):
+        """fonts/fills/borders 공통 remap — dst 인덱스 반환."""
+        if src_idx in cache:
+            return cache[src_idx]
+        if src_container is None or src_idx < 0 or src_idx >= len(src_container):
+            cache[src_idx] = 0
+            return 0
+        el = deepcopy(src_container[src_idx])
+        return self._dedup_append(el, dst_container, idx_map, cache, src_idx)
 
     def _map_numfmt(self, src_id: int) -> int:
         if src_id in self._cache_numfmt:
@@ -471,16 +485,8 @@ class _StyleMerger:
             return 0
         xf = deepcopy(self.src_csxfs[src_idx])
         self._remap_xf_ids(xf)
-        key = _canon(xf)
-        i = self._idx_csxfs.get(key)
-        if i is None:
-            i = len(self.dst_csxfs)
-            self.dst_csxfs.append(xf)
-            self._idx_csxfs[key] = i
-            self._set_count(self.dst_csxfs)
-            self.modified = True
-        self._cache_csxf[src_idx] = i
-        return i
+        return self._dedup_append(
+            xf, self.dst_csxfs, self._idx_csxfs, self._cache_csxf, src_idx)
 
     def map_index(self, src_s):
         """소스 <c s> 인덱스 → 대상 cellXfs 인덱스. 해결 불가 시 None."""
@@ -498,16 +504,8 @@ class _StyleMerger:
                 xf.set("xfId", str(self._map_style_xf(int(xfid))))
             except ValueError:
                 xf.set("xfId", "0")
-        key = _canon(xf)
-        i = self._idx_cellxfs.get(key)
-        if i is None:
-            i = len(self.dst_cellxfs)
-            self.dst_cellxfs.append(xf)
-            self._idx_cellxfs[key] = i
-            self._set_count(self.dst_cellxfs)
-            self.modified = True
-        self._cache_xf[src_s] = i
-        return i
+        return self._dedup_append(
+            xf, self.dst_cellxfs, self._idx_cellxfs, self._cache_xf, src_s)
 
 
 def _prepare_style_merge(zin, sheet_path, src_path, src_sheet_name,
@@ -578,153 +576,168 @@ def _is_numeric(val: str) -> bool:
         return False
 
 
-def _set_cell_value(c_el, tag_v, tag_is, tag_t, tag_f, new_val: str):
+def _set_cell_value(c_el, new_val: str):
+    """셀 <c> 요소의 값을 설정 — 기존 자식 제거 후 수식(<f>)/숫자·문자(<v>)로 재작성."""
     for child in list(c_el):
         c_el.remove(child)
     c_el.attrib.pop("t", None)
     if new_val == "":
         return
     if new_val.startswith("="):
-        f_el = etree.SubElement(c_el, tag_f)
+        f_el = etree.SubElement(c_el, _TAG_F)
         f_el.text = new_val[1:]   # '=' 제외한 수식 본문
     elif _is_numeric(new_val):
-        v_el = etree.SubElement(c_el, tag_v)
+        v_el = etree.SubElement(c_el, _TAG_V)
         v_el.text = new_val
     else:
         # t="str": sharedStrings.xml 변경 없이 Excel이 안전하게 수용하는 문자열 타입
         c_el.set("t", "str")
-        v_el = etree.SubElement(c_el, tag_v)
+        v_el = etree.SubElement(c_el, _TAG_V)
         v_el.text = new_val
+
+
+def _index_sheet(sheetdata):
+    """sheetData 를 (ref→<c>, 1-based row번호→<row>) 두 인덱스로 스캔."""
+    existing: dict[str, etree._Element] = {}
+    row_map: dict[int, etree._Element] = {}
+    for row_el in sheetdata:
+        row_map[int(row_el.get("r", 0))] = row_el
+        for c_el in row_el:
+            ref = c_el.get("r", "")
+            if ref:
+                existing[ref] = c_el
+    return existing, row_map
+
+
+def _delete_rows(sheetdata, row_map, delete_row_nums) -> set:
+    """지정 행(<row>)을 제거하고 실제 삭제된 행 번호 집합을 반환."""
+    deleted: set[int] = set()
+    for row_num in delete_row_nums:
+        row_el = row_map.get(row_num)
+        if row_el is not None:
+            sheetdata.remove(row_el)
+            deleted.add(row_num)
+    return deleted
+
+
+def _apply_patches(sheetdata, existing, row_map, patches, patch_styles):
+    """기존 셀 덮어쓰기(빈값이면 <c> 제거) 또는 없는 셀/행 신규 생성."""
+    for ref, new_val in patches.items():
+        m = _COL_RE.match(ref)
+        if not m:
+            continue
+        row_num = int(m.group(2))
+        if ref in existing:
+            c_el = existing[ref]
+            if new_val == "":
+                parent = c_el.getparent()   # 빈값 패치 → <c> 요소 자체 제거
+                if parent is not None:
+                    parent.remove(c_el)
+            else:
+                _set_cell_value(c_el, new_val)
+                if patch_styles and ref in patch_styles:
+                    c_el.set("s", str(patch_styles[ref]))
+            continue
+        # 대상 셀 없음 — 필요하면 행부터 만들고 셀 추가(열 순서 유지)
+        row_el = row_map.get(row_num)
+        if row_el is None:
+            row_el = etree.SubElement(sheetdata, _TAG_ROW)
+            row_el.set("r", str(row_num))
+            row_map[row_num] = row_el
+            sheetdata[:] = sorted(sheetdata, key=lambda e: int(e.get("r", 0)))
+        if new_val != "":
+            c_el = etree.SubElement(row_el, _TAG_C)
+            c_el.set("r", ref)
+            _set_cell_value(c_el, new_val)
+            if patch_styles and ref in patch_styles:
+                c_el.set("s", str(patch_styles[ref]))
+            row_el[:] = sorted(row_el, key=lambda e: column_index_from_string(
+                _COL_RE.match(e.get("r", "A1")).group(1)))
+
+
+def _append_rows(sheetdata, insert_rows):
+    """실제 셀이 있는 마지막 행 다음부터 새 행을 추가(빈 <row> 요소는 무시)."""
+    if not insert_rows:
+        return
+    last_data_row = max(
+        (int(row_el.get("r", 0)) for row_el in sheetdata if list(row_el)), default=0)
+    next_row = last_data_row + 1 if last_data_row > 0 else 1
+    for cells in insert_rows:
+        row_el = etree.SubElement(sheetdata, _TAG_ROW)
+        row_el.set("r", str(next_row))
+        for cell in sorted(cells, key=lambda x: x[0]):
+            col_idx, val = cell[0], cell[1]
+            dst_s = cell[2] if len(cell) > 2 else None
+            if val == "":
+                continue
+            c_el = etree.SubElement(row_el, _TAG_C)
+            c_el.set("r", _cell_ref(next_row - 1, col_idx))
+            _set_cell_value(c_el, val)
+            if dst_s is not None:
+                c_el.set("s", str(dst_s))
+        next_row += 1
+
+
+def _delete_columns(sheetdata, delete_col_letters):
+    """지정 열 문자에 속하는 <c> 요소를 모든 행에서 제거."""
+    if not delete_col_letters:
+        return
+    for row_el in sheetdata:
+        to_remove = [
+            c_el for c_el in row_el
+            if (m := _COL_RE.match(c_el.get("r", ""))) and m.group(1) in delete_col_letters
+        ]
+        for c_el in to_remove:
+            row_el.remove(c_el)
+
+
+def _renumber_after_delete(sheetdata, deleted):
+    """VBA .Delete처럼, 삭제된 행 번호만큼 아래 행들을 위로 당겨 빈 행 번호를 없앤다."""
+    if not deleted:
+        return
+    sorted_deleted = sorted(deleted)
+    for row_el in sheetdata:
+        rn = int(row_el.get("r", 0))
+        offset = sum(1 for d in sorted_deleted if d < rn)
+        if offset > 0:
+            new_rn = rn - offset
+            row_el.set("r", str(new_rn))
+            for c_el in row_el:
+                m = _COL_RE.match(c_el.get("r", ""))
+                if m:
+                    c_el.set("r", f"{m.group(1)}{new_rn}")
 
 
 def _patch_sheet_xml(
     data: bytes,
     patches: dict[str, str],
-    insert_rows: list[list[tuple]] = [],
-    delete_row_nums: set[int] = set(),
-    delete_col_letters: set[str] = set(),
+    insert_rows: list[list[tuple]] | None = None,
+    delete_row_nums: set[int] | None = None,
+    delete_col_letters: set[str] | None = None,
     patch_styles: dict[str, int] | None = None,
 ) -> bytes:
-    """
+    """sheet XML 을 직접 패치. 5개 단계를 순서대로 위임한다(각 단계는 별도 헬퍼).
+
     patches            : {cell_ref: value}          기존 셀 덮어쓰기
     insert_rows        : [[(col_idx, value[, dst_s]), ...]]  파일 끝에 새 행 추가
     delete_row_nums    : {1-based row number}        해당 <row> 요소 자체 삭제
     delete_col_letters : {'A', 'B', ...}             해당 열의 모든 <c> 삭제
     patch_styles       : {cell_ref: style_index}     병합할 소스 서식 인덱스 (덮어쓰기 셀)
     """
+    insert_rows = insert_rows or []
+    delete_row_nums = delete_row_nums or set()
+    delete_col_letters = delete_col_letters or set()
+
     tree = etree.fromstring(data)
-    ns    = _NS
-    tag_c  = f"{{{ns}}}c"
-    tag_f  = f"{{{ns}}}f"
-    tag_is = f"{{{ns}}}is"
-    tag_t  = f"{{{ns}}}t"
-    tag_v  = f"{{{ns}}}v"
-
-    existing: dict[str, etree._Element] = {}
-    row_map:  dict[int, etree._Element] = {}
-
-    sheetdata = tree.find(f"{{{ns}}}sheetData")
+    sheetdata = tree.find(_TAG_SHEETDATA)
     if sheetdata is None:
         return data
 
-    for row_el in sheetdata:
-        r_idx = int(row_el.get("r", 0))
-        row_map[r_idx] = row_el
-        for c_el in row_el:
-            ref = c_el.get("r", "")
-            if ref:
-                existing[ref] = c_el
-
-    # 행 삭제 (실제 삭제된 행 번호를 추적)
-    actually_deleted: set[int] = set()
-    for row_num in delete_row_nums:
-        row_el = row_map.get(row_num)
-        if row_el is not None:
-            sheetdata.remove(row_el)
-            actually_deleted.add(row_num)
-
-    # 덮어쓰기 패치
-    for ref, new_val in patches.items():
-        m = _COL_RE.match(ref)
-        if not m:
-            continue
-        row_num = int(m.group(2))
-
-        if ref in existing:
-            c_el = existing[ref]
-            if new_val == "":
-                # 빈값 패치 시 <c> 요소 자체를 부모 행에서 제거
-                parent = c_el.getparent()
-                if parent is not None:
-                    parent.remove(c_el)
-            else:
-                _set_cell_value(c_el, tag_v, tag_is, tag_t, tag_f, new_val)
-                if patch_styles and ref in patch_styles:
-                    c_el.set("s", str(patch_styles[ref]))
-        else:
-            if row_num not in row_map:
-                row_el = etree.SubElement(sheetdata, f"{{{ns}}}row")
-                row_el.set("r", str(row_num))
-                row_map[row_num] = row_el
-                sheetdata[:] = sorted(sheetdata, key=lambda e: int(e.get("r", 0)))
-            else:
-                row_el = row_map[row_num]
-            if new_val != "":
-                c_el = etree.SubElement(row_el, tag_c)
-                c_el.set("r", ref)
-                _set_cell_value(c_el, tag_v, tag_is, tag_t, tag_f, new_val)
-                if patch_styles and ref in patch_styles:
-                    c_el.set("s", str(patch_styles[ref]))
-                row_el[:] = sorted(row_el, key=lambda e: column_index_from_string(
-                    _COL_RE.match(e.get("r", "A1")).group(1)
-                ))
-
-    # 새 행 삽입 (실제 셀이 있는 마지막 행 바로 다음 행 번호부터 — 빈 <row> 요소 무시)
-    if insert_rows:
-        last_data_row = max(
-            (int(row_el.get("r", 0)) for row_el in sheetdata if list(row_el)),
-            default=0,
-        )
-        next_row = last_data_row + 1 if last_data_row > 0 else 1
-        for cells in insert_rows:
-            row_el = etree.SubElement(sheetdata, f"{{{ns}}}row")
-            row_el.set("r", str(next_row))
-            for cell in sorted(cells, key=lambda x: x[0]):
-                col_idx, val = cell[0], cell[1]
-                dst_s = cell[2] if len(cell) > 2 else None
-                if val == "":
-                    continue
-                ref = _cell_ref(next_row - 1, col_idx)
-                c_el = etree.SubElement(row_el, tag_c)
-                c_el.set("r", ref)
-                _set_cell_value(c_el, tag_v, tag_is, tag_t, tag_f, val)
-                if dst_s is not None:
-                    c_el.set("s", str(dst_s))
-            next_row += 1
-
-    # 빈 열 삭제: 지정된 열 문자에 속하는 <c> 요소를 모든 행에서 제거
-    if delete_col_letters:
-        for row_el in sheetdata:
-            to_remove = [
-                c_el for c_el in row_el
-                if (m := _COL_RE.match(c_el.get("r", ""))) and m.group(1) in delete_col_letters
-            ]
-            for c_el in to_remove:
-                row_el.remove(c_el)
-
-    # VBA .Delete처럼 삭제된 행 번호를 위로 당겨 빈 행 번호 없애기
-    if actually_deleted:
-        sorted_deleted = sorted(actually_deleted)
-        for row_el in sheetdata:
-            rn = int(row_el.get("r", 0))
-            offset = sum(1 for d in sorted_deleted if d < rn)
-            if offset > 0:
-                new_rn = rn - offset
-                row_el.set("r", str(new_rn))
-                for c_el in row_el:
-                    ref = c_el.get("r", "")
-                    m = _COL_RE.match(ref)
-                    if m:
-                        c_el.set("r", f"{m.group(1)}{new_rn}")
+    existing, row_map = _index_sheet(sheetdata)
+    deleted = _delete_rows(sheetdata, row_map, delete_row_nums)
+    _apply_patches(sheetdata, existing, row_map, patches, patch_styles)
+    _append_rows(sheetdata, insert_rows)
+    _delete_columns(sheetdata, delete_col_letters)
+    _renumber_after_delete(sheetdata, deleted)
 
     return etree.tostring(tree, xml_declaration=True, encoding="UTF-8", standalone=True)
