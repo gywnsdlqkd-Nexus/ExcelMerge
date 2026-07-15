@@ -97,6 +97,40 @@ def test_build_update_bat_quotes_paths():
     print("PASS test_build_update_bat_quotes_paths")
 
 
+def test_build_update_bat_clears_bootloader_env():
+    """재실행 전 PyInstaller 부트로더 변수를 비워야 한다(자기 교체 후 DLL 로드 실패 방지)."""
+    bat = build_update_bat(r"C:\t\new.exe", r"C:\app\ExcelMerge.exe")
+    for var in ("_MEIPASS2", "_PYI_ARCHIVE_FILE", "_PYI_APPLICATION_HOME_DIR"):
+        assert f'set "{var}="' in bat, f"{var} 미제거"
+    # 변수 제거는 start 이전에 있어야 효력이 있다
+    assert bat.index('set "_MEIPASS2="') < bat.index('start ""')
+    print("PASS test_build_update_bat_clears_bootloader_env")
+
+
+def test_apply_update_spawns_with_clean_env(monkeypatch):
+    """apply_update가 부트로더 변수를 제거한 env로 배치를 띄우는지."""
+    monkeypatch.setattr(upd.sys, "frozen", True, raising=False)
+    monkeypatch.setattr(upd.sys, "executable", os.path.join(tempfile.gettempdir(), "ExcelMerge.exe"))
+    monkeypatch.setenv("_MEIPASS2", r"C:\Temp\_MEI12345")
+    monkeypatch.setenv("_PYI_ARCHIVE_FILE", r"C:\Temp\app.exe")
+    monkeypatch.setenv("KEEP_ME", "1")
+
+    captured = {}
+
+    def fake_popen(args, **kw):
+        captured["env"] = kw.get("env")
+        return object()
+
+    monkeypatch.setattr(upd.subprocess, "Popen", fake_popen)
+    ok = upd.apply_update(os.path.join(tempfile.gettempdir(), "new.exe"))
+    assert ok is True
+    env = captured["env"]
+    assert env is not None, "env를 명시적으로 전달하지 않음(상속 위험)"
+    assert "_MEIPASS2" not in env and "_PYI_ARCHIVE_FILE" not in env
+    assert env.get("KEEP_ME") == "1", "일반 환경변수는 유지돼야 함"
+    print("PASS test_apply_update_spawns_with_clean_env")
+
+
 def test_check_worker_file_url():
     """file:// 매니페스트를 UpdateCheckWorker가 읽어 파싱 결과를 방출."""
     from PyQt5.QtWidgets import QApplication
@@ -127,6 +161,7 @@ def main():
     test_source_selection()
     test_gdrive_url_helpers()
     test_build_update_bat_quotes_paths()
+    test_build_update_bat_clears_bootloader_env()
     test_check_worker_file_url()
     print("ALL UPDATER TESTS PASS")
 

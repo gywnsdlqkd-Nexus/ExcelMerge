@@ -133,6 +133,13 @@ def build_update_bat(new_exe: str, target_exe: str) -> str:
         "  if %tries% lss 60 goto loop\r\n"            # 최대 ~60초 재시도
         "  exit /b 1\r\n"
         ")\r\n"
+        # PyInstaller 부트로더 변수를 비우고 재실행 — 상속된 값이 있으면 재실행 exe가
+        # 추출을 건너뛰어 python3xx.dll 로드에 실패한다. setlocal 범위라 부작용 없음.
+        'set "_MEIPASS2="\r\n'
+        'set "_MEIPASS="\r\n'
+        'set "_PYI_ARCHIVE_FILE="\r\n'
+        'set "_PYI_APPLICATION_HOME_DIR="\r\n'
+        'set "_PYI_PARENT_PROCESS_LEVEL="\r\n'
         f'start "" "{t}"\r\n'
         'del "%~f0" >nul 2>&1\r\n'
     )
@@ -264,6 +271,19 @@ class UpdateDownloadWorker(QThread):
 
 
 # ── 적용 ─────────────────────────────────────────────────────────────────────
+# PyInstaller onefile 부트로더가 '이미 추출된 자식'을 알리려고 쓰는 환경변수들.
+# 이걸 재실행 exe가 상속하면 압축 해제를 건너뛰고 (종료된 이전 프로세스의) 사라진 임시
+# 폴더에서 python3xx.dll을 찾다 실패한다 → 'Failed to load Python DLL … 지정된 모듈을
+# 찾을 수 없습니다'. 업데이트 재실행 시 반드시 제거해야 한다(=깨끗한 첫 실행처럼).
+_PYI_BOOT_ENV = ("_MEIPASS2", "_MEIPASS")
+
+
+def _clean_child_env() -> dict:
+    """PyInstaller 부트로더 변수를 제거한 자식 프로세스용 환경."""
+    return {k: v for k, v in os.environ.items()
+            if k not in _PYI_BOOT_ENV and not k.startswith("_PYI_")}
+
+
 def apply_update(new_exe: str) -> bool:
     """새 exe로 자기 자신을 교체하고 재시작한다(frozen에서만). 성공 시 True(호출측이 앱 종료)."""
     if not getattr(sys, "frozen", False):
@@ -274,7 +294,9 @@ def apply_update(new_exe: str) -> bool:
         with open(bat, "w", encoding="mbcs", errors="replace") as f:
             f.write(build_update_bat(new_exe, target))
         flags = 0x00000008 | 0x08000000   # DETACHED_PROCESS | CREATE_NO_WINDOW
-        subprocess.Popen(["cmd", "/c", bat], close_fds=True, creationflags=flags)
+        # 부트로더 변수를 제거한 환경으로 배치를 띄운다(재실행 exe가 정상 추출하도록).
+        subprocess.Popen(["cmd", "/c", bat], close_fds=True, creationflags=flags,
+                         env=_clean_child_env())
         return True
     except Exception:
         return False
