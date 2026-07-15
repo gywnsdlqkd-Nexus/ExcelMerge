@@ -37,12 +37,18 @@ Qt 위젯 테스트는 헤드리스에서 돌도록 `QT_QPA_PLATFORM=offscreen` 
 단일 파일이다:
 
 ```bat
-build.bat            REM = python -m PyInstaller ExcelMerge.spec  →  dist/ExcelMerge_v<버전>.exe
+build.bat            REM PyInstaller ExcelMerge.spec → dist/ExcelMerge_v<버전>.exe → (설정 시) 코드 서명
 ```
 
-> 빌드 머신에는 **Windows SDK(UCRT 재배포 구성요소)** 가 필요하다. UCRT DLL 을 번들에 포함해야
-> UCRT 미설치 사용자 PC에서 "Failed to load Python DLL" 오류를 막을 수 있다(과거 실사례). SDK가 없으면
-> `ExcelMerge.spec` 이 빌드를 중단하고 안내한다.
+`build.bat` 은 빌드 후 `sign.py`(코드 서명)를 호출한다 — 인증서 환경변수가 설정돼 있으면 서명하고,
+없으면 조용히 건너뛴다. 재현성·서명·상세 절차는 [`RELEASE.md`](RELEASE.md) 참고.
+
+> **빌드 전제(중요)**
+> - **Windows SDK(UCRT 재배포)** 필요 — UCRT DLL을 번들에 포함해 UCRT 미설치 PC의 "Failed to load
+>   Python DLL" 오류를 막는다(SDK 없으면 `ExcelMerge.spec` 이 빌드 중단 + 안내).
+> - **빌드 Python 버전이 사용자 최소 Windows 버전을 결정한다.** Python 3.14 빌드는 **Windows 10+ 전용**
+>   (구형 Windows에서 DLL 로드 실패). 구형 OS 지원이 필요하면 낮은 Python으로 빌드할 것.
+> - 재현 빌드: 클린 venv + `pip install -r requirements.lock`.
 
 ## 릴리스 · 자동 업데이트
 
