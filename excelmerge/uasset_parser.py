@@ -1,6 +1,8 @@
 """UE5 DataTable .uasset 바이너리 파서 (excel_diff_merge.py에서 분리)."""
 import struct
 
+from .logutil import log
+
 
 _UASSET_MAGIC = 0x9E2A83C1
 
@@ -659,4 +661,6 @@ def load_uasset_as_matrix(path: str) -> list[list[str]]:
         row_keys, rows = _parse_row_map(buf, row_map_off, num_rows, names)
         return _build_datatable_matrix(row_keys, rows)
     except Exception:
+        # 본격 파싱 실패 → [field/value] 폴백 덤프. 파서 개선/원인 파악용 로그.
+        log.warning("uasset 본격 파싱 실패, 폴백 매트릭스 사용: %s", path, exc_info=True)
         return _load_uasset_fallback_matrix(buf)

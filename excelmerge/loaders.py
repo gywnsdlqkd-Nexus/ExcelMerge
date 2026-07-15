@@ -16,6 +16,7 @@ from collections import OrderedDict
 import openpyxl
 
 from .uasset_parser import load_uasset_as_matrix
+from .logutil import log
 
 
 _EXCEL_EXTS = {".xlsx", ".xls", ".xlsm", ".xlsb"}
@@ -181,6 +182,8 @@ def _load_values_pass(path: str, progress=None, sheet_name=None) -> list[list[st
             progress(len(vals), len(vals))
         return vals
     except Exception:
+        # calamine 실패 → openpyxl 폴백(정상 흐름). 원인 파악용으로만 남긴다.
+        log.debug("calamine 로드 실패, openpyxl 폴백: %s", path, exc_info=True)
         return _load_values_pass_openpyxl(path, progress, sheet_name)
 
 
@@ -467,6 +470,7 @@ def list_sheet_names(path: str) -> list[str]:
             finally:
                 _safe_close(wb)
         except Exception:
+            log.debug("시트명 목록 로드 실패(빈 목록 폴백): %s", path, exc_info=True)
             return []
     _sheet_names_cache[key] = names
     return list(names)

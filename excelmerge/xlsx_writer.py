@@ -9,6 +9,8 @@ from collections import defaultdict
 from lxml import etree
 from openpyxl.utils import get_column_letter, column_index_from_string
 
+from .logutil import log
+
 
 _NS = "http://schemas.openxmlformats.org/spreadsheetml/2006/main"
 _COL_RE = re.compile(r"([A-Z]+)(\d+)")
@@ -71,6 +73,8 @@ def _promote_empty_cols_to_delete(
                     file_cells[ref] = val
                     file_row_refs[rn].add(ref)
     except Exception:
+        # 빈 열/행 감지 실패 → 승격 없이 진행(안전). 원인은 진단 로그로만 남긴다.
+        log.warning("빈 열/행 감지 실패(승격 건너뜀): %s", path, exc_info=True)
         return patches, delete_row_nums, set()
 
     merged: dict[str, str] = {**file_cells, **patches}
@@ -565,6 +569,8 @@ def _prepare_style_merge(zin, sheet_path, src_path, src_sheet_name,
         return (patch_styles or None), new_styles_bytes, (
             new_inserts if insert_rows else insert_rows)
     except Exception:
+        # 서식 병합 실패 → 값만 병합(서식 없이). 사용자에겐 조용하지만 진단 로그로 남긴다.
+        log.warning("서식 병합 pre-pass 실패(값만 병합): src=%s", src_path, exc_info=True)
         return None, None, _strip(insert_rows)
 
 

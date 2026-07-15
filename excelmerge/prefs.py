@@ -9,6 +9,8 @@
 import json
 import os
 
+from .logutil import log
+
 _DEFAULT_KEY_ROW = 0
 _DEFAULT_KEY_COL = 0
 _LAST_SHEETS_MAX = 50   # 파일별 마지막 시트 기억 상한(오래된 항목부터 제거)
@@ -29,7 +31,7 @@ def _read_prefs() -> dict:
             if isinstance(c, dict):
                 return c
     except Exception:
-        pass
+        log.debug("prefs 읽기 실패(기본값 사용)", exc_info=True)
     return {}
 
 
