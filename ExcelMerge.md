@@ -4,7 +4,8 @@
 아키텍처·빌드·함정 기록은 메모리 `excelmerge-project.md` 참고. 이 문서는 **현재 기능 사양**만 다룹니다.
 
 ## 개요
-Excel(xlsx/xls/xlsm/xlsb)·JSON·uasset을 A/B로 비교하고 셀 단위로 병합하는 PyQt5 데스크톱 툴.
+Excel(xlsx/xls/xlsm/xlsb)·CSV/TSV·JSON·uasset을 A/B로 비교하고 셀 단위로 병합하는 PyQt5 데스크톱 툴.
+(CSV/TSV·JSON·uasset은 **비교 전용** — 저장/병합은 Excel만 지원.)
 진입점 `excel_diff_merge.py` + `excelmerge/` 패키지(loaders·diff_engine·diff_model·widgets·panels·
 main_window·folder_compare·folder_view·workers·xlsx_writer·theme·uasset_parser).
 
@@ -36,7 +37,7 @@ main_window·folder_compare·folder_view·workers·xlsx_writer·theme·uasset_pa
 
 ## 시트 선택
 - 창 하단 공용 시트 탭(A∪B 합집합·A 순서 우선). 첫 시트 디폴트, 탭 클릭 시 재비교.
-- 한쪽에만 있는 시트는 반대쪽 빈 상태. 시트 1개거나 JSON/uasset이면 탭 숨김. 저장은 선택 시트에 기록.
+- 한쪽에만 있는 시트는 반대쪽 빈 상태. 시트 1개거나 CSV/TSV·JSON/uasset이면 탭 숨김. 저장은 선택 시트에 기록.
 - **변경 시트 탭 노랑 표시** — 두 파일의 해당 시트가 서로 동일하지 않으면(값 매트릭스 비교, 키 무관 —
   폴더 diff 방식; 한쪽에만 있는 시트 포함) 탭 배경을 노랑으로. 판정은 백그라운드(SheetDiffWorker).
 

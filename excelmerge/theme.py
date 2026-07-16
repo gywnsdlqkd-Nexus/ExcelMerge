@@ -240,6 +240,7 @@ _TAB_ICON_FILES = {
     ".xlsx": "Excel.png", ".xls": "Excel.png", ".xlsm": "Excel.png", ".xlsb": "Excel.png",
     ".json": "JSON.png",
     ".uasset": "Excel.png",
+    ".csv": "Excel.png", ".tsv": "Excel.png",   # 표 형식 → 엑셀 아이콘 재사용
 }
 
 

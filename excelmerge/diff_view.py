@@ -1332,11 +1332,11 @@ class DiffView(QWidget):
         self.panel_b.save_btn.setEnabled(enabled and has_b and b_writable)
         self.panel_a.save_btn.setToolTip(
             "파일 저장" if a_writable
-            else "JSON/uasset은 비교 전용 — 저장은 Excel(.xlsx/.xls/.xlsm)만 지원"
+            else "비-엑셀 형식(CSV/JSON/uasset)은 비교 전용 — 저장은 Excel(.xlsx/.xls/.xlsm)만 지원"
         )
         self.panel_b.save_btn.setToolTip(
             "파일 저장" if b_writable
-            else "JSON/uasset은 비교 전용 — 저장은 Excel(.xlsx/.xls/.xlsm)만 지원"
+            else "비-엑셀 형식(CSV/JSON/uasset)은 비교 전용 — 저장은 Excel(.xlsx/.xls/.xlsm)만 지원"
         )
 
     def _on_file_loaded(self, side: str, path: str):

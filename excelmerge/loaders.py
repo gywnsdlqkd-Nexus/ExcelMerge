@@ -6,6 +6,7 @@
 import io
 import os
 import re
+import csv
 import json
 import html
 import zipfile
@@ -20,7 +21,8 @@ from .logutil import log
 
 
 _EXCEL_EXTS = {".xlsx", ".xls", ".xlsm", ".xlsb"}
-_SUPPORTED_EXTS = _EXCEL_EXTS | {".json", ".uasset"}
+_CSV_EXTS = {".csv", ".tsv"}
+_SUPPORTED_EXTS = _EXCEL_EXTS | _CSV_EXTS | {".json", ".uasset"}
 
 # 공개 별칭 — 폴더 비교(folder_compare) 등 외부 모듈이 비교 대상 파일을
 # 선별할 때 쓰는 단일 진실 소스. 내부 판별은 계속 _EXCEL_EXTS/_SUPPORTED_EXTS 사용.
@@ -325,6 +327,31 @@ def load_json_as_matrix(path: str, progress=None) -> list[list[str]]:
     return matrix
 
 
+def load_csv_as_matrix(path: str, progress=None) -> list[list[str]]:
+    """CSV/TSV → 문자열 매트릭스(비교/미리보기용).
+    - 구분자: 확장자로 결정(.tsv=탭, 그 외=쉼표).
+    - 인코딩: utf-8(BOM 허용) 우선, 실패 시 cp949(한국어 파일), 그래도 안 되면 대체 문자.
+    - ragged(열 수 불균일) 행은 최대 열 수로 빈칸 패딩 — 그리드/비교가 직사각형을 가정."""
+    ext = os.path.splitext(path)[1].lower()
+    delim = "\t" if ext == ".tsv" else ","
+    rows = None
+    for enc in ("utf-8-sig", "cp949"):
+        try:
+            with open(path, "r", encoding=enc, newline="") as f:
+                rows = list(csv.reader(f, delimiter=delim))
+            break
+        except UnicodeDecodeError:
+            rows = None
+    if rows is None:   # 인코딩 자동 판별 실패 → 손상 문자 대체로라도 읽는다
+        with open(path, "r", encoding="utf-8", errors="replace", newline="") as f:
+            rows = list(csv.reader(f, delimiter=delim))
+    width = max((len(r) for r in rows), default=0)
+    matrix = [r + [""] * (width - len(r)) for r in rows]
+    if progress is not None:
+        progress(len(matrix), len(matrix))
+    return matrix
+
+
 def load_values_any(path: str, progress=None, sheet_name=None) -> list[list]:
     """확장자별 '값' 매트릭스만 반환 — 비교/미리보기의 단일 경로.
     xlsx는 calamine 캐시값(폴백 openpyxl), json/uasset은 해당 매트릭스.
@@ -352,6 +379,8 @@ def load_values_any(path: str, progress=None, sheet_name=None) -> list[list]:
             data = load_json_as_matrix(path, progress)
         elif ext == ".uasset":
             data = load_uasset_as_matrix(path)
+        elif ext in _CSV_EXTS:
+            data = load_csv_as_matrix(path, progress)
         else:
             data = _load_values_pass(path, progress, sheet_name)
     except BaseException:
@@ -418,7 +447,7 @@ def load_formula_flags_any(path: str, sheet_name=None) -> set:
     - json/uasset: 수식 개념이 없어 빈 집합.
     실패 시 빈 집합 — 수식 표시(파랑 폰트) 없이 동작한다."""
     ext = os.path.splitext(path)[1].lower()
-    if ext in (".json", ".uasset"):
+    if ext in (".json", ".uasset") or ext in _CSV_EXTS:
         return set()
     try:
         with zipfile.ZipFile(path) as z:
@@ -446,7 +475,7 @@ def list_sheet_names(path: str) -> list[str]:
     실패 시 빈 목록 — 시트 탭 없이 기존 단일 시트 동작으로 폴백된다.
     """
     ext = os.path.splitext(path)[1].lower()
-    if ext in (".json", ".uasset"):
+    if ext in (".json", ".uasset") or ext in _CSV_EXTS:
         return []
     # (path, mtime) 캐시 — 파일 로드/새로고침/탭 재구성 시 반복 open 제거.
     # mtime이 바뀌면 키가 달라져 자동 무효화된다.

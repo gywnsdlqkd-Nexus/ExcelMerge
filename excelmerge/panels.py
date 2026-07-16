@@ -32,7 +32,7 @@ class FilePanel(QWidget):
         title = QLabel(label)
         title.setFont(ui_font(10, bold=True))
         header.addWidget(title)
-        self._drop_hint = QLabel("  엑셀/JSON/uasset 파일 또는 폴더를 여기에 끌어다 놓으세요")
+        self._drop_hint = QLabel("  엑셀/CSV/JSON/uasset 파일 또는 폴더를 여기에 끌어다 놓으세요")
         self._drop_hint.setStyleSheet("color: #888; font-size: 9pt;")
         self._drop_hint.setFont(ui_font(9))
         header.addWidget(self._drop_hint)
@@ -236,7 +236,8 @@ class FilePanel(QWidget):
         dlg.setAcceptMode(QFileDialog.AcceptOpen)
         dlg.setFileMode(QFileDialog.AnyFile)   # 비존재 이름 허용(센티넬 반환용)
         dlg.setNameFilter(
-            "Excel/JSON/uasset (*.xlsx *.xls *.xlsm *.json *.uasset);;모든 파일 (*)")
+            "Excel/CSV/JSON/uasset "
+            "(*.xlsx *.xls *.xlsm *.csv *.tsv *.json *.uasset);;모든 파일 (*)")
         dlg.setDirectory(init_dir)
         dlg.selectFile(self._FOLDER_SENTINEL)   # 파일명 칸 기본값 = 폴더 선택 센티넬
         if not dlg.exec_():

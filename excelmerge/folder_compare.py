@@ -117,7 +117,7 @@ def content_equal(path_a: str, path_b: str) -> bool:
                 if load_values_any(path_a, None, sh) != load_values_any(path_b, None, sh):
                     return False
             return True
-        if ext in (".json", ".uasset"):
+        if ext in (".json", ".uasset", ".csv", ".tsv"):
             return load_values_any(path_a) == load_values_any(path_b)
     except Exception:
         return False
