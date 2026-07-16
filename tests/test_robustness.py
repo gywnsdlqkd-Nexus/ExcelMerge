@@ -138,9 +138,38 @@ def test_json_wrapper_renders_as_table():
     print("PASS test_json_wrapper_renders_as_table")
 
 
+def test_json_preserves_newline_code():
+    """JSON 문자열 값의 개행은 실제 줄바꿈이 아니라 리터럴 '\\n' 코드로 보존돼야 한다
+    (게임 텍스트 제어 코드 보존). 표(records) 경로 + 폴백 경로 둘 다."""
+    d = tempfile.mkdtemp()
+    # 표 경로: 값에 개행/탭 포함
+    p_tab = os.path.join(d, "tab.json")
+    with open(p_tab, "w", encoding="utf-8") as f:
+        json.dump([{"ID": 1, "Text": "line1\nline2\tend"}], f)
+    m = load_json_as_matrix(p_tab)
+    cell = m[1][1]
+    assert "\n" not in cell and "\t" not in cell, f"실제 개행/탭이 남음: {cell!r}"
+    assert cell == "line1\\nline2\\tend", cell   # 리터럴 \n, \t
+
+    # 폴백(평탄화) 경로도 동일 보존
+    p_fb = os.path.join(d, "fb.json")
+    with open(p_fb, "w", encoding="utf-8") as f:
+        json.dump({"meta": {"desc": "a\nb"}}, f)
+    mf = load_json_as_matrix(p_fb)
+    vals = {row[0]: row[1] for row in mf[1:]}
+    assert vals.get("meta.desc") == "a\\nb", mf
+
+    # 개행 든 두 JSON 비교 — 같은 값은 same(이스케이프 후에도 일치)
+    from excelmerge.diff_engine import compute_diff
+    dm, _ = compute_diff(m, load_json_as_matrix(p_tab), key_col=0, key_row=0)
+    assert dm[1][1][0] == "same", dm[1][1]
+    print("PASS test_json_preserves_newline_code")
+
+
 def main():
     test_save_roundtrip_no_bak()
     test_json_wrapper_renders_as_table()
+    test_json_preserves_newline_code()
     test_save_missing_sheet_raises()
     test_count_dropped_key_rows()
     test_count_changed()

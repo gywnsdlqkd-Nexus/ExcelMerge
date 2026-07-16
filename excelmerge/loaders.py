@@ -214,6 +214,10 @@ def _load_values_pass_openpyxl(path: str, progress=None, sheet_name=None) -> lis
 def _json_value_to_str(v) -> str:
     """JSON 스칼라/구조 값을 셀 표시용 문자열로 변환.
     - dict/list 등 비스칼라는 compact JSON 으로 직렬화 — 셀 한 칸에 들어가도록.
+    - 문자열의 제어 공백(개행/탭/CR)은 **이스케이프 형태(\\n·\\t·\\r)로 보존**한다.
+      json 파싱이 '\\n' 이스케이프를 실제 개행 문자로 디코드하는데, 게임 텍스트 등에서 '\\n'은
+      보존해야 할 제어 코드다. 그대로 두면 그리드가 실제 줄바꿈으로 렌더해 코드가 사라져 보인다.
+      → 셀에 코드 그대로 표시되고 비교/스테이징 값도 일관되게 유지된다.
     """
     if v is None:
         return ""
@@ -222,7 +226,8 @@ def _json_value_to_str(v) -> str:
     if isinstance(v, (int, float)):
         return _cell_to_str(v)
     if isinstance(v, str):
-        return v
+        return v.replace("\r\n", "\\n").replace("\n", "\\n").replace(
+            "\r", "\\r").replace("\t", "\\t")
     return json.dumps(v, ensure_ascii=False)
 
 
