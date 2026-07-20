@@ -346,13 +346,17 @@ def test_ctrl_jump_single_selection():
     QTest.keyClick(tbl, Qt.Key_Right, Qt.ControlModifier | Qt.ShiftModifier)
     assert tbl.get_selected_cells() == {(2, 0), (2, 1), (2, 2)}, tbl.get_selected_cells()
 
-    # Ctrl+Shift+End: 데이터 영역으로 클램프된 범위, 붕괴 없음
+    # Ctrl+Shift+End: 데이터 영역으로 클램프된 범위, 붕괴 없음.
+    # 앵커 (1,1)은 첫 데이터 열/행(키 열 0·키 행 0 바로 옆)이라 블록이 키 경계에 '닿음'
+    # → _supplement_key_selection 이 키 열(0열)·키 행(0행)을 함께 선택한다(사용자 선택 동작).
+    last_r = len(dm) - 1
     tbl._move_current_cell(1, 1)
     QTest.keyClick(tbl, Qt.Key_End, Qt.ControlModifier | Qt.ShiftModifier)
     sel = tbl.get_selected_cells()
-    assert max(r for r, _ in sel) == len(dm) - 1, sel
-    assert max(c for _, c in sel) == 4, sel
-    assert len(sel) == (len(dm) - 1) * 4, len(sel)
+    data_block = {(r, c) for r in range(1, last_r + 1) for c in range(1, 5)}
+    key_col = {(r, 0) for r in range(1, last_r + 1)}   # 왼쪽 변이 첫 데이터 열 → 키 열 보충
+    key_row = {(0, c) for c in range(1, 5)}             # 위쪽 변이 첫 데이터 행 → 키 행 보충
+    assert sel == data_block | key_col | key_row, sel   # 붕괴 없이 데이터 + 키 셀
 
     # Ctrl+Home: 단일 이동
     QTest.keyClick(tbl, Qt.Key_Home, Qt.ControlModifier)

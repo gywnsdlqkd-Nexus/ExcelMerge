@@ -666,6 +666,8 @@ class ExcelTableView(QTableView):
         self._user_row_heights: dict[int, int] = {}
         # 외부(다른 패널)에서 크기를 강제 적용 중일 때 sectionResized 재방출 방지
         self._applying_sizes: bool = False
+        # 키 열/행 보충(_supplement_key_selection) 중 selectionChanged 재진입 방지
+        self._supplementing: bool = False
         # 헤더 다중 선택의 anchor (Shift+방향 확장의 고정점)
         self._header_anchor_col: int | None = None
         self._header_anchor_row: int | None = None
@@ -697,6 +699,9 @@ class ExcelTableView(QTableView):
         # 헤더 클릭 시 anchor 갱신 (Shift 없는 클릭 → 새 anchor / Shift 클릭 → 기존 유지)
         self.horizontalHeader().sectionPressed.connect(self._on_h_section_pressed)
         self.verticalHeader().sectionPressed.connect(self._on_v_section_pressed)
+        # 다중 셀 선택 시, 틀 고정으로 숨겨진 키 열/행 셀을 함께 선택하도록 보충.
+        # (DiffView의 A↔B 선택 미러보다 먼저 연결돼야 미러 전에 보충이 반영된다.)
+        self.selectionModel().selectionChanged.connect(self._supplement_key_selection)
 
     # ── QTableWidget 호환 헬퍼 ───────────────────────────────────────────────
     def rowCount(self) -> int:
@@ -777,6 +782,7 @@ class ExcelTableView(QTableView):
                 self.setColumnWidth(col, width)
             finally:
                 self._applying_sizes = False
+            self._resync_freeze_sizes()
 
     def apply_row_height(self, row: int, height: int):
         """반대 패널에서의 행 높이 변경을 동기 적용."""
@@ -787,6 +793,18 @@ class ExcelTableView(QTableView):
                 self.setRowHeight(row, height)
             finally:
                 self._applying_sizes = False
+            self._resync_freeze_sizes()
+
+    def _resync_freeze_sizes(self):
+        """틀 고정 헬퍼 뷰의 열폭/행높이를 본체와 다시 맞추고 재배치.
+        apply_column_width/apply_row_height 는 _applying_sizes 가드 아래서 크기를 적용하는데,
+        이 가드는 FreezeController._on_col_resized/_on_row_resized 까지 억제한다(호스트의
+        sectionResized 로 트리거됨). 그 결과 반대 패널의 상단/좌측 고정 밴드가 새 열폭/행높이를
+        반영하지 못해 본체와 어긋난다 → 여기서 명시적으로 밴드를 재동기한다."""
+        fc = getattr(self, "_freeze", None)
+        if fc is not None and getattr(fc, "active", False):
+            fc._sync_sizes()
+            self.updateGeometries()
 
     def _apply_user_sizes(self):
         """저장된 사용자 크기를 현재 테이블에 다시 적용 (populate 후 호출)."""
@@ -956,6 +974,70 @@ class ExcelTableView(QTableView):
                 sel.append(QItemSelectionRange(
                     model.index(r, 0), model.index(r, cols - 1)))
         sm.select(sel, QItemSelectionModel.ClearAndSelect)
+
+    def _supplement_key_selection(self, *_):
+        """본문 다중 셀 선택이 키 열/행 경계에 닿으면(넘으면), 틀 고정으로 숨겨진
+        키 열(0..key_col)·키 행(0..key_row)을 함께 선택되도록 보충한다. 오버레이
+        (top/left/corner)가 본체와 선택 모델을 공유하므로 자동으로 하이라이트된다.
+
+        규칙(사용자 선택 동작):
+        - 본문 블록의 왼쪽 변이 '첫 데이터 열'(키 열 바로 옆)이면 그 행들에 키 열을 보충.
+        - 본문 블록의 위쪽 변이 '첫 데이터 행'(키 행 바로 옆)이면 그 열들에 키 행을 보충.
+        - 헤더로 '열/행 전체'를 선택한 경우(full-height/full-width range)는 건드리지 않는다
+          — 선택 range 압축·_full_columns_selected·컨텍스트 메뉴 대상 시맨틱을 보존.
+        - 단일 셀(내비게이션 착지)도 보충하지 않는다.
+
+        재진입/대칭 미러 안전:
+        - _supplementing 가드로 보충이 유발한 selectionChanged 에는 재진입하지 않는다.
+        - 이미 선택된 셀엔 Qt 가 selectionChanged 를 안 내므로 무한 반복이 없다.
+        - 미러(mirror_selection_from)는 _populating=True 라 여기서 걸러진다."""
+        if self._populating or self._supplementing or self._applying_sizes:
+            return
+        fc = getattr(self, "_freeze", None)
+        if fc is None or not getattr(fc, "active", False):
+            return   # 틀 고정이 없으면 키 셀이 본체에 보이므로 일반 선택으로 충분
+        sm = self.selectionModel()
+        if sm is None:
+            return
+        ranges = list(sm.selection())
+        if not ranges:
+            return
+        n_rows = self.rowCount()
+        n_cols = self.columnCount()
+        if n_rows == 0 or n_cols == 0:
+            return
+        row_max, col_max = n_rows - 1, n_cols - 1
+        # 단일 셀(내비게이션 착지)은 보충하지 않는다 — '다중 선택 시'에만.
+        if len(ranges) == 1 and ranges[0].top() == ranges[0].bottom() \
+                and ranges[0].left() == ranges[0].right():
+            return
+        # 헤더로 열/행 전체를 선택한 경우는 기존 동작 유지(보충하지 않음).
+        for rng in ranges:
+            if (rng.top() == 0 and rng.bottom() == row_max) or \
+               (rng.left() == 0 and rng.right() == col_max):
+                return
+        kc, kr = self._key_col, self._key_row
+        first_data_col = kc + 1 if (kc is not None and kc >= 0) else None
+        first_data_row = kr + 1 if (kr is not None and kr >= 0) else None
+        model = self.model()
+        supp = QItemSelection()
+        for rng in ranges:
+            # 블록 왼쪽 변이 첫 데이터 열(키 열 경계에 닿음) → 그 행들에 키 열(0..key_col) 보충
+            if first_data_col is not None and rng.left() == first_data_col:
+                supp.append(QItemSelectionRange(
+                    model.index(rng.top(), 0), model.index(rng.bottom(), kc)))
+            # 블록 위쪽 변이 첫 데이터 행(키 행 경계에 닿음) → 그 열들에 키 행(0..key_row) 보충
+            if first_data_row is not None and rng.top() == first_data_row:
+                supp.append(QItemSelectionRange(
+                    model.index(0, rng.left()), model.index(kr, rng.right())))
+        if supp.isEmpty():
+            return
+        self._supplementing = True
+        try:
+            # Select(추가) — 기존 선택 유지, 키 셀만 더한다. 이미 선택됐으면 no-op.
+            sm.select(supp, QItemSelectionModel.Select)
+        finally:
+            self._supplementing = False
 
     def _touched_rows(self) -> set[int]:
         """선택 range가 닿은 모든 행(부분 선택 포함). O(#range × 평균행폭)."""
