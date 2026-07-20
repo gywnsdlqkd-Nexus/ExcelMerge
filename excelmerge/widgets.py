@@ -546,10 +546,17 @@ class FreezeController(QObject):
         # left만 스크롤 행 정렬 필요(본체와 동일 숨김). top/corner는 고정 행만 노출(높이 클립).
         host = self.host
         left = self.left
-        for r in range(host.model().rowCount()):
-            hidden = host.isRowHidden(r)
-            if left.isRowHidden(r) != hidden:
-                left.setRowHidden(r, hidden)
+        # 대량 행 숨김을 ScrollPerItem에서 하면 per-item 재계산으로 ~O(R²) → 루프 동안
+        # ScrollPerPixel로 전환 후 복원(본체 필터 루프와 동일 취지).
+        prev_vmode = left.verticalScrollMode()
+        left.setVerticalScrollMode(QAbstractItemView.ScrollPerPixel)
+        try:
+            for r in range(host.model().rowCount()):
+                hidden = host.isRowHidden(r)
+                if left.isRowHidden(r) != hidden:
+                    left.setRowHidden(r, hidden)
+        finally:
+            left.setVerticalScrollMode(prev_vmode)
 
     def _sync_scroll(self):
         if not self._alive():

@@ -203,14 +203,18 @@ class DiffView(QWidget):
         )
 
         self._syncing_selection = False
+        self._syncing_scroll = False
 
         # A↔B 대칭 배선 — 스크롤/크기/선택 동기화 (src → dst 양방향 루프)
         # ※ 람다의 루프 변수는 기본값 인자(s=..., d=...)로 바인딩해야 한다.
         for src, dst in ((self.panel_a, self.panel_b), (self.panel_b, self.panel_a)):
+            # 스크롤 미러는 반드시 재진입 가드를 거친다 — 가드 없이 valueChanged→setValue를
+            # 직접 연결하면 ScrollPerItem(틀고정) + A/B 열폭 차이로 스크롤바 최댓값이 달라
+            # 하단/우단에서 clamp 값이 진동하며 동기 재진입 무한루프(UI 먹통)가 난다.
             src.table.horizontalScrollBar().valueChanged.connect(
-                dst.table.horizontalScrollBar().setValue)
+                lambda v, s=src.table, d=dst.table: self._mirror_scroll(s, d, "h", v))
             src.table.verticalScrollBar().valueChanged.connect(
-                dst.table.verticalScrollBar().setValue)
+                lambda v, s=src.table, d=dst.table: self._mirror_scroll(s, d, "v", v))
             # 열/행 크기 동기화 — 사용자 조작에 의한 변경만 (apply_*는 시그널 미발행)
             src.table.column_resized.connect(dst.table.apply_column_width)
             src.table.row_resized.connect(dst.table.apply_row_height)
@@ -742,6 +746,11 @@ class DiffView(QWidget):
             tbl._applying_sizes = True
             prev_upd = tbl.updatesEnabled()
             tbl.setUpdatesEnabled(False)   # 대량 setRowHidden 중 재도색 방지(40k행 성능)
+            # ScrollPerItem에선 setRowHidden 하나마다 per-item 스크롤 범위 재계산이 일어나
+            # 대량 숨김(수만 행)이 ~O(R²)로 폭주한다. 루프 동안 ScrollPerPixel로 바꿨다가
+            # 복원하면 O(R)로 떨어진다(복원 시 1회만 재계산).
+            prev_vmode = tbl.verticalScrollMode()
+            tbl.setVerticalScrollMode(QAbstractItemView.ScrollPerPixel)
             try:
                 nrows = tbl.rowCount()
                 for r in range(nrows):
@@ -749,6 +758,7 @@ class DiffView(QWidget):
                     if tbl.isRowHidden(r) != want:
                         tbl.setRowHidden(r, want)
             finally:
+                tbl.setVerticalScrollMode(prev_vmode)
                 tbl._applying_sizes = False
                 tbl.setUpdatesEnabled(prev_upd)
         self._update_minimap()
@@ -768,11 +778,14 @@ class DiffView(QWidget):
         QTableView는 리셋 후에도 숨김을 기억할 수 있어 명시적으로 풀어야 한다."""
         for tbl in (self.panel_a.table, self.panel_b.table):
             tbl._applying_sizes = True
+            prev_vmode = tbl.verticalScrollMode()
+            tbl.setVerticalScrollMode(QAbstractItemView.ScrollPerPixel)   # 대량 unhide O(R²) 방지
             try:
                 for r in range(tbl.rowCount()):
                     if tbl.isRowHidden(r):
                         tbl.setRowHidden(r, False)
             finally:
+                tbl.setVerticalScrollMode(prev_vmode)
                 tbl._applying_sizes = False
 
     # ── 변경 셀 탐색(이전/다음) ───────────────────────────────────────────────
@@ -1298,6 +1311,20 @@ class DiffView(QWidget):
             dst.v_split.setSizes(src.v_split.sizes())
         finally:
             self._syncing_split = False
+
+    def _mirror_scroll(self, src: ExcelTableView, dst: ExcelTableView, orient: str, value: int):
+        """A↔B 스크롤 미러 — 재진입 가드로 무한 ping-pong 방지(folder_view와 동일 패턴).
+        dst.setValue가 스크롤바 최댓값 차이로 다른 값에 clamp돼 valueChanged를 되쏘아도
+        가드가 재진입을 막아 한 번만 반영된다."""
+        if self._syncing_scroll:
+            return
+        self._syncing_scroll = True
+        try:
+            bar = (dst.horizontalScrollBar() if orient == "h"
+                   else dst.verticalScrollBar())
+            bar.setValue(value)
+        finally:
+            self._syncing_scroll = False
 
     def _sync_selection(self, src: ExcelTableView, dst: ExcelTableView):
         if self._syncing_selection or src._populating or dst._populating:

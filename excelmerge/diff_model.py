@@ -27,10 +27,19 @@ EXTRA_COLS = 5    # 데이터 끝에 추가할 빈 열 수
 _ALIGN = int(Qt.AlignVCenter | Qt.AlignLeft)   # PyQt5: int 캐스팅 필수
 
 
+# char-diff 대상 최대 길이(own+other 합). 초과 시 char-diff를 건너뛴다 —
+# SequenceMatcher(autojunk=False)는 O(n·m)라 긴 값(대용량 JSON 셀 등)에서 paint 중 UI가 멈춘다.
+# 초과 시 []를 반환하면 델리게이트가 fast-path(super().paint())로 빠져 QTextDocument 레이아웃 비용도 없다.
+_CHAR_DIFF_MAX = 4000
+
+
 def _char_diff_ranges(own: str, other: str) -> list:
     """own 문자열에서 other와 다른 [start, end) 구간 목록.
     SequenceMatcher의 replace/delete 구간(own측 i1:i2)만 수집 —
-    insert(other에만 있는 부분)는 own에 표시할 구간이 없으므로 반대쪽에서 강조된다."""
+    insert(other에만 있는 부분)는 own에 표시할 구간이 없으므로 반대쪽에서 강조된다.
+    너무 긴 값은 char-diff를 생략(성능) — 셀 강조 없이 값만 표시된다."""
+    if len(own) + len(other) > _CHAR_DIFF_MAX:
+        return []
     ranges = []
     sm = difflib.SequenceMatcher(None, own, other, autojunk=False)
     for tag, i1, i2, _j1, _j2 in sm.get_opcodes():
