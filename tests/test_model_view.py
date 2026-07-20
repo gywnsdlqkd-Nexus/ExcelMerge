@@ -947,7 +947,15 @@ def test_freeze_corner_menu_nonmodal():
     exec_calls = []
     orig_exec, orig_popup = QMenu.exec_, QMenu.popup
     QMenu.exec_ = lambda self, *a, **k: (exec_calls.append(1), None)[1]
-    QMenu.popup = lambda self, *a, **k: (self.actions()[0].trigger() if self.actions() else None)
+
+    # 코너 메뉴엔 이제 '병합 준비' 항목도 섞일 수 있으므로(키 열/행에서도 노출), 첫 항목이 아니라
+    # '키 …' 항목을 텍스트로 찾아 트리거해 키 신호를 검증한다.
+    def _trigger_key(self, *a, **k):
+        for act in self.actions():
+            if "키 " in act.text():
+                act.trigger()
+                return
+    QMenu.popup = _trigger_key
     col_sig, row_sig = [], []
     t.key_col_changed.connect(col_sig.append)
     t.key_row_changed.connect(row_sig.append)
@@ -961,6 +969,41 @@ def test_freeze_corner_menu_nonmodal():
     assert exec_calls == [], "corner 메뉴가 모달 exec_ 사용 — 크래시 회귀 위험"
     win.close()
     print("PASS test_freeze_corner_menu_nonmodal")
+
+
+def test_freeze_corner_menu_has_merge_items():
+    """키 열/행(틀 고정 corner) 헤더 우클릭에도 변경 셀이 있으면 A/B 병합 준비 항목이 노출되고,
+    트리거 시 stage_requested 가 emit 된다(비모달 popup)."""
+    from PyQt5.QtWidgets import QMenu
+    from PyQt5.QtCore import QPoint
+    app = QApplication.instance() or QApplication([])
+    win = _diff_view()
+    win.panel_a.set_path("a.xlsx"); win.panel_b.set_path("b.xlsx")
+    # 키 열 A(0), 키 행 1행(0-based 0). 신규 행이 생기도록 A/B 행 수를 다르게.
+    a = [["ID", "V"], ["1", "a"], ["2", "b"]]
+    b = [["ID", "V"], ["1", "a"], ["2", "b"], ["3", "c"]]   # ID=3 신규(B전용)
+    win._on_loaded(a, b)
+    _wait_diff(win)
+    fc = win._freeze["a"]; t = win.panel_a.table
+    ch = fc.corner.horizontalHeader()
+    ch.logicalIndexAt = lambda pos: 0     # 키 열(A, col0)
+    stage_sig = []
+    t.stage_requested.connect(stage_sig.append)
+    orig_popup = QMenu.popup
+
+    def _trigger_a2b(self, *a_, **k):
+        for act in self.actions():
+            if "A → B" in act.text():
+                act.trigger()
+                return
+    QMenu.popup = _trigger_a2b
+    try:
+        fc._corner_col_menu(QPoint(1, 1))   # 키 열에도 신규 행 때문에 '병합 준비' 노출
+    finally:
+        QMenu.popup = orig_popup
+    assert stage_sig == ["a_to_b"], f"키 열 corner 병합 준비 미동작: {stage_sig}"
+    win.close()
+    print("PASS test_freeze_corner_menu_has_merge_items")
 
 
 def test_freeze_cells_selectable():

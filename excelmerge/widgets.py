@@ -300,7 +300,8 @@ class FreezeController(QObject):
         cv.customContextMenuRequested.connect(self._corner_row_menu)
 
     def _corner_col_menu(self, pos):
-        """고정 열 헤더(corner) 우클릭 — 키 열 설정/해제(비모달 popup)."""
+        """고정 열 헤더(corner) 우클릭 — 병합 준비/취소 + 키 열 설정/해제(비모달 popup).
+        ★ 반드시 popup(비모달). exec_(모달)은 자식 오버레이 이벤트 중 access violation 유발."""
         if not self._alive():
             return
         host = self.host
@@ -311,6 +312,29 @@ class FreezeController(QObject):
         m = QMenu(host)
         m.setStyleSheet(MENU_QSS)
         m.setAttribute(Qt.WA_DeleteOnClose)
+
+        # 병합 준비/취소 — 본체 헤더 메뉴와 동일(대상 열 = 선택 반영). 키 열도 변경/스테이징
+        # 셀이 있으면 노출(예: 신규 행의 키 값). 없으면 항목 자체가 안 뜬다.
+        target_cols = host._selected_header_cols(col)
+        cols_label = ", ".join(get_column_letter(c + 1) for c in target_cols)
+        has_changed = any(host._col_has_changed(c) for c in target_cols)
+        has_staged = host._cols_have_staged(target_cols)
+        if has_changed:
+            m.addAction(f"A → B  병합 준비  [{cols_label}열]").triggered.connect(
+                lambda _=False, cs=target_cols:
+                (host._select_cols(cs), host.stage_requested.emit(DIR_A2B)))
+            m.addAction(f"B → A  병합 준비  [{cols_label}열]").triggered.connect(
+                lambda _=False, cs=target_cols:
+                (host._select_cols(cs), host.stage_requested.emit(DIR_B2A)))
+        if has_staged:
+            if has_changed:
+                m.addSeparator()
+            m.addAction(f"병합 준비 취소  [{cols_label}열]").triggered.connect(
+                lambda _=False, cs=target_cols:
+                (host._select_cols(cs), host.unstage_requested.emit()))
+        if has_changed or has_staged:
+            m.addSeparator()
+
         if col == host._key_col:
             m.addAction("🔓  키 열 해제 (ROW 순서 기반 비교)").triggered.connect(
                 lambda: host.key_col_changed.emit(-1))
@@ -321,7 +345,8 @@ class FreezeController(QObject):
         m.popup(ch.mapToGlobal(pos))
 
     def _corner_row_menu(self, pos):
-        """고정 행 헤더(corner) 우클릭 — 키 행 설정/초기화(비모달 popup)."""
+        """고정 행 헤더(corner) 우클릭 — 병합 준비/취소 + 키 행 설정(비모달 popup).
+        ★ 반드시 popup(비모달). exec_(모달)은 자식 오버레이 이벤트 중 access violation 유발."""
         if not self._alive():
             return
         host = self.host
@@ -332,15 +357,38 @@ class FreezeController(QObject):
         orig = host.model().orig_row(row)   # display→원본 파일 행
         if orig is None:
             return
-        # 현재 키 행 우클릭 → 노출할 항목이 없으므로 메뉴를 띄우지 않는다.
-        # (키 행 초기화 기능 제거 — 키 행 지정은 다른 행에서 '키 행으로 설정'으로만.)
-        if orig == host._key_row:
-            return
         m = QMenu(host)
         m.setStyleSheet(MENU_QSS)
         m.setAttribute(Qt.WA_DeleteOnClose)
-        m.addAction(key_header_icon(), f"키 행으로 설정  [{orig + 1}행]").triggered.connect(
-            lambda: host.key_row_changed.emit(orig))
+
+        # 병합 준비/취소 — 본체 행 헤더 메뉴와 동일(대상 행 = 선택 반영). 키 행에서도 노출.
+        target_rows = host._selected_header_rows(row)
+        suffix = f"  [{len(target_rows)}개 행]" if len(target_rows) > 1 else ""
+        has_changed = any(host._row_has_changed(r) for r in target_rows)
+        has_staged = host._rows_have_staged(target_rows)
+        if has_changed:
+            m.addAction(f"A → B  병합 준비{suffix}").triggered.connect(
+                lambda _=False, rs=target_rows:
+                (host._select_rows(rs), host.stage_requested.emit(DIR_A2B)))
+            m.addAction(f"B → A  병합 준비{suffix}").triggered.connect(
+                lambda _=False, rs=target_rows:
+                (host._select_rows(rs), host.stage_requested.emit(DIR_B2A)))
+        if has_staged:
+            if has_changed:
+                m.addSeparator()
+            m.addAction(f"병합 준비 취소{suffix}").triggered.connect(
+                lambda _=False, rs=target_rows:
+                (host._select_rows(rs), host.unstage_requested.emit()))
+
+        # 키 행 지정 — 현재 키 행이 아닌 단일 행에서만(초기화 기능은 제거됨).
+        if orig != host._key_row and len(target_rows) == 1:
+            if has_changed or has_staged:
+                m.addSeparator()
+            m.addAction(key_header_icon(), f"키 행으로 설정  [{orig + 1}행]").triggered.connect(
+                lambda _=False, o=orig: host.key_row_changed.emit(o))
+
+        if m.isEmpty():
+            return   # 키 행인데 병합할 것도 없음 → 메뉴 미표시
         m.popup(cv.mapToGlobal(pos))
 
     def _make_view(self, headers: bool):
