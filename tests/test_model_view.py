@@ -277,7 +277,8 @@ def test_header_multiselect_extension():
     assert tbl._full_columns_selected() == [1, 2], tbl._full_columns_selected()
     QTest.keyClick(tbl, Qt.Key_Right, Qt.ShiftModifier)
     assert tbl._full_columns_selected() == [1, 2, 3], tbl._full_columns_selected()
-    assert len(tbl.selectionModel().selectedIndexes()) == 3 * row_n
+    # 데이터 열 1~3 + 보충된 키 열 0 = 4열 × row_n (키 열은 _full_columns_selected 에선 제외).
+    assert len(tbl.selectionModel().selectedIndexes()) == 4 * row_n
     # Shift+← 로 앵커 방향 축소
     QTest.keyClick(tbl, Qt.Key_Left, Qt.ShiftModifier)
     assert tbl._full_columns_selected() == [1, 2], tbl._full_columns_selected()
@@ -341,14 +342,15 @@ def test_ctrl_jump_single_selection():
     QTest.keyClick(tbl, Qt.Key_Right, Qt.ControlModifier)
     assert tbl.get_selected_cells() == {(2, tbl.columnCount() - 1)}, tbl.get_selected_cells()
 
-    # Ctrl+Shift+방향키: 범위 선택 유지 (붕괴 없음)
+    # Ctrl+Shift+방향키: 범위 선택 유지 (붕괴 없음). 데이터 행(2)>키 행(0)이라 키 행(0행)이
+    # 해당 열(0~2)에 함께 보충된다(항상 함께 규칙). 좌변이 키 열(0)이라 키 열 보충은 없음.
     tbl._move_current_cell(2, 0)
     QTest.keyClick(tbl, Qt.Key_Right, Qt.ControlModifier | Qt.ShiftModifier)
-    assert tbl.get_selected_cells() == {(2, 0), (2, 1), (2, 2)}, tbl.get_selected_cells()
+    assert tbl.get_selected_cells() == {(2, 0), (2, 1), (2, 2),
+                                        (0, 0), (0, 1), (0, 2)}, tbl.get_selected_cells()
 
     # Ctrl+Shift+End: 데이터 영역으로 클램프된 범위, 붕괴 없음.
-    # 앵커 (1,1)은 첫 데이터 열/행(키 열 0·키 행 0 바로 옆)이라 블록이 키 경계에 '닿음'
-    # → _supplement_key_selection 이 키 열(0열)·키 행(0행)을 함께 선택한다(사용자 선택 동작).
+    # 앵커 (1,1)은 데이터 영역이라 키 열(0열)·키 행(0행)이 함께 보충된다(항상 함께 규칙).
     last_r = len(dm) - 1
     tbl._move_current_cell(1, 1)
     QTest.keyClick(tbl, Qt.Key_End, Qt.ControlModifier | Qt.ShiftModifier)
@@ -380,10 +382,10 @@ def test_selection_mirror_compact_ranges():
     win.show()
     app.processEvents()
 
-    # 열 전체 선택 → 동기화된 반대 패널도 range 1개 + 셀 집합 동일
+    # 열 전체 선택 → 키 열(0)이 보충돼 데이터 열 + 키 열 = range 2개(각각 압축), 셀 집합 동일.
     src._select_col(2)
     app.processEvents()
-    assert len(dst.selectionModel().selection()) == 1, \
+    assert len(dst.selectionModel().selection()) == 2, \
         len(dst.selectionModel().selection())
     assert dst.get_selected_cells() == src.get_selected_cells()
 
@@ -1076,14 +1078,15 @@ def test_large_selection_queries_range_based():
     host.selectAll()
     t = time.perf_counter()
     fc = host._full_columns_selected()
-    shc = host._selected_header_cols(0)
-    shr = host._selected_header_rows(0)
+    shc = host._selected_header_cols(1)   # 데이터 열 앵커(키 열 0 제외)
+    shr = host._selected_header_rows(1)   # 데이터 행 앵커(키 행 0 제외)
     hs = host._has_staged_selection()
     dt = time.perf_counter() - t
     assert dt < 0.5, f"대량 선택 조회가 느림(회귀 의심): {dt:.2f}s"
-    assert fc == list(range(cols)), f"전체 열 판정 오류: {len(fc)}/{cols}"
-    assert shc == list(range(cols)), "헤더 대상 열 오류"
-    assert len(shr) == host.rowCount(), "헤더 대상 행 오류"
+    # _full_columns_selected / _full_rows_selected 는 고정 키 열(0)·키 행(0)을 제외한다.
+    assert fc == list(range(1, cols)), f"전체 열 판정 오류: {len(fc)}/{cols}"
+    assert shc == list(range(1, cols)), "헤더 대상 열 오류"
+    assert len(shr) == host.rowCount() - 1, "헤더 대상 행 오류"
     assert hs is False, "staged 없는데 True"
 
     # 부분 선택 정확성 (비연속)

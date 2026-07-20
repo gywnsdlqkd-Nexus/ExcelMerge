@@ -131,45 +131,9 @@ def test_data_column_resize_still_aligns(frozen_view):
     assert _aligned(fa, ta) and _aligned(fb, tb), "데이터 열 리사이즈 후 밴드 어긋남"
 
 
-# ── 버그 2: 다중 선택이 키 경계에 닿으면 키 열/행 보충 ('넘으면') ─────────────
-def test_block_flush_both_boundaries_supplements(frozen_view):
-    """키 열/행 경계 양쪽에 닿은 블록(행 2~4 × 열 2~3)은 키 열(0~1)·키 행(0~1)이 함께 선택된다.
-    (key_col=1, key_row=1 → 첫 데이터 열/행 = 2)."""
-    dv = frozen_view
-    host = dv.panel_a.table
-    sm = host.selectionModel()
-    m = host.model()
-    sm.select(QItemSelection(m.index(2, 2), m.index(4, 3)),
-              QItemSelectionModel.ClearAndSelect)
-    QApplication.instance().processEvents()
-    # 왼쪽 변이 첫 데이터 열(2)에 닿음 → 선택 행(2~4)에 키 열(0,1) 보충
-    for r in (2, 3, 4):
-        assert sm.isSelected(m.index(r, 0)) and sm.isSelected(m.index(r, 1)), \
-            f"키 열 미보충 (행 {r})"
-    # 위쪽 변이 첫 데이터 행(2)에 닿음 → 선택 열(2~3)에 키 행(0,1) 보충
-    for c in (2, 3):
-        assert sm.isSelected(m.index(0, c)) and sm.isSelected(m.index(1, c)), \
-            f"키 행 미보충 (열 {c})"
-    assert sm.isSelected(m.index(3, 2))   # 원래 선택 유지
-
-
-def test_middle_block_not_supplemented(frozen_view):
-    """키 경계에 닿지 않는 중간 블록(행 5~7 × 열 3)은 보충하지 않는다('넘지' 않음)."""
-    dv = frozen_view
-    host = dv.panel_a.table
-    sm = host.selectionModel()
-    m = host.model()
-    sm.select(QItemSelection(m.index(5, 3), m.index(7, 3)),
-              QItemSelectionModel.ClearAndSelect)
-    QApplication.instance().processEvents()
-    assert sm.isSelected(m.index(6, 3))
-    for r in (5, 6, 7):   # 키 열 미보충
-        assert not sm.isSelected(m.index(r, 0)) and not sm.isSelected(m.index(r, 1))
-    assert not sm.isSelected(m.index(0, 3)) and not sm.isSelected(m.index(1, 3))  # 키 행 미보충
-
-
-def test_block_flush_left_only_supplements_key_col(frozen_view):
-    """왼쪽 변만 첫 데이터 열에 닿은 블록(행 5~7 × 열 2~3)은 키 열만 보충(키 행 X)."""
+# ── 버그 2: 다중 선택 시 키 열/행 항상 함께 선택 (key_col=1, key_row=1) ────────
+def test_block_always_supplements_key_col_and_row(frozen_view):
+    """중간 블록(행 5~7 × 열 2~3, 어느 경계에도 안 닿음)이라도 키 열(0~1)·키 행(0~1)이 함께 선택."""
     dv = frozen_view
     host = dv.panel_a.table
     sm = host.selectionModel()
@@ -177,9 +141,58 @@ def test_block_flush_left_only_supplements_key_col(frozen_view):
     sm.select(QItemSelection(m.index(5, 2), m.index(7, 3)),
               QItemSelectionModel.ClearAndSelect)
     QApplication.instance().processEvents()
-    for r in (5, 6, 7):
-        assert sm.isSelected(m.index(r, 0)) and sm.isSelected(m.index(r, 1))  # 키 열 보충
-    assert not sm.isSelected(m.index(0, 2)) and not sm.isSelected(m.index(0, 3))  # 키 행 X
+    for r in (5, 6, 7):   # 선택 행에 키 열(0,1)
+        assert sm.isSelected(m.index(r, 0)) and sm.isSelected(m.index(r, 1)), \
+            f"키 열 미보충 (행 {r})"
+    for c in (2, 3):      # 선택 열에 키 행(0,1)
+        assert sm.isSelected(m.index(0, c)) and sm.isSelected(m.index(1, c)), \
+            f"키 행 미보충 (열 {c})"
+    assert sm.isSelected(m.index(6, 2))   # 원래 선택 유지
+
+
+def test_header_column_selection_supplements_key_col(frozen_view):
+    """헤더로 데이터 열 전체 선택(_select_col) 시 키 열(0,1)도 함께 선택되고,
+    _full_columns_selected 는 키 열을 제외해 데이터 열만 보고한다(헤더 확장·메뉴 시맨틱 보존)."""
+    dv = frozen_view
+    host = dv.panel_a.table
+    host._select_col(2)
+    QApplication.instance().processEvents()
+    sm = host.selectionModel()
+    assert sm.isSelected(host.model().index(5, 0)), "헤더 열 선택 시 키 열 미보충"
+    assert sm.isSelected(host.model().index(5, 1))
+    assert host._full_columns_selected() == [2], host._full_columns_selected()
+
+
+def test_header_row_selection_supplements_key_row(frozen_view):
+    """헤더로 데이터 행 전체 선택(_select_rows) 시 키 행(0,1)도 함께 선택되고,
+    _full_rows_selected 는 키 행을 제외해 데이터 행만 보고한다."""
+    dv = frozen_view
+    host = dv.panel_a.table
+    host._select_rows([5, 6])
+    QApplication.instance().processEvents()
+    sm = host.selectionModel()
+    assert sm.isSelected(host.model().index(0, 3)), "헤더 행 선택 시 키 행 미보충"
+    assert sm.isSelected(host.model().index(1, 3))
+    assert host._full_rows_selected() == [5, 6], host._full_rows_selected()
+
+
+def test_diff_only_row_selection_supplements_key_row(frozen_view):
+    """회귀(사용자 보고): '변경 행만 보기' ON에서 변경 행 셀을 선택하면 숨겨진 키 행이
+    함께 선택돼야 한다. (키 행은 본체에서 항상 숨김 → 격자 인접이 아닌 구조 조건으로 판정)"""
+    dv = frozen_view
+    dv.diff_only_btn.setChecked(True)   # 변경 행만 보기 ON
+    QApplication.instance().processEvents()
+    host = dv.panel_a.table
+    sm = host.selectionModel()
+    m = host.model()
+    # 변경 행(5)의 데이터 셀(열 2~3) 선택 — diff-only라 위쪽 데이터 행들은 숨김 상태.
+    sm.select(QItemSelection(m.index(5, 2), m.index(5, 3)),
+              QItemSelectionModel.ClearAndSelect)
+    QApplication.instance().processEvents()
+    for c in (2, 3):      # 키 행(0,1) 보충 — 숨겨져 있어도 상단 밴드에 표시
+        assert sm.isSelected(m.index(0, c)) and sm.isSelected(m.index(1, c)), \
+            f"변경 행만 보기 ON: 키 행 미보충 (열 {c})"
+    assert sm.isSelected(m.index(5, 0)) and sm.isSelected(m.index(5, 1))  # 키 열도 함께
 
 
 def test_single_cell_selection_not_supplemented(frozen_view):
@@ -196,16 +209,15 @@ def test_single_cell_selection_not_supplemented(frozen_view):
     assert not sm.isSelected(m.index(0, 2)), "단일 셀인데 키 행이 보충됨"
 
 
-def test_full_column_header_selection_not_supplemented(frozen_view):
-    """헤더 전체 열 선택(_select_col)은 보충하지 않는다 — range 압축·헤더 시맨틱 보존."""
+def test_select_all_not_supplemented_or_fragmented(frozen_view):
+    """selectAll 은 이미 키를 포함하므로 보충 안 함 → range 조각화 없이 데이터 열 전체 보고."""
     dv = frozen_view
     host = dv.panel_a.table
-    host._select_col(2)   # 데이터 열 C 전체(모든 행)
+    host.selectAll()
     QApplication.instance().processEvents()
-    sm = host.selectionModel()
-    # 키 열(0,1)은 추가되지 않아야 하고, 선택 range 도 1개(압축)로 유지
-    assert not sm.isSelected(host.model().index(5, 0))
-    assert len(sm.selection()) == 1, f"헤더 열 선택이 조각남: {len(sm.selection())}"
+    # 조각화되면 _full_columns_selected 가 일부 열을 놓친다 → 키 열(0,1) 제외 전 열이 연속으로.
+    expected = list(range(2, host.columnCount()))   # key_col=1 → 첫 데이터 열=2
+    assert host._full_columns_selected() == expected, host._full_columns_selected()
 
 
 def test_supplement_mirrors_to_other_panel(frozen_view):
@@ -214,11 +226,11 @@ def test_supplement_mirrors_to_other_panel(frozen_view):
     ha = dv.panel_a.table
     hb = dv.panel_b.table
     m = ha.model()
-    ha.selectionModel().select(QItemSelection(m.index(2, 2), m.index(4, 3)),
+    ha.selectionModel().select(QItemSelection(m.index(5, 2), m.index(7, 3)),
                                QItemSelectionModel.ClearAndSelect)
     QApplication.instance().processEvents()
     smb = hb.selectionModel()
-    assert smb.isSelected(hb.model().index(2, 0)), "반대 패널에 키 셀 미러 안 됨"
+    assert smb.isSelected(hb.model().index(5, 0)), "반대 패널에 키 셀 미러 안 됨"
     assert smb.isSelected(hb.model().index(0, 2))
 
 

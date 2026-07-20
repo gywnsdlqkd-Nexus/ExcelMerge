@@ -1060,21 +1060,25 @@ class ExcelTableView(QTableView):
         sm.select(sel, QItemSelectionModel.ClearAndSelect)
 
     def _supplement_key_selection(self, *_):
-        """본문 다중 셀 선택이 키 열/행 경계에 닿으면(넘으면), 틀 고정으로 숨겨진
-        키 열(0..key_col)·키 행(0..key_row)을 함께 선택되도록 보충한다. 오버레이
-        (top/left/corner)가 본체와 선택 모델을 공유하므로 자동으로 하이라이트된다.
+        """다중 셀 선택 시, 틀 고정으로 본체에서 숨겨진 키 열(0..key_col)·키 행(0..key_row)을
+        함께 선택되도록 보충한다 — 스테이징의 _key_cells_for_selection 과 동일한 규칙:
+        선택된 각 행에는 키 열을, 선택된 각 열에는 키 행을 더한다. 오버레이(top/left/corner)가
+        본체와 선택 모델을 공유하므로 키 셀은 자동으로 하이라이트된다(본체에서 숨겨져 있어도,
+        '변경 행만 보기'로 숨겨져 있어도 상단/좌측 밴드에 표시).
 
-        규칙(사용자 선택 동작):
-        - 본문 블록의 왼쪽 변이 '첫 데이터 열'(키 열 바로 옆)이면 그 행들에 키 열을 보충.
-        - 본문 블록의 위쪽 변이 '첫 데이터 행'(키 행 바로 옆)이면 그 열들에 키 행을 보충.
-        - 헤더로 '열/행 전체'를 선택한 경우(full-height/full-width range)는 건드리지 않는다
-          — 선택 range 압축·_full_columns_selected·컨텍스트 메뉴 대상 시맨틱을 보존.
-        - 단일 셀(내비게이션 착지)도 보충하지 않는다.
+        규칙(모든 선택 방식 공통 — 드래그·Shift+방향키·헤더 클릭):
+        - range 가 데이터 영역에서 시작하면(rng.left() > key_col) 그 행들에 키 열(0..key_col) 보충.
+        - range 가 데이터 영역에서 시작하면(rng.top()  > key_row) 그 열들에 키 행(0..key_row) 보충.
+          → 전체 열 선택엔 키 열이, 전체 행 선택엔 키 행이, 블록엔 좌측·상단 프레임이 함께 선택된다.
+        - 단일 셀(내비게이션 착지)은 보충하지 않는다.
+
+        조각화 회피: 위 구조 조건(> key_col / > key_row) 덕분에 이미 키를 포함하거나 전체(selectAll)인
+        range 는 보충하지 않아, 기존 사각형 선택이 잘게 쪼개지지 않는다(선택 질의·미러 성능 보존).
 
         재진입/대칭 미러 안전:
         - _supplementing 가드로 보충이 유발한 selectionChanged 에는 재진입하지 않는다.
         - 이미 선택된 셀엔 Qt 가 selectionChanged 를 안 내므로 무한 반복이 없다.
-        - 미러(mirror_selection_from)는 _populating=True 라 여기서 걸러진다."""
+        - 미러(mirror_selection/mirror_selection_from)는 _populating=True 라 여기서 걸러진다."""
         if self._populating or self._supplementing or self._applying_sizes:
             return
         fc = getattr(self, "_freeze", None)
@@ -1086,32 +1090,22 @@ class ExcelTableView(QTableView):
         ranges = list(sm.selection())
         if not ranges:
             return
-        n_rows = self.rowCount()
-        n_cols = self.columnCount()
-        if n_rows == 0 or n_cols == 0:
+        if self.rowCount() == 0 or self.columnCount() == 0:
             return
-        row_max, col_max = n_rows - 1, n_cols - 1
         # 단일 셀(내비게이션 착지)은 보충하지 않는다 — '다중 선택 시'에만.
         if len(ranges) == 1 and ranges[0].top() == ranges[0].bottom() \
                 and ranges[0].left() == ranges[0].right():
             return
-        # 헤더로 열/행 전체를 선택한 경우는 기존 동작 유지(보충하지 않음).
-        for rng in ranges:
-            if (rng.top() == 0 and rng.bottom() == row_max) or \
-               (rng.left() == 0 and rng.right() == col_max):
-                return
         kc, kr = self._key_col, self._key_row
-        first_data_col = kc + 1 if (kc is not None and kc >= 0) else None
-        first_data_row = kr + 1 if (kr is not None and kr >= 0) else None
         model = self.model()
         supp = QItemSelection()
         for rng in ranges:
-            # 블록 왼쪽 변이 첫 데이터 열(키 열 경계에 닿음) → 그 행들에 키 열(0..key_col) 보충
-            if first_data_col is not None and rng.left() == first_data_col:
+            # 데이터 영역에서 시작한 range(키 열을 아직 포함 안 함) → 그 행들에 키 열(0..key_col) 보충
+            if kc is not None and kc >= 0 and rng.left() > kc:
                 supp.append(QItemSelectionRange(
                     model.index(rng.top(), 0), model.index(rng.bottom(), kc)))
-            # 블록 위쪽 변이 첫 데이터 행(키 행 경계에 닿음) → 그 열들에 키 행(0..key_row) 보충
-            if first_data_row is not None and rng.top() == first_data_row:
+            # 데이터 영역에서 시작한 range(키 행을 아직 포함 안 함) → 그 열들에 키 행(0..key_row) 보충
+            if kr is not None and kr >= 0 and rng.top() > kr:
                 supp.append(QItemSelectionRange(
                     model.index(0, rng.left()), model.index(kr, rng.right())))
         if supp.isEmpty():
@@ -1461,6 +1455,12 @@ class ExcelTableView(QTableView):
         for rng in sm.selection():
             if rng.top() == 0 and rng.bottom() == row_max:
                 cols.update(range(rng.left(), rng.right() + 1))
+        # 고정 키 열(0..key_col)은 제외 — _supplement_key_selection 이 데이터 열 선택에
+        # 곁들여 넣은 키 열이 '데이터 열 선택' 집합을 오염시키지 않도록(헤더 확장·컨텍스트
+        # 메뉴 대상은 데이터 열 기준). 병합은 _stage_selected 가 키 셀을 따로 보충한다.
+        kc = self._key_col
+        if kc is not None and kc >= 0:
+            cols = {c for c in cols if c > kc}
         return sorted(cols)
 
     def _full_rows_selected(self) -> list[int]:
@@ -1475,6 +1475,10 @@ class ExcelTableView(QTableView):
         for rng in sm.selection():
             if rng.left() == 0 and rng.right() == col_max:
                 rows.update(range(rng.top(), rng.bottom() + 1))
+        # 고정 키 행(0..key_row)은 제외 (열 대칭 — 위 _full_columns_selected 참고).
+        kr = self._key_row
+        if kr is not None and kr >= 0:
+            rows = {r for r in rows if r > kr}
         return sorted(rows)
 
     def _select_column_range(self, c1: int, c2: int):
