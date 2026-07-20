@@ -298,6 +298,12 @@ class FreezeController(QObject):
         cv.setContextMenuPolicy(Qt.CustomContextMenu)
         ch.customContextMenuRequested.connect(self._corner_col_menu)
         cv.customContextMenuRequested.connect(self._corner_row_menu)
+        # 키 열/행은 본체에서 숨겨져 있어 '틀 고정' corner 오버레이 헤더에서만 드래그로
+        # 크기 조절이 가능하다. 이 헤더의 sectionResized 를 처리하지 않으면 corner 내부
+        # 열폭/행높이만 바뀌고 _fw/_fh·본체 여백·헬퍼·반대 패널이 갱신되지 않아 고정 밴드가
+        # 본체와 어긋나고 셀이 겹쳐 보인다 → 호스트/전 뷰/미러로 전파한다.
+        ch.sectionResized.connect(self._on_corner_col_resized)
+        cv.sectionResized.connect(self._on_corner_row_resized)
 
     def _corner_col_menu(self, pos):
         """고정 열 헤더(corner) 우클릭 — 병합 준비/취소 + 키 열 설정/해제(비모달 popup).
@@ -637,6 +643,75 @@ class FreezeController(QObject):
         self._sync_sizes()
         self.host.updateGeometries()
 
+    def _on_corner_col_resized(self, idx, old, new):
+        """corner 오버레이에서 키 열(고정 열) 폭을 드래그로 조절한 경우."""
+        if new <= 0 or not self._alive() or not self._active \
+                or idx >= self._n_cols or getattr(self.host, "_applying_sizes", False):
+            return
+        self._apply_frozen_col_width(idx, new, mirror=True)
+
+    def _on_corner_row_resized(self, idx, old, new):
+        """corner 오버레이에서 키 행(고정 행) 높이를 드래그로 조절한 경우."""
+        if new <= 0 or not self._alive() or not self._active \
+                or idx >= self._n_rows or getattr(self.host, "_applying_sizes", False):
+            return
+        self._apply_frozen_row_height(idx, new, mirror=True)
+
+    def _apply_frozen_col_width(self, idx, new, mirror=False):
+        """고정(키) 열 폭 변경을 호스트·전 헬퍼 뷰·_fw·본체 여백에 반영(+선택적 미러).
+        키 열은 본체에서 숨겨져 있어 host.setColumnWidth 가 무시되므로, 잠시 숨김을 풀고
+        폭을 심어 Qt 가 기억하게 한다(이후 refresh 가 그 폭을 캡처)."""
+        if not self._alive() or new <= 0 or idx < 0 or idx >= self._n_cols:
+            return
+        host = self.host
+        prev = getattr(host, "_applying_sizes", False)
+        host._applying_sizes = True
+        try:
+            was_hidden = host.isColumnHidden(idx)
+            if was_hidden:
+                host.setColumnHidden(idx, False)
+            if host.columnWidth(idx) != new:
+                host.setColumnWidth(idx, new)
+            if was_hidden:
+                host.setColumnHidden(idx, True)
+            host._user_col_widths[idx] = new
+            for v in self._views:
+                if v.columnWidth(idx) != new:
+                    v.setColumnWidth(idx, new)
+        finally:
+            host._applying_sizes = prev
+        # 고정 열 폭 합 재계산(corner 기준 — host 는 숨김이라 0)
+        self._fw = sum(self.corner.columnWidth(c) for c in range(self._n_cols))
+        host.updateGeometries()
+        if mirror:
+            host.column_resized.emit(idx, new)
+
+    def _apply_frozen_row_height(self, idx, new, mirror=False):
+        """고정(키) 행 높이 변경을 호스트·전 헬퍼 뷰·_fh·본체 여백에 반영(+선택적 미러)."""
+        if not self._alive() or new <= 0 or idx < 0 or idx >= self._n_rows:
+            return
+        host = self.host
+        prev = getattr(host, "_applying_sizes", False)
+        host._applying_sizes = True
+        try:
+            was_hidden = host.isRowHidden(idx)
+            if was_hidden:
+                host.setRowHidden(idx, False)
+            if host.rowHeight(idx) != new:
+                host.setRowHeight(idx, new)
+            if was_hidden:
+                host.setRowHidden(idx, True)
+            host._user_row_heights[idx] = new
+            for v in self._views:
+                if v.rowHeight(idx) != new:
+                    v.setRowHeight(idx, new)
+        finally:
+            host._applying_sizes = prev
+        self._fh = sum(self.corner.rowHeight(r) for r in range(self._n_rows))
+        host.updateGeometries()
+        if mirror:
+            host.row_resized.emit(idx, new)
+
 
 class ExcelTableView(QTableView):
     stage_requested   = pyqtSignal(str)   # direction: 'a_to_b' | 'b_to_a'
@@ -776,6 +851,11 @@ class ExcelTableView(QTableView):
     def apply_column_width(self, col: int, width: int):
         """반대 패널에서의 열 너비 변경을 동기 적용 (시그널 재방출 안 함)."""
         self._user_col_widths[col] = width
+        fc = getattr(self, "_freeze", None)
+        if fc is not None and getattr(fc, "active", False) and col < fc._n_cols:
+            # 고정(키) 열: 본체에서 숨겨져 있어 특수 경로로 동기(미러 재방출은 안 함)
+            fc._apply_frozen_col_width(col, width, mirror=False)
+            return
         if 0 <= col < self.columnCount() and self.columnWidth(col) != width:
             self._applying_sizes = True
             try:
@@ -787,6 +867,10 @@ class ExcelTableView(QTableView):
     def apply_row_height(self, row: int, height: int):
         """반대 패널에서의 행 높이 변경을 동기 적용."""
         self._user_row_heights[row] = height
+        fc = getattr(self, "_freeze", None)
+        if fc is not None and getattr(fc, "active", False) and row < fc._n_rows:
+            fc._apply_frozen_row_height(row, height, mirror=False)
+            return
         if 0 <= row < self.rowCount() and self.rowHeight(row) != height:
             self._applying_sizes = True
             try:

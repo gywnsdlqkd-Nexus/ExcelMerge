@@ -82,6 +82,55 @@ def test_apply_row_height_resyncs_freeze_band(frozen_view):
     assert fc.left.rowHeight(5) == H, "고정 좌측 밴드가 새 행 높이를 반영 못 함(어긋남)"
 
 
+# ── 버그 1b: 고정(키) 열/행을 corner 오버레이에서 리사이즈 ────────────────────
+def _aligned(fc, t):
+    x = t.frameWidth() + t.verticalHeader().width() + fc._fw
+    return (t.viewport().geometry().x() == t.horizontalHeader().geometry().x()
+            == fc.top.geometry().x() == x)
+
+
+def test_corner_col_resize_updates_fw_mirrors_and_aligns(frozen_view):
+    """키 열은 본체에서 숨겨져 corner 헤더에서만 조절 가능 — 드래그 시 _fw·본체 여백·
+    반대 패널이 함께 갱신되고 고정 밴드가 본체와 정렬을 유지해야 한다."""
+    dv = frozen_view
+    fa, fb = dv._freeze["a"], dv._freeze["b"]
+    ta, tb = dv.panel_a.table, dv.panel_b.table
+    fw0 = fa._fw
+    new = fa.corner.columnWidth(0) + 70
+    fa.corner.horizontalHeader().resizeSection(0, new)
+    QApplication.instance().processEvents()
+    assert fa._fw == fw0 + 70, f"_fw 미갱신: {fa._fw} (기대 {fw0+70})"
+    assert ta._user_col_widths.get(0) == new, "호스트에 키 열 폭 기록 안 됨"
+    assert fb._fw == fa._fw, f"반대 패널 미러 안 됨: A={fa._fw} B={fb._fw}"
+    assert _aligned(fa, ta), "리사이즈 후 A 고정 밴드가 본체와 어긋남"
+    assert _aligned(fb, tb), "리사이즈 후 B(미러) 고정 밴드가 본체와 어긋남"
+
+
+def test_corner_row_resize_updates_fh_and_mirrors(frozen_view):
+    """키 행 높이도 corner 수직 헤더에서만 조절 가능 — _fh·반대 패널 동기."""
+    dv = frozen_view
+    fa, fb = dv._freeze["a"], dv._freeze["b"]
+    ta = dv.panel_a.table
+    fh0 = fa._fh
+    new = fa.corner.rowHeight(0) + 25
+    fa.corner.verticalHeader().resizeSection(0, new)
+    QApplication.instance().processEvents()
+    assert fa._fh == fh0 + 25, f"_fh 미갱신: {fa._fh} (기대 {fh0+25})"
+    assert ta._user_row_heights.get(0) == new, "호스트에 키 행 높이 기록 안 됨"
+    assert fb._fh == fa._fh, f"반대 패널 미러 안 됨: A={fa._fh} B={fb._fh}"
+
+
+def test_data_column_resize_still_aligns(frozen_view):
+    """회귀 방지: 데이터 열(본체)을 리사이즈해도 양 패널 고정 밴드 정렬 유지."""
+    dv = frozen_view
+    fa, fb = dv._freeze["a"], dv._freeze["b"]
+    ta, tb = dv.panel_a.table, dv.panel_b.table
+    ta.horizontalHeader().resizeSection(2, ta.columnWidth(2) + 60)
+    QApplication.instance().processEvents()
+    assert tb.columnWidth(2) == ta.columnWidth(2), "데이터 열 폭 미러 안 됨"
+    assert _aligned(fa, ta) and _aligned(fb, tb), "데이터 열 리사이즈 후 밴드 어긋남"
+
+
 # ── 버그 2: 다중 선택이 키 경계에 닿으면 키 열/행 보충 ('넘으면') ─────────────
 def test_block_flush_both_boundaries_supplements(frozen_view):
     """키 열/행 경계 양쪽에 닿은 블록(행 2~4 × 열 2~3)은 키 열(0~1)·키 행(0~1)이 함께 선택된다.
