@@ -131,9 +131,9 @@ def test_data_column_resize_still_aligns(frozen_view):
     assert _aligned(fa, ta) and _aligned(fb, tb), "데이터 열 리사이즈 후 밴드 어긋남"
 
 
-# ── 버그 2: 다중 선택 시 키 열/행 항상 함께 선택 (key_col=1, key_row=1) ────────
-def test_block_always_supplements_key_col_and_row(frozen_view):
-    """중간 블록(행 5~7 × 열 2~3, 어느 경계에도 안 닿음)이라도 키 열(0~1)·키 행(0~1)이 함께 선택."""
+# ── 버그 2: '열/행 전체' 선택에만 키 열/행 함께 선택 (key_col=1, key_row=1) ─────
+def test_cell_block_not_supplemented(frozen_view):
+    """임의의 셀 블록(행 5~7 × 열 2~3)은 키 프레임을 붙이지 않는다 — 드래그한 그대로 유지."""
     dv = frozen_view
     host = dv.panel_a.table
     sm = host.selectionModel()
@@ -141,13 +141,28 @@ def test_block_always_supplements_key_col_and_row(frozen_view):
     sm.select(QItemSelection(m.index(5, 2), m.index(7, 3)),
               QItemSelectionModel.ClearAndSelect)
     QApplication.instance().processEvents()
-    for r in (5, 6, 7):   # 선택 행에 키 열(0,1)
-        assert sm.isSelected(m.index(r, 0)) and sm.isSelected(m.index(r, 1)), \
-            f"키 열 미보충 (행 {r})"
-    for c in (2, 3):      # 선택 열에 키 행(0,1)
-        assert sm.isSelected(m.index(0, c)) and sm.isSelected(m.index(1, c)), \
-            f"키 행 미보충 (열 {c})"
-    assert sm.isSelected(m.index(6, 2))   # 원래 선택 유지
+    # 블록 밖(키 열/행)은 선택되지 않아야 한다.
+    for r in (5, 6, 7):
+        assert not sm.isSelected(m.index(r, 0)) and not sm.isSelected(m.index(r, 1)), \
+            f"블록인데 키 열이 붙음 (행 {r})"
+    for c in (2, 3):
+        assert not sm.isSelected(m.index(0, c)) and not sm.isSelected(m.index(1, c)), \
+            f"블록인데 키 행이 붙음 (열 {c})"
+    # 드래그한 6칸만 그대로 선택.
+    assert host.get_selected_cells() == {(r, c) for r in (5, 6, 7) for c in (2, 3)}
+
+
+def test_partial_row_strip_not_supplemented(frozen_view):
+    """행 일부(가로 스트립 5행 × 열 2~3, full-width 아님)는 키 행을 붙이지 않는다."""
+    dv = frozen_view
+    host = dv.panel_a.table
+    sm = host.selectionModel()
+    m = host.model()
+    sm.select(QItemSelection(m.index(5, 2), m.index(5, 3)),
+              QItemSelectionModel.ClearAndSelect)
+    QApplication.instance().processEvents()
+    assert not sm.isSelected(m.index(0, 2)) and not sm.isSelected(m.index(1, 2))
+    assert host.get_selected_cells() == {(5, 2), (5, 3)}
 
 
 def test_header_column_selection_supplements_key_col(frozen_view):
@@ -176,23 +191,21 @@ def test_header_row_selection_supplements_key_row(frozen_view):
     assert host._full_rows_selected() == [5, 6], host._full_rows_selected()
 
 
-def test_diff_only_row_selection_supplements_key_row(frozen_view):
-    """회귀(사용자 보고): '변경 행만 보기' ON에서 변경 행 셀을 선택하면 숨겨진 키 행이
-    함께 선택돼야 한다. (키 행은 본체에서 항상 숨김 → 격자 인접이 아닌 구조 조건으로 판정)"""
+def test_diff_only_full_row_selection_supplements_key_row(frozen_view):
+    """회귀(사용자 보고): '변경 행만 보기' ON에서 변경 행 '전체'를 선택하면 숨겨진 키 행이
+    함께 선택돼야 한다(키 행은 본체에서 항상 숨김 → 상단 밴드에 하이라이트)."""
     dv = frozen_view
     dv.diff_only_btn.setChecked(True)   # 변경 행만 보기 ON
     QApplication.instance().processEvents()
     host = dv.panel_a.table
     sm = host.selectionModel()
     m = host.model()
-    # 변경 행(5)의 데이터 셀(열 2~3) 선택 — diff-only라 위쪽 데이터 행들은 숨김 상태.
-    sm.select(QItemSelection(m.index(5, 2), m.index(5, 3)),
-              QItemSelectionModel.ClearAndSelect)
+    host._select_rows([5])   # 변경 행(5) 전체(행 헤더 선택 상당)
     QApplication.instance().processEvents()
-    for c in (2, 3):      # 키 행(0,1) 보충 — 숨겨져 있어도 상단 밴드에 표시
+    for c in (2, 3):        # 키 행(0,1) 보충
         assert sm.isSelected(m.index(0, c)) and sm.isSelected(m.index(1, c)), \
             f"변경 행만 보기 ON: 키 행 미보충 (열 {c})"
-    assert sm.isSelected(m.index(5, 0)) and sm.isSelected(m.index(5, 1))  # 키 열도 함께
+    assert host._full_rows_selected() == [5]   # 데이터 행만 보고(키 행 제외)
 
 
 def test_single_cell_selection_not_supplemented(frozen_view):
@@ -221,25 +234,21 @@ def test_select_all_not_supplemented_or_fragmented(frozen_view):
 
 
 def test_supplement_mirrors_to_other_panel(frozen_view):
-    """보충된 키 셀을 포함한 선택이 반대 패널로도 미러링된다."""
+    """열 전체 선택으로 보충된 키 열이 반대 패널로도 미러링된다."""
     dv = frozen_view
     ha = dv.panel_a.table
     hb = dv.panel_b.table
-    m = ha.model()
-    ha.selectionModel().select(QItemSelection(m.index(5, 2), m.index(7, 3)),
-                               QItemSelectionModel.ClearAndSelect)
+    ha._select_col(2)   # 데이터 열 전체 → 키 열 보충
     QApplication.instance().processEvents()
     smb = hb.selectionModel()
-    assert smb.isSelected(hb.model().index(5, 0)), "반대 패널에 키 셀 미러 안 됨"
-    assert smb.isSelected(hb.model().index(0, 2))
+    assert smb.isSelected(hb.model().index(5, 0)), "반대 패널에 키 열 미러 안 됨"
+    assert smb.isSelected(hb.model().index(5, 1))
 
 
 def test_supplement_no_infinite_loop(frozen_view):
-    """보충이 selectionChanged 재귀로 폭주하지 않는다(_supplementing 가드 복원 확인)."""
+    """열 전체 선택 보충이 selectionChanged 재귀로 폭주하지 않는다(_supplementing 복원 확인)."""
     dv = frozen_view
     host = dv.panel_a.table
-    m = host.model()
-    host.selectionModel().select(QItemSelection(m.index(2, 2), m.index(9, 3)),
-                                 QItemSelectionModel.ClearAndSelect)
+    host._select_col(2)
     QApplication.instance().processEvents()
     assert host._supplementing is False   # 항상 정상 복원(try/finally)

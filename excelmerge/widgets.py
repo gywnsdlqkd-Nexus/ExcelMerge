@@ -1060,24 +1060,20 @@ class ExcelTableView(QTableView):
         sm.select(sel, QItemSelectionModel.ClearAndSelect)
 
     def _supplement_key_selection(self, *_):
-        """다중 셀 선택 시, 틀 고정으로 본체에서 숨겨진 키 열(0..key_col)·키 행(0..key_row)을
-        함께 선택되도록 보충한다 — 스테이징의 _key_cells_for_selection 과 동일한 규칙:
-        선택된 각 행에는 키 열을, 선택된 각 열에는 키 행을 더한다. 오버레이(top/left/corner)가
-        본체와 선택 모델을 공유하므로 키 셀은 자동으로 하이라이트된다(본체에서 숨겨져 있어도,
-        '변경 행만 보기'로 숨겨져 있어도 상단/좌측 밴드에 표시).
+        """'열/행 전체'를 선택할 때만, 틀 고정으로 숨겨진 키 열/행을 함께 선택되도록 보충한다.
+        - 데이터 열 '전체'(full-height range)를 선택하면 → 키 열(0..key_col)도 전체 선택.
+        - 데이터 행 '전체'(full-width range)를 선택하면 → 키 행(0..key_row)도 전체 선택.
+        오버레이(top/left/corner)가 본체와 선택 모델을 공유하므로, 키 셀이 본체에서 숨겨져 있어도
+        ('변경 행만 보기'로 숨겨져 있어도) 상단/좌측 고정 밴드에 함께 하이라이트된다.
 
-        규칙(모든 선택 방식 공통 — 드래그·Shift+방향키·헤더 클릭):
-        - range 가 데이터 영역에서 시작하면(rng.left() > key_col) 그 행들에 키 열(0..key_col) 보충.
-        - range 가 데이터 영역에서 시작하면(rng.top()  > key_row) 그 열들에 키 행(0..key_row) 보충.
-          → 전체 열 선택엔 키 열이, 전체 행 선택엔 키 행이, 블록엔 좌측·상단 프레임이 함께 선택된다.
-        - 단일 셀(내비게이션 착지)은 보충하지 않는다.
+        임의의 '셀 블록'(드래그·본문 Shift+방향키·부분 스트립)은 건드리지 않는다 — 사용자가
+        드래그한 그대로 유지(과거: 모든 블록에 키 프레임이 붙어 이상하게 보이던 문제 해소).
+        병합은 _stage_selected 가 키 셀을 따로 보충하므로, 블록 선택으로 병합해도 키(ID)는 포함된다.
 
-        조각화 회피: 위 구조 조건(> key_col / > key_row) 덕분에 이미 키를 포함하거나 전체(selectAll)인
-        range 는 보충하지 않아, 기존 사각형 선택이 잘게 쪼개지지 않는다(선택 질의·미러 성능 보존).
-
-        재진입/대칭 미러 안전:
+        재진입/미러 안전:
         - _supplementing 가드로 보충이 유발한 selectionChanged 에는 재진입하지 않는다.
-        - 이미 선택된 셀엔 Qt 가 selectionChanged 를 안 내므로 무한 반복이 없다.
+        - 구조 조건(전체 열/행 + 키 미포함)이라 이미 키를 포함하거나 selectAll 인 선택은 보충하지
+          않아 사각형 선택이 조각나지 않는다.
         - 미러(mirror_selection/mirror_selection_from)는 _populating=True 라 여기서 걸러진다."""
         if self._populating or self._supplementing or self._applying_sizes:
             return
@@ -1090,29 +1086,29 @@ class ExcelTableView(QTableView):
         ranges = list(sm.selection())
         if not ranges:
             return
-        if self.rowCount() == 0 or self.columnCount() == 0:
+        n_rows, n_cols = self.rowCount(), self.columnCount()
+        if n_rows == 0 or n_cols == 0:
             return
-        # 단일 셀(내비게이션 착지)은 보충하지 않는다 — '다중 선택 시'에만.
-        if len(ranges) == 1 and ranges[0].top() == ranges[0].bottom() \
-                and ranges[0].left() == ranges[0].right():
-            return
+        row_max, col_max = n_rows - 1, n_cols - 1
         kc, kr = self._key_col, self._key_row
         model = self.model()
         supp = QItemSelection()
         for rng in ranges:
-            # 데이터 영역에서 시작한 range(키 열을 아직 포함 안 함) → 그 행들에 키 열(0..key_col) 보충
-            if kc is not None and kc >= 0 and rng.left() > kc:
+            # 데이터 열 '전체' 선택(full-height, 키 열 미포함) → 키 열(0..key_col) 전체 보충
+            if kc is not None and kc >= 0 and rng.left() > kc \
+                    and rng.top() == 0 and rng.bottom() == row_max:
                 supp.append(QItemSelectionRange(
-                    model.index(rng.top(), 0), model.index(rng.bottom(), kc)))
-            # 데이터 영역에서 시작한 range(키 행을 아직 포함 안 함) → 그 열들에 키 행(0..key_row) 보충
-            if kr is not None and kr >= 0 and rng.top() > kr:
+                    model.index(0, 0), model.index(row_max, kc)))
+            # 데이터 행 '전체' 선택(full-width, 키 행 미포함) → 키 행(0..key_row) 전체 보충
+            if kr is not None and kr >= 0 and rng.top() > kr \
+                    and rng.left() == 0 and rng.right() == col_max:
                 supp.append(QItemSelectionRange(
-                    model.index(0, rng.left()), model.index(kr, rng.right())))
+                    model.index(0, 0), model.index(kr, col_max)))
         if supp.isEmpty():
             return
         self._supplementing = True
         try:
-            # Select(추가) — 기존 선택 유지, 키 셀만 더한다. 이미 선택됐으면 no-op.
+            # Select(추가) — 기존 선택 유지, 키 열/행만 더한다. 이미 선택됐으면 no-op.
             sm.select(supp, QItemSelectionModel.Select)
         finally:
             self._supplementing = False
