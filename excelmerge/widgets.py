@@ -774,9 +774,9 @@ class ExcelTableView(QTableView):
         # 헤더 클릭 시 anchor 갱신 (Shift 없는 클릭 → 새 anchor / Shift 클릭 → 기존 유지)
         self.horizontalHeader().sectionPressed.connect(self._on_h_section_pressed)
         self.verticalHeader().sectionPressed.connect(self._on_v_section_pressed)
-        # 다중 셀 선택 시, 틀 고정으로 숨겨진 키 열/행 셀을 함께 선택하도록 보충.
-        # (DiffView의 A↔B 선택 미러보다 먼저 연결돼야 미러 전에 보충이 반영된다.)
-        self.selectionModel().selectionChanged.connect(self._supplement_key_selection)
+        # 선택 정규화: '변경 행만 보기'로 숨긴(볼 수 없는) 행을 전폭 밴드 선택에서 제외.
+        # (DiffView의 A↔B 선택 미러보다 먼저 연결돼야 미러 전에 정규화가 반영된다.)
+        self.selectionModel().selectionChanged.connect(self._normalize_selection)
 
     # ── QTableWidget 호환 헬퍼 ───────────────────────────────────────────────
     def rowCount(self) -> int:
@@ -1063,11 +1063,11 @@ class ExcelTableView(QTableView):
     # 조각(range) 폭주로 페인팅/질의가 느려지는 걸 막는다 — 넘으면 그 밴드는 건드리지 않는다.
     _MAX_PRUNE_ROWS = 2000
 
-    def _supplement_key_selection(self, *_):
-        """선택 정규화 — selectionChanged 마다 1회, _supplementing 가드로 재진입 차단:
-        1) '변경 행만 보기'(diff-only)로 숨긴 데이터 행이 전폭 행-밴드(행 헤더/Shift 범위)에
-           끼면 제거한다 → 사용자가 '보이는' 행만 선택되게 한다.
-        2) 틀 고정으로 숨겨진 키 열/행을 '열/행 전체' 선택에 보충한다.
+    def _normalize_selection(self, *_):
+        """선택 정규화 — selectionChanged 마다 1회, _supplementing 가드로 재진입 차단.
+        엑셀식 원칙: '터치한 셀만' 선택. 선택에 셀을 '더하지' 않는다(키 열/행 자동 보충 없음).
+        유일한 정규화는 '변경 행만 보기'로 숨긴, 사용자가 실제로 볼 수 없는 행을 전폭 행-밴드
+        선택에서 걷어내는 것뿐이다(보이지 않는 행은 '터치'로 볼 수 없으므로).
         미러(mirror_selection/mirror_selection_from)는 _populating=True 라 여기서 걸러진다."""
         if self._populating or self._supplementing or self._applying_sizes:
             return
@@ -1079,10 +1079,7 @@ class ExcelTableView(QTableView):
             return
         self._supplementing = True
         try:
-            # 순서 주의: 먼저 숨긴 행을 걷어내고(밴드가 보이는 행 조각으로 쪼개짐),
-            # 그 결과 위에서 키 프레임을 보충한다(조각마다 top>key_row 조건 여전히 성립).
             self._prune_filtered_rows(sm, n_rows, n_cols)
-            self._supplement_frozen_key(sm, n_rows, n_cols)
         finally:
             self._supplementing = False
 
@@ -1090,7 +1087,8 @@ class ExcelTableView(QTableView):
         """'변경 행만 보기'로 숨긴 데이터 행이 전폭 행-밴드 선택에 끼어들면 선택에서 제거한다.
         - 전폭(모든 열: left==0 && right==col_max) 행-밴드만 대상 — 행 헤더 클릭/Shift 범위가 만든다.
           임의 셀 블록(전폭 아님)·데이터 열 선택은 사용자가 잡은 그대로 둔다.
-        - 키 프레임 행(0..key_row)은 틀 고정으로 숨겨져도 supplement 가 채우므로 건드리지 않는다.
+        - 키 프레임 행(0..key_row)은 틀 고정으로 항상 숨김이지만 '보이는' 것으로 취급(상단 고정
+          밴드에 표시되므로) → 건드리지 않는다.
         - 조각(range) 폭주를 막기 위해 한 밴드에서 제거할 숨김 행이 _MAX_PRUNE_ROWS 를 넘으면
           그 밴드는 건너뛴다(전폭 selectAll·초대형 범위 대비)."""
         row_max, col_max = n_rows - 1, n_cols - 1
@@ -1112,41 +1110,6 @@ class ExcelTableView(QTableView):
                     model.index(r, 0), model.index(r, col_max)))
         if not dead.isEmpty():
             sm.select(dead, QItemSelectionModel.Deselect)
-
-    def _supplement_frozen_key(self, sm, n_rows: int, n_cols: int):
-        """블록/범위 선택 시, 틀 고정으로 본체에서 숨겨진 키 열/행 셀을 그 블록의 행·열 범위에
-        맞춰 함께 선택되도록 보충한다 — 드래그·헤더·범위 선택 모두 '해당 영역'의 키 셀(ID 열,
-        헤더 행)이 함께 잡힌다. 오버레이(top/left/corner)가 본체와 선택 모델을 공유하므로,
-        키 셀이 본체에서 숨겨져 있어도 좌측/상단 고정 밴드에 함께 하이라이트된다.
-
-        - 블록이 키 열보다 오른쪽(left > key_col)이면 → 그 블록 행 범위의 키 열(0..key_col) 보충.
-        - 블록이 키 행보다 아래(top > key_row)이면 → 그 블록 열 범위의 키 행(0..key_row) 보충.
-        보충 범위는 블록의 행/열로 한정한다(과거처럼 키 열/행 '전체'를 붙여 이상하게 보이지 않음).
-        단일 셀(1×1, 내비게이션 착지)은 결정론적 단일 선택 유지를 위해 건드리지 않는다."""
-        fc = getattr(self, "_freeze", None)
-        if fc is None or not getattr(fc, "active", False):
-            return   # 틀 고정이 없으면 키 셀이 본체에 보이므로 일반 선택으로 충분
-        ranges = list(sm.selection())
-        if not ranges:
-            return
-        kc, kr = self._key_col, self._key_row
-        model = self.model()
-        supp = QItemSelection()
-        for rng in ranges:
-            top, bot, left, right = rng.top(), rng.bottom(), rng.left(), rng.right()
-            if top == bot and left == right:
-                continue   # 단일 셀은 보충 안 함(내비게이션 착지)
-            # 블록 행 범위의 키 열(0..key_col) 보충 — 블록이 키 열 오른쪽에 있을 때만.
-            if kc is not None and kc >= 0 and left > kc:
-                supp.append(QItemSelectionRange(
-                    model.index(top, 0), model.index(bot, kc)))
-            # 블록 열 범위의 키 행(0..key_row) 보충 — 블록이 키 행 아래에 있을 때만.
-            if kr is not None and kr >= 0 and top > kr:
-                supp.append(QItemSelectionRange(
-                    model.index(0, left), model.index(kr, right)))
-        if not supp.isEmpty():
-            # Select(추가) — 기존 선택 유지, 키 셀만 더한다. 이미 선택됐으면 no-op.
-            sm.select(supp, QItemSelectionModel.Select)
 
     def _touched_rows(self) -> set[int]:
         """선택 range가 닿은 모든 행(부분 선택 포함). O(#range × 평균행폭)."""

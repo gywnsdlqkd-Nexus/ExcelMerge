@@ -131,10 +131,10 @@ def test_data_column_resize_still_aligns(frozen_view):
     assert _aligned(fa, ta) and _aligned(fb, tb), "데이터 열 리사이즈 후 밴드 어긋남"
 
 
-# ── 버그 2: 블록/범위 선택 시 그 영역의 키 열/행 셀도 함께 선택 (key_col=1, key_row=1) ──
-def test_cell_block_supplements_key(frozen_view):
-    """임의의 셀 블록(행 5~7 × 열 2~3)을 드래그하면 그 영역의 키 열(0,1)·키 행(0,1)이
-    함께 선택된다 — 사용자 요청: '긁은 영역의 셀들이 키 여부와 상관없이 모두 선택'."""
+# ── 엑셀식 선택: '터치한 셀만' 선택 — 키 열/행 자동 보충 없음 (key_col=1, key_row=1) ──
+def test_cell_block_no_key_supplement(frozen_view):
+    """임의의 셀 블록(행 5~7 × 열 2~3)을 드래그하면 딱 그 블록만 선택된다 —
+    키 열(0,1)·키 행(0,1)은 손대지 않는 게 엑셀식(터치한 셀만)."""
     dv = frozen_view
     dv.diff_only_btn.setChecked(False)   # 전체 행 표시 → 5,6,7 모두 보임
     QApplication.instance().processEvents()
@@ -143,14 +143,12 @@ def test_cell_block_supplements_key(frozen_view):
     sm.select(QItemSelection(m.index(5, 2), m.index(7, 3)),
               QItemSelectionModel.ClearAndSelect)
     QApplication.instance().processEvents()
-    # 블록 행(5~7)의 키 열(0,1) + 블록 열(2,3)의 키 행(0,1) 이 보충된다.
-    expected = {(r, c) for r in (5, 6, 7) for c in (0, 1, 2, 3)}
-    expected |= {(r, c) for r in (0, 1) for c in (2, 3)}
-    assert host.get_selected_cells() == expected, host.get_selected_cells()
+    assert host.get_selected_cells() == {(r, c) for r in (5, 6, 7) for c in (2, 3)}, \
+        host.get_selected_cells()
 
 
-def test_partial_row_strip_supplements_key(frozen_view):
-    """행 일부(가로 스트립 5행 × 열 2~3)도 그 영역의 키 열(0,1)·키 행(0,1)이 함께 선택된다."""
+def test_partial_row_strip_no_key_supplement(frozen_view):
+    """행 일부(가로 스트립 5행 × 열 2~3)도 딱 그 스트립만 선택 — 키 열/행 보충 없음."""
     dv = frozen_view
     dv.diff_only_btn.setChecked(False)
     QApplication.instance().processEvents()
@@ -159,27 +157,25 @@ def test_partial_row_strip_supplements_key(frozen_view):
     sm.select(QItemSelection(m.index(5, 2), m.index(5, 3)),
               QItemSelectionModel.ClearAndSelect)
     QApplication.instance().processEvents()
-    expected = {(5, c) for c in (0, 1, 2, 3)} | {(r, c) for r in (0, 1) for c in (2, 3)}
-    assert host.get_selected_cells() == expected, host.get_selected_cells()
+    assert host.get_selected_cells() == {(5, 2), (5, 3)}, host.get_selected_cells()
 
 
-def test_header_column_selection_supplements_key_col(frozen_view):
-    """헤더로 데이터 열 전체 선택(_select_col) 시 키 열(0,1)도 함께 선택되고,
-    _full_columns_selected 는 키 열을 제외해 데이터 열만 보고한다(헤더 확장·메뉴 시맨틱 보존)."""
+def test_header_column_selection_no_cross_key_col(frozen_view):
+    """데이터 열 전체 선택(_select_col(2))은 그 열만 선택한다 — 다른 키 열(0,1)은 선택 안 됨.
+    (열 2 자체의 키 행 셀(행0,1 × 열2)은 열의 일부라 당연히 선택된다.)"""
     dv = frozen_view
     host = dv.panel_a.table
     host._select_col(2)
     QApplication.instance().processEvents()
     sm = host.selectionModel()
-    assert sm.isSelected(host.model().index(5, 0)), "헤더 열 선택 시 키 열 미보충"
-    assert sm.isSelected(host.model().index(5, 1))
+    assert not sm.isSelected(host.model().index(5, 0)), "데이터 열 선택인데 키 열0 선택됨"
+    assert not sm.isSelected(host.model().index(5, 1)), "데이터 열 선택인데 키 열1 선택됨"
     assert host._full_columns_selected() == [2], host._full_columns_selected()
 
 
-def test_header_row_selection_supplements_key_row(frozen_view):
-    """헤더로 데이터 행 전체 선택(_select_rows) 시 키 행(0,1)도 함께 선택되고,
-    _full_rows_selected 는 키 행을 제외해 데이터 행만 보고한다.
-    (전체 행 표시 상태 — 숨겨진 행이 없으므로 프룬 없이 5,6 모두 유지된다.)"""
+def test_header_row_selection_no_cross_key_row(frozen_view):
+    """데이터 행 전체 선택(_select_rows)은 그 행만 선택 — 다른 키 행(0,1)은 선택 안 됨.
+    (행 자체의 키 열 셀은 행의 일부라 당연히 선택된다.)"""
     dv = frozen_view
     dv.diff_only_btn.setChecked(False)   # 전체 행 표시 → 5,6 모두 보임
     QApplication.instance().processEvents()
@@ -187,15 +183,15 @@ def test_header_row_selection_supplements_key_row(frozen_view):
     host._select_rows([5, 6])
     QApplication.instance().processEvents()
     sm = host.selectionModel()
-    assert sm.isSelected(host.model().index(0, 3)), "헤더 행 선택 시 키 행 미보충"
-    assert sm.isSelected(host.model().index(1, 3))
+    assert not sm.isSelected(host.model().index(0, 3)), "데이터 행 선택인데 키 행0 선택됨"
+    assert not sm.isSelected(host.model().index(1, 3)), "데이터 행 선택인데 키 행1 선택됨"
     assert host._full_rows_selected() == [5, 6], host._full_rows_selected()
 
 
 def test_shift_band_prunes_hidden_filtered_rows(frozen_view):
     """회귀(사용자 보고): '변경 행만 보기' ON에서 보이는 변경 행 사이를 Shift로 잡으면,
-    사이에 숨겨진 미변경 행은 선택에서 제외돼야 한다(사용자가 '보는' 행만 선택).
-    키 행(0..key_row)은 틀 고정으로 숨겨져도 supplement 로 유지된다."""
+    사이에 숨겨진(볼 수 없는) 미변경 행은 선택에서 제외돼야 한다 — 보이는 행만 선택.
+    키 행 보충은 하지 않으므로 키 행(0,1)은 선택되지 않는다(엑셀식)."""
     dv = frozen_view
     host = dv.panel_a.table
     sm = host.selectionModel(); m = host.model()
@@ -204,33 +200,30 @@ def test_shift_band_prunes_hidden_filtered_rows(frozen_view):
     host._select_row_range(5, 8)   # 5(보임)~8 전폭 밴드 — 6,7,8 은 숨김
     QApplication.instance().processEvents()
     sel_rows = sorted({r for r, c in host.get_selected_cells()})
-    # 보이는 변경 행 5 + 키 행 0,1 만 남고, 숨겨진 6,7,8 은 제외.
-    assert 5 in sel_rows and 0 in sel_rows and 1 in sel_rows
-    assert not any(host.isRowHidden(r) for r in sel_rows if r > host._key_row), \
-        f"숨겨진 데이터 행이 선택에 남음: {sel_rows}"
+    assert 5 in sel_rows                         # 보이는 변경 행은 유지
+    assert 0 not in sel_rows and 1 not in sel_rows, "키 행이 보충됨(엑셀식 아님)"
+    assert not any(host.isRowHidden(r) for r in sel_rows), \
+        f"숨겨진 행이 선택에 남음: {sel_rows}"
     assert host._full_rows_selected() == [5], host._full_rows_selected()
 
 
 def test_cell_block_keeps_hidden_rows(frozen_view):
-    """전폭이 아닌 셀 블록은 프룬 대상이 아니다 — 드래그한 그대로(숨은 행 포함) 유지하고,
-    그 위에 블록 영역의 키 열/행 셀을 보충한다(diff-only ON: 6~8 은 숨김이지만 블록엔 남는다)."""
+    """전폭이 아닌 셀 블록은 프룬 대상이 아니다 — 드래그한 직사각형 그대로(숨은 행 포함) 유지.
+    키 열/행 보충도 없다 → 딱 블록만."""
     dv = frozen_view
     host = dv.panel_a.table
     sm = host.selectionModel(); m = host.model()
     assert host.isRowHidden(6)   # 픽스처: 6~8 은 숨김(미변경)
-    # 열 2~3 (전폭 아님) 블록: 5~8. 숨은 행이 있어도 블록은 손대지 않는다.
     sm.select(QItemSelection(m.index(5, 2), m.index(8, 3)),
               QItemSelectionModel.ClearAndSelect)
     QApplication.instance().processEvents()
-    # 블록(5~8 × 2~3) + 키 열(0,1 × 5~8) + 키 행(0,1 × 2,3). 숨은 행 6~8 도 블록에 유지.
-    expected = {(r, c) for r in (5, 6, 7, 8) for c in (0, 1, 2, 3)}
-    expected |= {(r, c) for r in (0, 1) for c in (2, 3)}
-    assert host.get_selected_cells() == expected, host.get_selected_cells()
+    assert host.get_selected_cells() == {(r, c) for r in (5, 6, 7, 8) for c in (2, 3)}, \
+        host.get_selected_cells()
 
 
-def test_diff_only_full_row_selection_supplements_key_row(frozen_view):
-    """회귀(사용자 보고): '변경 행만 보기' ON에서 변경 행 '전체'를 선택하면 숨겨진 키 행이
-    함께 선택돼야 한다(키 행은 본체에서 항상 숨김 → 상단 밴드에 하이라이트)."""
+def test_diff_only_full_row_selection_no_key_supplement(frozen_view):
+    """'변경 행만 보기' ON에서 변경 행 전체를 선택해도 키 행(0,1)은 보충되지 않는다(엑셀식).
+    선택된 행(5)은 전폭이라 그 행의 키 열 셀은 행의 일부로 포함된다."""
     dv = frozen_view
     dv.diff_only_btn.setChecked(True)   # 변경 행만 보기 ON
     QApplication.instance().processEvents()
@@ -239,14 +232,14 @@ def test_diff_only_full_row_selection_supplements_key_row(frozen_view):
     m = host.model()
     host._select_rows([5])   # 변경 행(5) 전체(행 헤더 선택 상당)
     QApplication.instance().processEvents()
-    for c in (2, 3):        # 키 행(0,1) 보충
-        assert sm.isSelected(m.index(0, c)) and sm.isSelected(m.index(1, c)), \
-            f"변경 행만 보기 ON: 키 행 미보충 (열 {c})"
-    assert host._full_rows_selected() == [5]   # 데이터 행만 보고(키 행 제외)
+    for c in (2, 3):        # 키 행(0,1)은 선택되지 않아야 함
+        assert not sm.isSelected(m.index(0, c)) and not sm.isSelected(m.index(1, c)), \
+            f"키 행이 보충됨 (열 {c})"
+    assert host._full_rows_selected() == [5]
 
 
 def test_single_cell_selection_not_supplemented(frozen_view):
-    """단일 셀(내비게이션 착지)은 보충하지 않는다 — 결정론적 단일 선택 유지."""
+    """단일 셀(내비게이션 착지)은 딱 그 셀만 — 키 열/행 보충 없음."""
     dv = frozen_view
     host = dv.panel_a.table
     sm = host.selectionModel()
@@ -270,20 +263,20 @@ def test_select_all_not_supplemented_or_fragmented(frozen_view):
     assert host._full_columns_selected() == expected, host._full_columns_selected()
 
 
-def test_supplement_mirrors_to_other_panel(frozen_view):
-    """열 전체 선택으로 보충된 키 열이 반대 패널로도 미러링된다."""
+def test_selection_mirrors_to_other_panel(frozen_view):
+    """A 패널 선택이 반대 패널로 그대로 미러링된다 — 선택한 열만(키 열 보충 없음)."""
     dv = frozen_view
     ha = dv.panel_a.table
     hb = dv.panel_b.table
-    ha._select_col(2)   # 데이터 열 전체 → 키 열 보충
+    ha._select_col(2)   # 데이터 열 전체 선택
     QApplication.instance().processEvents()
     smb = hb.selectionModel()
-    assert smb.isSelected(hb.model().index(5, 0)), "반대 패널에 키 열 미러 안 됨"
-    assert smb.isSelected(hb.model().index(5, 1))
+    assert smb.isSelected(hb.model().index(5, 2)), "반대 패널에 선택 미러 안 됨"
+    assert not smb.isSelected(hb.model().index(5, 0)), "미러에 키 열이 붙음"
 
 
-def test_supplement_no_infinite_loop(frozen_view):
-    """열 전체 선택 보충이 selectionChanged 재귀로 폭주하지 않는다(_supplementing 복원 확인)."""
+def test_normalize_no_infinite_loop(frozen_view):
+    """선택 정규화(프룬)가 selectionChanged 재귀로 폭주하지 않는다(_supplementing 복원 확인)."""
     dv = frozen_view
     host = dv.panel_a.table
     host._select_col(2)
