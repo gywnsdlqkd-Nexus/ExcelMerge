@@ -1059,35 +1059,71 @@ class ExcelTableView(QTableView):
                     model.index(r, 0), model.index(r, cols - 1)))
         sm.select(sel, QItemSelectionModel.ClearAndSelect)
 
+    # 전폭 행-밴드에서 '변경 행만 보기'로 숨긴 데이터 행을 한 번에 제거할지 판단하는 상한.
+    # 조각(range) 폭주로 페인팅/질의가 느려지는 걸 막는다 — 넘으면 그 밴드는 건드리지 않는다.
+    _MAX_PRUNE_ROWS = 2000
+
     def _supplement_key_selection(self, *_):
+        """선택 정규화 — selectionChanged 마다 1회, _supplementing 가드로 재진입 차단:
+        1) '변경 행만 보기'(diff-only)로 숨긴 데이터 행이 전폭 행-밴드(행 헤더/Shift 범위)에
+           끼면 제거한다 → 사용자가 '보이는' 행만 선택되게 한다.
+        2) 틀 고정으로 숨겨진 키 열/행을 '열/행 전체' 선택에 보충한다.
+        미러(mirror_selection/mirror_selection_from)는 _populating=True 라 여기서 걸러진다."""
+        if self._populating or self._supplementing or self._applying_sizes:
+            return
+        sm = self.selectionModel()
+        if sm is None:
+            return
+        n_rows, n_cols = self.rowCount(), self.columnCount()
+        if n_rows == 0 or n_cols == 0:
+            return
+        self._supplementing = True
+        try:
+            # 순서 주의: 먼저 숨긴 행을 걷어내고(밴드가 보이는 행 조각으로 쪼개짐),
+            # 그 결과 위에서 키 프레임을 보충한다(조각마다 top>key_row 조건 여전히 성립).
+            self._prune_filtered_rows(sm, n_rows, n_cols)
+            self._supplement_frozen_key(sm, n_rows, n_cols)
+        finally:
+            self._supplementing = False
+
+    def _prune_filtered_rows(self, sm, n_rows: int, n_cols: int):
+        """'변경 행만 보기'로 숨긴 데이터 행이 전폭 행-밴드 선택에 끼어들면 선택에서 제거한다.
+        - 전폭(모든 열: left==0 && right==col_max) 행-밴드만 대상 — 행 헤더 클릭/Shift 범위가 만든다.
+          임의 셀 블록(전폭 아님)·데이터 열 선택은 사용자가 잡은 그대로 둔다.
+        - 키 프레임 행(0..key_row)은 틀 고정으로 숨겨져도 supplement 가 채우므로 건드리지 않는다.
+        - 조각(range) 폭주를 막기 위해 한 밴드에서 제거할 숨김 행이 _MAX_PRUNE_ROWS 를 넘으면
+          그 밴드는 건너뛴다(전폭 selectAll·초대형 범위 대비)."""
+        row_max, col_max = n_rows - 1, n_cols - 1
+        kr = self._key_row if (self._key_row and self._key_row > 0) else 0
+        model = self.model()
+        dead = QItemSelection()
+        for rng in sm.selection():
+            if rng.left() != 0 or rng.right() != col_max:
+                continue   # 전폭 행-밴드만 (셀 블록/열 선택 제외)
+            top, bot = rng.top(), rng.bottom()
+            if top == 0 and bot == row_max:
+                continue   # 전체 높이(selectAll/전 시트)는 그대로 — 조각화 방지, 행 헤더 밴드 아님
+            band = [r for r in range(top, bot + 1)
+                    if r > kr and self.isRowHidden(r)]
+            if not band or len(band) > self._MAX_PRUNE_ROWS:
+                continue
+            for r in band:
+                dead.append(QItemSelectionRange(
+                    model.index(r, 0), model.index(r, col_max)))
+        if not dead.isEmpty():
+            sm.select(dead, QItemSelectionModel.Deselect)
+
+    def _supplement_frozen_key(self, sm, n_rows: int, n_cols: int):
         """'열/행 전체'를 선택할 때만, 틀 고정으로 숨겨진 키 열/행을 함께 선택되도록 보충한다.
         - 데이터 열 '전체'(full-height range)를 선택하면 → 키 열(0..key_col)도 전체 선택.
         - 데이터 행 '전체'(full-width range)를 선택하면 → 키 행(0..key_row)도 전체 선택.
         오버레이(top/left/corner)가 본체와 선택 모델을 공유하므로, 키 셀이 본체에서 숨겨져 있어도
-        ('변경 행만 보기'로 숨겨져 있어도) 상단/좌측 고정 밴드에 함께 하이라이트된다.
-
-        임의의 '셀 블록'(드래그·본문 Shift+방향키·부분 스트립)은 건드리지 않는다 — 사용자가
-        드래그한 그대로 유지(과거: 모든 블록에 키 프레임이 붙어 이상하게 보이던 문제 해소).
-        병합은 _stage_selected 가 키 셀을 따로 보충하므로, 블록 선택으로 병합해도 키(ID)는 포함된다.
-
-        재진입/미러 안전:
-        - _supplementing 가드로 보충이 유발한 selectionChanged 에는 재진입하지 않는다.
-        - 구조 조건(전체 열/행 + 키 미포함)이라 이미 키를 포함하거나 selectAll 인 선택은 보충하지
-          않아 사각형 선택이 조각나지 않는다.
-        - 미러(mirror_selection/mirror_selection_from)는 _populating=True 라 여기서 걸러진다."""
-        if self._populating or self._supplementing or self._applying_sizes:
-            return
+        상단/좌측 고정 밴드에 함께 하이라이트된다. 임의의 '셀 블록'은 건드리지 않는다."""
         fc = getattr(self, "_freeze", None)
         if fc is None or not getattr(fc, "active", False):
             return   # 틀 고정이 없으면 키 셀이 본체에 보이므로 일반 선택으로 충분
-        sm = self.selectionModel()
-        if sm is None:
-            return
         ranges = list(sm.selection())
         if not ranges:
-            return
-        n_rows, n_cols = self.rowCount(), self.columnCount()
-        if n_rows == 0 or n_cols == 0:
             return
         row_max, col_max = n_rows - 1, n_cols - 1
         kc, kr = self._key_col, self._key_row
@@ -1104,14 +1140,9 @@ class ExcelTableView(QTableView):
                     and rng.left() == 0 and rng.right() == col_max:
                 supp.append(QItemSelectionRange(
                     model.index(0, 0), model.index(kr, col_max)))
-        if supp.isEmpty():
-            return
-        self._supplementing = True
-        try:
+        if not supp.isEmpty():
             # Select(추가) — 기존 선택 유지, 키 열/행만 더한다. 이미 선택됐으면 no-op.
             sm.select(supp, QItemSelectionModel.Select)
-        finally:
-            self._supplementing = False
 
     def _touched_rows(self) -> set[int]:
         """선택 range가 닿은 모든 행(부분 선택 포함). O(#range × 평균행폭)."""

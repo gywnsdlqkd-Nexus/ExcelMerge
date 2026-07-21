@@ -180,8 +180,11 @@ def test_header_column_selection_supplements_key_col(frozen_view):
 
 def test_header_row_selection_supplements_key_row(frozen_view):
     """헤더로 데이터 행 전체 선택(_select_rows) 시 키 행(0,1)도 함께 선택되고,
-    _full_rows_selected 는 키 행을 제외해 데이터 행만 보고한다."""
+    _full_rows_selected 는 키 행을 제외해 데이터 행만 보고한다.
+    (전체 행 표시 상태 — 숨겨진 행이 없으므로 프룬 없이 5,6 모두 유지된다.)"""
     dv = frozen_view
+    dv.diff_only_btn.setChecked(False)   # 전체 행 표시 → 5,6 모두 보임
+    QApplication.instance().processEvents()
     host = dv.panel_a.table
     host._select_rows([5, 6])
     QApplication.instance().processEvents()
@@ -189,6 +192,37 @@ def test_header_row_selection_supplements_key_row(frozen_view):
     assert sm.isSelected(host.model().index(0, 3)), "헤더 행 선택 시 키 행 미보충"
     assert sm.isSelected(host.model().index(1, 3))
     assert host._full_rows_selected() == [5, 6], host._full_rows_selected()
+
+
+def test_shift_band_prunes_hidden_filtered_rows(frozen_view):
+    """회귀(사용자 보고): '변경 행만 보기' ON에서 보이는 변경 행 사이를 Shift로 잡으면,
+    사이에 숨겨진 미변경 행은 선택에서 제외돼야 한다(사용자가 '보는' 행만 선택).
+    키 행(0..key_row)은 틀 고정으로 숨겨져도 supplement 로 유지된다."""
+    dv = frozen_view
+    host = dv.panel_a.table
+    sm = host.selectionModel(); m = host.model()
+    # 픽스처: 변경 행은 display 5 하나만 보임. 숨겨진 데이터 행(예: 6)이 밴드에 끼면 제외.
+    assert host.isRowHidden(6) and not host.isRowHidden(5)
+    host._select_row_range(5, 8)   # 5(보임)~8 전폭 밴드 — 6,7,8 은 숨김
+    QApplication.instance().processEvents()
+    sel_rows = sorted({r for r, c in host.get_selected_cells()})
+    # 보이는 변경 행 5 + 키 행 0,1 만 남고, 숨겨진 6,7,8 은 제외.
+    assert 5 in sel_rows and 0 in sel_rows and 1 in sel_rows
+    assert not any(host.isRowHidden(r) for r in sel_rows if r > host._key_row), \
+        f"숨겨진 데이터 행이 선택에 남음: {sel_rows}"
+    assert host._full_rows_selected() == [5], host._full_rows_selected()
+
+
+def test_cell_block_keeps_hidden_rows(frozen_view):
+    """전폭이 아닌 셀 블록은 프룬 대상이 아니다 — 드래그한 그대로(숨은 행 포함) 유지."""
+    dv = frozen_view
+    host = dv.panel_a.table
+    sm = host.selectionModel(); m = host.model()
+    # 열 2~3 (전폭 아님) 블록: 5~8. 숨은 행이 있어도 블록은 손대지 않는다.
+    sm.select(QItemSelection(m.index(5, 2), m.index(8, 3)),
+              QItemSelectionModel.ClearAndSelect)
+    QApplication.instance().processEvents()
+    assert host.get_selected_cells() == {(r, c) for r in (5, 6, 7, 8) for c in (2, 3)}
 
 
 def test_diff_only_full_row_selection_supplements_key_row(frozen_view):
