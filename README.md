@@ -10,8 +10,7 @@ PyQt5 Windows 데스크톱 툴. Beyond Compare 스타일의 파일/폴더 비교
 
 ```bat
 pip install -r requirements.txt      REM 또는 재현 빌드: pip install -r requirements.lock
-run.vbs                              REM 터미널 창 없이 실행 (pythonw, 권장)
-run.bat                              REM 콘솔 출력이 필요할 때 (python, 오류 확인용)
+run.bat                              REM = python excel_diff_merge.py
 ```
 
 P4V 등 외부 diff 툴 연동:
