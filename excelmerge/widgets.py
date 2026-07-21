@@ -1114,34 +1114,38 @@ class ExcelTableView(QTableView):
             sm.select(dead, QItemSelectionModel.Deselect)
 
     def _supplement_frozen_key(self, sm, n_rows: int, n_cols: int):
-        """'열/행 전체'를 선택할 때만, 틀 고정으로 숨겨진 키 열/행을 함께 선택되도록 보충한다.
-        - 데이터 열 '전체'(full-height range)를 선택하면 → 키 열(0..key_col)도 전체 선택.
-        - 데이터 행 '전체'(full-width range)를 선택하면 → 키 행(0..key_row)도 전체 선택.
-        오버레이(top/left/corner)가 본체와 선택 모델을 공유하므로, 키 셀이 본체에서 숨겨져 있어도
-        상단/좌측 고정 밴드에 함께 하이라이트된다. 임의의 '셀 블록'은 건드리지 않는다."""
+        """블록/범위 선택 시, 틀 고정으로 본체에서 숨겨진 키 열/행 셀을 그 블록의 행·열 범위에
+        맞춰 함께 선택되도록 보충한다 — 드래그·헤더·범위 선택 모두 '해당 영역'의 키 셀(ID 열,
+        헤더 행)이 함께 잡힌다. 오버레이(top/left/corner)가 본체와 선택 모델을 공유하므로,
+        키 셀이 본체에서 숨겨져 있어도 좌측/상단 고정 밴드에 함께 하이라이트된다.
+
+        - 블록이 키 열보다 오른쪽(left > key_col)이면 → 그 블록 행 범위의 키 열(0..key_col) 보충.
+        - 블록이 키 행보다 아래(top > key_row)이면 → 그 블록 열 범위의 키 행(0..key_row) 보충.
+        보충 범위는 블록의 행/열로 한정한다(과거처럼 키 열/행 '전체'를 붙여 이상하게 보이지 않음).
+        단일 셀(1×1, 내비게이션 착지)은 결정론적 단일 선택 유지를 위해 건드리지 않는다."""
         fc = getattr(self, "_freeze", None)
         if fc is None or not getattr(fc, "active", False):
             return   # 틀 고정이 없으면 키 셀이 본체에 보이므로 일반 선택으로 충분
         ranges = list(sm.selection())
         if not ranges:
             return
-        row_max, col_max = n_rows - 1, n_cols - 1
         kc, kr = self._key_col, self._key_row
         model = self.model()
         supp = QItemSelection()
         for rng in ranges:
-            # 데이터 열 '전체' 선택(full-height, 키 열 미포함) → 키 열(0..key_col) 전체 보충
-            if kc is not None and kc >= 0 and rng.left() > kc \
-                    and rng.top() == 0 and rng.bottom() == row_max:
+            top, bot, left, right = rng.top(), rng.bottom(), rng.left(), rng.right()
+            if top == bot and left == right:
+                continue   # 단일 셀은 보충 안 함(내비게이션 착지)
+            # 블록 행 범위의 키 열(0..key_col) 보충 — 블록이 키 열 오른쪽에 있을 때만.
+            if kc is not None and kc >= 0 and left > kc:
                 supp.append(QItemSelectionRange(
-                    model.index(0, 0), model.index(row_max, kc)))
-            # 데이터 행 '전체' 선택(full-width, 키 행 미포함) → 키 행(0..key_row) 전체 보충
-            if kr is not None and kr >= 0 and rng.top() > kr \
-                    and rng.left() == 0 and rng.right() == col_max:
+                    model.index(top, 0), model.index(bot, kc)))
+            # 블록 열 범위의 키 행(0..key_row) 보충 — 블록이 키 행 아래에 있을 때만.
+            if kr is not None and kr >= 0 and top > kr:
                 supp.append(QItemSelectionRange(
-                    model.index(0, 0), model.index(kr, col_max)))
+                    model.index(0, left), model.index(kr, right)))
         if not supp.isEmpty():
-            # Select(추가) — 기존 선택 유지, 키 열/행만 더한다. 이미 선택됐으면 no-op.
+            # Select(추가) — 기존 선택 유지, 키 셀만 더한다. 이미 선택됐으면 no-op.
             sm.select(supp, QItemSelectionModel.Select)
 
     def _touched_rows(self) -> set[int]:

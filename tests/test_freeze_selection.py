@@ -131,38 +131,36 @@ def test_data_column_resize_still_aligns(frozen_view):
     assert _aligned(fa, ta) and _aligned(fb, tb), "데이터 열 리사이즈 후 밴드 어긋남"
 
 
-# ── 버그 2: '열/행 전체' 선택에만 키 열/행 함께 선택 (key_col=1, key_row=1) ─────
-def test_cell_block_not_supplemented(frozen_view):
-    """임의의 셀 블록(행 5~7 × 열 2~3)은 키 프레임을 붙이지 않는다 — 드래그한 그대로 유지."""
+# ── 버그 2: 블록/범위 선택 시 그 영역의 키 열/행 셀도 함께 선택 (key_col=1, key_row=1) ──
+def test_cell_block_supplements_key(frozen_view):
+    """임의의 셀 블록(행 5~7 × 열 2~3)을 드래그하면 그 영역의 키 열(0,1)·키 행(0,1)이
+    함께 선택된다 — 사용자 요청: '긁은 영역의 셀들이 키 여부와 상관없이 모두 선택'."""
     dv = frozen_view
+    dv.diff_only_btn.setChecked(False)   # 전체 행 표시 → 5,6,7 모두 보임
+    QApplication.instance().processEvents()
     host = dv.panel_a.table
-    sm = host.selectionModel()
-    m = host.model()
+    sm = host.selectionModel(); m = host.model()
     sm.select(QItemSelection(m.index(5, 2), m.index(7, 3)),
               QItemSelectionModel.ClearAndSelect)
     QApplication.instance().processEvents()
-    # 블록 밖(키 열/행)은 선택되지 않아야 한다.
-    for r in (5, 6, 7):
-        assert not sm.isSelected(m.index(r, 0)) and not sm.isSelected(m.index(r, 1)), \
-            f"블록인데 키 열이 붙음 (행 {r})"
-    for c in (2, 3):
-        assert not sm.isSelected(m.index(0, c)) and not sm.isSelected(m.index(1, c)), \
-            f"블록인데 키 행이 붙음 (열 {c})"
-    # 드래그한 6칸만 그대로 선택.
-    assert host.get_selected_cells() == {(r, c) for r in (5, 6, 7) for c in (2, 3)}
+    # 블록 행(5~7)의 키 열(0,1) + 블록 열(2,3)의 키 행(0,1) 이 보충된다.
+    expected = {(r, c) for r in (5, 6, 7) for c in (0, 1, 2, 3)}
+    expected |= {(r, c) for r in (0, 1) for c in (2, 3)}
+    assert host.get_selected_cells() == expected, host.get_selected_cells()
 
 
-def test_partial_row_strip_not_supplemented(frozen_view):
-    """행 일부(가로 스트립 5행 × 열 2~3, full-width 아님)는 키 행을 붙이지 않는다."""
+def test_partial_row_strip_supplements_key(frozen_view):
+    """행 일부(가로 스트립 5행 × 열 2~3)도 그 영역의 키 열(0,1)·키 행(0,1)이 함께 선택된다."""
     dv = frozen_view
+    dv.diff_only_btn.setChecked(False)
+    QApplication.instance().processEvents()
     host = dv.panel_a.table
-    sm = host.selectionModel()
-    m = host.model()
+    sm = host.selectionModel(); m = host.model()
     sm.select(QItemSelection(m.index(5, 2), m.index(5, 3)),
               QItemSelectionModel.ClearAndSelect)
     QApplication.instance().processEvents()
-    assert not sm.isSelected(m.index(0, 2)) and not sm.isSelected(m.index(1, 2))
-    assert host.get_selected_cells() == {(5, 2), (5, 3)}
+    expected = {(5, c) for c in (0, 1, 2, 3)} | {(r, c) for r in (0, 1) for c in (2, 3)}
+    assert host.get_selected_cells() == expected, host.get_selected_cells()
 
 
 def test_header_column_selection_supplements_key_col(frozen_view):
@@ -214,15 +212,20 @@ def test_shift_band_prunes_hidden_filtered_rows(frozen_view):
 
 
 def test_cell_block_keeps_hidden_rows(frozen_view):
-    """전폭이 아닌 셀 블록은 프룬 대상이 아니다 — 드래그한 그대로(숨은 행 포함) 유지."""
+    """전폭이 아닌 셀 블록은 프룬 대상이 아니다 — 드래그한 그대로(숨은 행 포함) 유지하고,
+    그 위에 블록 영역의 키 열/행 셀을 보충한다(diff-only ON: 6~8 은 숨김이지만 블록엔 남는다)."""
     dv = frozen_view
     host = dv.panel_a.table
     sm = host.selectionModel(); m = host.model()
+    assert host.isRowHidden(6)   # 픽스처: 6~8 은 숨김(미변경)
     # 열 2~3 (전폭 아님) 블록: 5~8. 숨은 행이 있어도 블록은 손대지 않는다.
     sm.select(QItemSelection(m.index(5, 2), m.index(8, 3)),
               QItemSelectionModel.ClearAndSelect)
     QApplication.instance().processEvents()
-    assert host.get_selected_cells() == {(r, c) for r in (5, 6, 7, 8) for c in (2, 3)}
+    # 블록(5~8 × 2~3) + 키 열(0,1 × 5~8) + 키 행(0,1 × 2,3). 숨은 행 6~8 도 블록에 유지.
+    expected = {(r, c) for r in (5, 6, 7, 8) for c in (0, 1, 2, 3)}
+    expected |= {(r, c) for r in (0, 1) for c in (2, 3)}
+    assert host.get_selected_cells() == expected, host.get_selected_cells()
 
 
 def test_diff_only_full_row_selection_supplements_key_row(frozen_view):

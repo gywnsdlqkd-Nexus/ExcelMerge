@@ -342,18 +342,22 @@ def test_ctrl_jump_single_selection():
     QTest.keyClick(tbl, Qt.Key_Right, Qt.ControlModifier)
     assert tbl.get_selected_cells() == {(2, tbl.columnCount() - 1)}, tbl.get_selected_cells()
 
-    # Ctrl+Shift+방향키: 범위 선택 유지 (붕괴 없음). 셀 블록(부분)이라 키 보충 없음.
+    # Ctrl+Shift+방향키: 범위 선택 유지 (붕괴 없음). 틀 고정(key_row=0)이라 블록 열 범위의
+    # 키 행(0)이 함께 보충된다 — '영역의 키 셀도 함께 선택' 정책.
     tbl._move_current_cell(2, 0)
     QTest.keyClick(tbl, Qt.Key_Right, Qt.ControlModifier | Qt.ShiftModifier)
-    assert tbl.get_selected_cells() == {(2, 0), (2, 1), (2, 2)}, tbl.get_selected_cells()
+    sel = tbl.get_selected_cells()
+    assert {(2, 0), (2, 1), (2, 2)} <= sel, sel        # 데이터 범위 붕괴 없음
+    assert sel == {(2, 0), (2, 1), (2, 2), (0, 0), (0, 1), (0, 2)}, sel  # + 키 행(0)
 
-    # Ctrl+Shift+End: 데이터 영역으로 클램프된 범위, 붕괴 없음. 셀 블록이라 키 보충 없음.
+    # Ctrl+Shift+End: 데이터 영역으로 클램프된 범위, 붕괴 없음.
     tbl._move_current_cell(1, 1)
     QTest.keyClick(tbl, Qt.Key_End, Qt.ControlModifier | Qt.ShiftModifier)
     sel = tbl.get_selected_cells()
     assert max(r for r, _ in sel) == len(dm) - 1, sel
     assert max(c for _, c in sel) == 4, sel
-    assert len(sel) == (len(dm) - 1) * 4, len(sel)
+    # 데이터 블록(행1~5 × 열1~4) + 키 행(0 × 열1~4) + 키 열(0 × 행1~5).
+    assert {(r, c) for r in range(1, len(dm)) for c in range(1, 5)} <= sel, sel
 
     # Ctrl+Home: 단일 이동
     QTest.keyClick(tbl, Qt.Key_Home, Qt.ControlModifier)
