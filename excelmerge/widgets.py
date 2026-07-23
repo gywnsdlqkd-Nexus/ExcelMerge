@@ -348,6 +348,25 @@ class FreezeController(QObject):
             letter = get_column_letter(col + 1)
             m.addAction(key_header_icon(), f"키 열로 설정  [{letter}열]").triggered.connect(
                 lambda: host.key_col_changed.emit(col))
+
+        # ── 변경 검사 제외/해제 — 키 열보다 좌측(고정 밴드) 열도 제외 가능하게 노출 ──
+        # 키 열 자신은 키 매칭 기준이라 제외 대상에서 뺀다(본체 헤더 메뉴와 동일 규칙).
+        # 선택에 '제외됨'과 '비제외'가 섞이면 두 항목을 모두 노출한다.
+        excl_cols = [c for c in target_cols if c != host._key_col]
+        to_exclude = [c for c in excl_cols if c not in host._excluded_cols]
+        to_unexclude = [c for c in excl_cols if c in host._excluded_cols]
+        if to_exclude or to_unexclude:
+            m.addSeparator()
+        if to_exclude:
+            lbl = ", ".join(get_column_letter(c + 1) for c in to_exclude)
+            m.addAction(exclude_header_icon(),
+                        f"변경 검사에서 제외  [{lbl}열]").triggered.connect(
+                lambda _=False, cs=to_exclude: host.columns_exclude_set.emit(cs, True))
+        if to_unexclude:
+            lbl = ", ".join(get_column_letter(c + 1) for c in to_unexclude)
+            m.addAction(reset_header_icon(),
+                        f"검사 제외 해제  [{lbl}열]").triggered.connect(
+                lambda _=False, cs=to_unexclude: host.columns_exclude_set.emit(cs, False))
         m.popup(ch.mapToGlobal(pos))
 
     def _corner_row_menu(self, pos):
