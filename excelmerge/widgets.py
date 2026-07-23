@@ -1474,11 +1474,18 @@ class ExcelTableView(QTableView):
         return any(sel.contains(model.index(r, c)) for (r, c) in staged)
 
     # ── 헤더 다중 선택 지원 ──────────────────────────────────────────────────
-    def _full_columns_selected(self) -> list[int]:
+    def _full_columns_selected(self, incl_key: bool = False) -> list[int]:
         """모든 행에 걸쳐 선택된 열 목록 = '열 헤더 선택' 상태.
         selectedColumns()는 대량 선택에서 셀을 개별 열거해 O(선택셀수)로 느리므로,
         selection() range를 직접 본다: 행 전체(0..rowCount-1)를 덮는 range의 열들 합집합.
-        앱은 전체 열 선택을 그 경계 range로 만들므로 selectedColumns()와 동일 결과 — O(#range)."""
+        앱은 전체 열 선택을 그 경계 range로 만들므로 selectedColumns()와 동일 결과 — O(#range).
+
+        incl_key=False(기본): 고정 키 열(0..key_col)을 제외 — 컨텍스트 메뉴/병합 대상은
+        '데이터 열' 기준이라 키 열이 섞이면 안 된다.
+        incl_key=True: 키 열을 포함 — Shift+방향키 헤더 확장(keyPressEvent)에서 키 열이
+        선택돼 있어도 확장 경로(_select_column_range)가 켜지도록. 키 열은 본체에서 숨겨져
+        있어(고정 밴드) Qt 기본 확장이 동작하지 않으므로, 이 경로로만 키 열+데이터 열
+        다중 선택이 가능하다(행 축과 대칭 — 행은 본체에서 숨기지 않아 원래 동작함)."""
         sm = self.selectionModel()
         if sm is None:
             return []
@@ -1489,16 +1496,14 @@ class ExcelTableView(QTableView):
         for rng in sm.selection():
             if rng.top() == 0 and rng.bottom() == row_max:
                 cols.update(range(rng.left(), rng.right() + 1))
-        # 고정 키 열(0..key_col)은 제외 — _supplement_key_selection 이 데이터 열 선택에
-        # 곁들여 넣은 키 열이 '데이터 열 선택' 집합을 오염시키지 않도록(헤더 확장·컨텍스트
-        # 메뉴 대상은 데이터 열 기준). 병합은 _stage_selected 가 키 셀을 따로 보충한다.
         kc = self._key_col
-        if kc is not None and kc >= 0:
+        if not incl_key and kc is not None and kc >= 0:
             cols = {c for c in cols if c > kc}
         return sorted(cols)
 
-    def _full_rows_selected(self) -> list[int]:
-        """모든 열에 걸쳐 선택된 행 목록 (열 대칭). O(#range)."""
+    def _full_rows_selected(self, incl_key: bool = False) -> list[int]:
+        """모든 열에 걸쳐 선택된 행 목록 (열 대칭). O(#range).
+        incl_key 의미는 _full_columns_selected 와 동일(기본은 키 행 제외)."""
         sm = self.selectionModel()
         if sm is None:
             return []
@@ -1509,9 +1514,8 @@ class ExcelTableView(QTableView):
         for rng in sm.selection():
             if rng.left() == 0 and rng.right() == col_max:
                 rows.update(range(rng.top(), rng.bottom() + 1))
-        # 고정 키 행(0..key_row)은 제외 (열 대칭 — 위 _full_columns_selected 참고).
         kr = self._key_row
-        if kr is not None and kr >= 0:
+        if not incl_key and kr is not None and kr >= 0:
             rows = {r for r in rows if r > kr}
         return sorted(rows)
 
@@ -1559,8 +1563,11 @@ class ExcelTableView(QTableView):
         # 열 전체가 선택된 상태에서 Shift+←/→ 는 열 단위 확장,
         # 행 전체가 선택된 상태에서 Shift+↑/↓ 는 행 단위 확장.
         if shift and not alt and key in (Qt.Key_Left, Qt.Key_Right, Qt.Key_Up, Qt.Key_Down):
-            full_cols = self._full_columns_selected()
-            full_rows = self._full_rows_selected()
+            # 헤더 확장 판정/anchor는 키 열·행을 포함해야 한다 — 키 열만 선택된 상태에서도
+            # 확장 경로가 켜져 키 열+데이터 열 다중 선택이 되도록(키 열은 본체 숨김이라
+            # Qt 기본 확장이 안 됨). 컨텍스트 메뉴 대상은 여전히 키 제외 세트를 쓴다.
+            full_cols = self._full_columns_selected(incl_key=True)
+            full_rows = self._full_rows_selected(incl_key=True)
             is_col_mode = bool(full_cols) and key in (Qt.Key_Left, Qt.Key_Right)
             is_row_mode = bool(full_rows) and key in (Qt.Key_Up, Qt.Key_Down)
 
