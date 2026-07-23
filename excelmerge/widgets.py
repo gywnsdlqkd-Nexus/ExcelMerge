@@ -281,6 +281,12 @@ class FreezeController(QObject):
         self.top = self._make_view(headers=False)
         self.left = self._make_view(headers=False)
         self._views = (self.corner, self.top, self.left)
+        # 오버레이의 '스크롤하는 축'만 픽셀 단위로 — 본체(ScrollPerItem)의 헤더 픽셀 오프셋을
+        # 그대로 복사해 픽셀 단위로 정렬한다(_sync_top_h/_sync_left_v). 본체와 오버레이는
+        # 스크롤바 표시 여부가 달라 ScrollPerItem '최댓값'이 1 어긋나는데, 값만 미러하면
+        # 스크롤 맨 끝에서 한 칸 밀린다. 픽셀 오프셋 복사는 최댓값 quirk와 무관하게 정확하다.
+        self.top.setHorizontalScrollMode(QAbstractItemView.ScrollPerPixel)
+        self.left.setVerticalScrollMode(QAbstractItemView.ScrollPerPixel)
         # 본체를 열/행 단위 스크롤로 고정 → 스크롤바 값이 곧 열/행 인덱스라 헬퍼와 값 동기로 정렬된다.
         host.setHorizontalScrollMode(QAbstractItemView.ScrollPerItem)
         host.setVerticalScrollMode(QAbstractItemView.ScrollPerItem)
@@ -593,64 +599,24 @@ class FreezeController(QObject):
         self.corner.horizontalScrollBar().setValue(0)
         self.corner.verticalScrollBar().setValue(0)
 
-    _H_PROBE_X = 2   # 상단 오버레이 정렬 확인용 viewport x(첫 스크롤 열 내부의 임의 지점)
-
     def _sync_top_h(self):
-        """상단(고정 행) 오버레이의 가로 위치를 본체와 정렬한다. 세로(_sync_left_v)와 완전 대칭:
-        본체는 가로 스크롤바가 보이고 오버레이는 항상 꺼져 있어(ScrollBarAlwaysOff) ScrollPerItem
-        가로 '최댓값'이 1 어긋난다. 값만 미러하면 스크롤 맨 우측(마지막 페이지)에서 고정 행
-        (키 행)이 한 열 밀려 보인다. → 값 미러 후 '본체 최좌측 표시 열'과 같아질 때까지 오버레이
-        값을 최대 몇 칸만 미세 보정한다. 중간 구간에선 이미 일치하므로 루프가 돌지 않는다."""
+        """상단(고정 행) 오버레이의 가로 위치를 본체와 픽셀 단위로 정렬한다.
+        본체는 ScrollPerItem이라 최좌측 열이 픽셀 경계에 스냅되고, 그 픽셀 오프셋은
+        가로 헤더의 offset()으로 얻는다. 오버레이는 가로 ScrollPerPixel이므로 그 값을
+        그대로 넣으면 동일 콘텐츠(같은 열·폭)가 픽셀 정확히 겹친다. 스크롤바 최댓값이
+        서로 1 어긋나도(표시/AlwaysOff 차이) 무관 — 마지막 페이지에서도 안 밀린다."""
         if not self._alive():
             return
-        host = self.host
-        top = self.top
-        tb = top.horizontalScrollBar()
-        tb.setValue(host.horizontalScrollBar().value())
-        target = host.columnAt(self._H_PROBE_X)
-        if target < 0:
-            return   # 데이터 없음/레이아웃 미확정 — 다음 스크롤·paint에서 보정
-        for _ in range(6):
-            cur_col = top.columnAt(self._H_PROBE_X)
-            if cur_col == target:
-                return
-            cur = tb.value()
-            nv = cur + (1 if (cur_col < 0 or cur_col < target) else -1)
-            if nv < tb.minimum() or nv > tb.maximum():
-                return
-            tb.setValue(nv)
-            if tb.value() == cur:
-                return   # 더 못 움직임(경계) — 중단
-
-    _V_PROBE_Y = 2   # 좌측 오버레이 정렬 확인용 viewport y(첫 스크롤 행 내부의 임의 지점)
+        self.top.horizontalScrollBar().setValue(self.host.horizontalHeader().offset())
 
     def _sync_left_v(self):
-        """좌측(고정 열) 오버레이의 세로 위치를 본체와 정렬한다.
-        본체는 스크롤바가 보이고 오버레이는 항상 꺼져 있어(ScrollBarAlwaysOff), 뷰 높이를
-        맞춰도 ScrollPerItem '최댓값'이 1 어긋난다(Qt 내부 페이지 계산 차이). 값만 그대로
-        미러하면 스크롤 맨 끝에서 오버레이가 본체보다 한 행 밀려 보인다(키 열·좌측 열이 아래로
-        처지는 버그). → 값 미러 후, '본체 최상단 표시 행'과 같아질 때까지 오버레이 값을 최대
-        몇 칸만 미세 보정한다. 중간 구간에선 이미 일치하므로 루프가 돌지 않는다(부하 없음)."""
+        """좌측(고정 열) 오버레이의 세로 위치를 본체와 픽셀 단위로 정렬한다(_sync_top_h의 세로
+        대칭). 본체 세로 헤더의 offset()이 곧 콘텐츠 세로 픽셀 오프셋이고, 오버레이는 세로
+        ScrollPerPixel이라 그 값을 그대로 넣으면 같은 행이 픽셀 정확히 겹친다. 스크롤바 최댓값
+        차이(표시/AlwaysOff)와 무관하므로 스크롤 맨 아래에서도 고정 열이 밀리지 않는다."""
         if not self._alive():
             return
-        host = self.host
-        left = self.left
-        lv = left.verticalScrollBar()
-        lv.setValue(host.verticalScrollBar().value())
-        target = host.rowAt(self._V_PROBE_Y)
-        if target < 0:
-            return   # 데이터 없음/레이아웃 미확정 — 다음 스크롤·paint에서 보정
-        for _ in range(6):
-            cur_row = left.rowAt(self._V_PROBE_Y)
-            if cur_row == target:
-                return
-            cur = lv.value()
-            nv = cur + (1 if (cur_row < 0 or cur_row < target) else -1)
-            if nv < lv.minimum() or nv > lv.maximum():
-                return
-            lv.setValue(nv)
-            if lv.value() == cur:
-                return   # 더 못 움직임(경계) — 중단
+        self.left.verticalScrollBar().setValue(self.host.verticalHeader().offset())
 
     def reposition(self):
         """헬퍼 3개의 위치/크기를 본체 헤더·고정 크기 기준으로 재계산. updateGeometries에서 호출."""
