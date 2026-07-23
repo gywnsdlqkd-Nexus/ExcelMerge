@@ -588,7 +588,7 @@ class FreezeController(QObject):
             return
         self._sync_top_h()
         self.top.verticalScrollBar().setValue(0)
-        self.left.verticalScrollBar().setValue(self.host.verticalScrollBar().value())
+        self._sync_left_v()
         self.left.horizontalScrollBar().setValue(0)
         self.corner.horizontalScrollBar().setValue(0)
         self.corner.verticalScrollBar().setValue(0)
@@ -596,6 +596,36 @@ class FreezeController(QObject):
     def _sync_top_h(self):
         # 본체·헬퍼 모두 ScrollPerItem이라 스크롤바 값 = 보이는 열 인덱스 → 값 동기로 정렬된다.
         self.top.horizontalScrollBar().setValue(self.host.horizontalScrollBar().value())
+
+    _V_PROBE_Y = 2   # 좌측 오버레이 정렬 확인용 viewport y(첫 스크롤 행 내부의 임의 지점)
+
+    def _sync_left_v(self):
+        """좌측(고정 열) 오버레이의 세로 위치를 본체와 정렬한다.
+        본체는 스크롤바가 보이고 오버레이는 항상 꺼져 있어(ScrollBarAlwaysOff), 뷰 높이를
+        맞춰도 ScrollPerItem '최댓값'이 1 어긋난다(Qt 내부 페이지 계산 차이). 값만 그대로
+        미러하면 스크롤 맨 끝에서 오버레이가 본체보다 한 행 밀려 보인다(키 열·좌측 열이 아래로
+        처지는 버그). → 값 미러 후, '본체 최상단 표시 행'과 같아질 때까지 오버레이 값을 최대
+        몇 칸만 미세 보정한다. 중간 구간에선 이미 일치하므로 루프가 돌지 않는다(부하 없음)."""
+        if not self._alive():
+            return
+        host = self.host
+        left = self.left
+        lv = left.verticalScrollBar()
+        lv.setValue(host.verticalScrollBar().value())
+        target = host.rowAt(self._V_PROBE_Y)
+        if target < 0:
+            return   # 데이터 없음/레이아웃 미확정 — 다음 스크롤·paint에서 보정
+        for _ in range(6):
+            cur_row = left.rowAt(self._V_PROBE_Y)
+            if cur_row == target:
+                return
+            cur = lv.value()
+            nv = cur + (1 if (cur_row < 0 or cur_row < target) else -1)
+            if nv < lv.minimum() or nv > lv.maximum():
+                return
+            lv.setValue(nv)
+            if lv.value() == cur:
+                return   # 더 못 움직임(경계) — 중단
 
     def reposition(self):
         """헬퍼 3개의 위치/크기를 본체 헤더·고정 크기 기준으로 재계산. updateGeometries에서 호출."""
@@ -645,7 +675,7 @@ class FreezeController(QObject):
 
     def _on_v_scroll(self, value):
         if self._alive() and self._active:
-            self.left.verticalScrollBar().setValue(value)
+            self._sync_left_v()
 
     def _on_col_resized(self, idx, old, new):
         # 벌크 작업(_applying_sizes: 필터의 setRowHidden 폭풍, 크기 일괄 적용) 중엔 발화 무시 —
