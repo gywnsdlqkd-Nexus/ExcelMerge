@@ -1534,6 +1534,19 @@ class ExcelTableView(QTableView):
         sel = QItemSelection(model.index(0, cs), model.index(rows - 1, ce_))
         sm.select(sel, QItemSelectionModel.ClearAndSelect)
 
+    def _next_visible_row(self, start: int, delta: int) -> int:
+        """start에서 delta(+1/-1) 방향으로 '변경 행만 보기'로 숨겨진 행을 건너뛴 첫 '보이는'
+        행 인덱스. 경계까지 못 찾으면 start(제자리). 헤더 Shift+↑/↓ 확장이 필터로 숨은 행을
+        지나 실제로 보이는 다음 행에 착지하도록 한다(고정 키 행은 본체에서 숨김이 아니라 스킵
+        대상이 아님 — 상단 밴드에 보이므로)."""
+        last = self.rowCount() - 1
+        n = start + delta
+        while 0 <= n <= last:
+            if not self.isRowHidden(n):
+                return n
+            n += delta
+        return start
+
     def _select_row_range(self, r1: int, r2: int):
         sm = self.selectionModel()
         rows = self.rowCount()
@@ -1620,8 +1633,14 @@ class ExcelTableView(QTableView):
                     target = self._header_jump_target(
                         cur_end, delta, self.rowCount() - 1,
                         lambda r: not m.row_has_values(r))
+                    # '변경 행만 보기'로 숨은 행에 착지하면 같은 방향의 보이는 행으로 스냅
+                    # (숨은 행은 _normalize_selection이 되잘라내 확장이 무효화되므로).
+                    if 0 <= target < self.rowCount() and self.isRowHidden(target):
+                        target = self._next_visible_row(target, delta)
                 else:
-                    target = max(0, min(self.rowCount() - 1, cur_end + delta))
+                    # 인접 인덱스(cur_end±1)가 아니라 '다음 보이는 행'으로 확장 — 필터로 숨은
+                    # 행을 건너뛴다. 그러지 않으면 숨은 행에 착지→prune→제자리라 확장이 안 됐다.
+                    target = self._next_visible_row(cur_end, delta)
                 self._select_row_range(self._header_anchor_row, target)
                 self._set_current_cell_no_update(target, max(0, cur_c if cur_c >= 0 else 0))
                 event.accept(); return
