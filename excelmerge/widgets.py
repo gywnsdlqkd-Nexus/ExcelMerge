@@ -593,9 +593,34 @@ class FreezeController(QObject):
         self.corner.horizontalScrollBar().setValue(0)
         self.corner.verticalScrollBar().setValue(0)
 
+    _H_PROBE_X = 2   # 상단 오버레이 정렬 확인용 viewport x(첫 스크롤 열 내부의 임의 지점)
+
     def _sync_top_h(self):
-        # 본체·헬퍼 모두 ScrollPerItem이라 스크롤바 값 = 보이는 열 인덱스 → 값 동기로 정렬된다.
-        self.top.horizontalScrollBar().setValue(self.host.horizontalScrollBar().value())
+        """상단(고정 행) 오버레이의 가로 위치를 본체와 정렬한다. 세로(_sync_left_v)와 완전 대칭:
+        본체는 가로 스크롤바가 보이고 오버레이는 항상 꺼져 있어(ScrollBarAlwaysOff) ScrollPerItem
+        가로 '최댓값'이 1 어긋난다. 값만 미러하면 스크롤 맨 우측(마지막 페이지)에서 고정 행
+        (키 행)이 한 열 밀려 보인다. → 값 미러 후 '본체 최좌측 표시 열'과 같아질 때까지 오버레이
+        값을 최대 몇 칸만 미세 보정한다. 중간 구간에선 이미 일치하므로 루프가 돌지 않는다."""
+        if not self._alive():
+            return
+        host = self.host
+        top = self.top
+        tb = top.horizontalScrollBar()
+        tb.setValue(host.horizontalScrollBar().value())
+        target = host.columnAt(self._H_PROBE_X)
+        if target < 0:
+            return   # 데이터 없음/레이아웃 미확정 — 다음 스크롤·paint에서 보정
+        for _ in range(6):
+            cur_col = top.columnAt(self._H_PROBE_X)
+            if cur_col == target:
+                return
+            cur = tb.value()
+            nv = cur + (1 if (cur_col < 0 or cur_col < target) else -1)
+            if nv < tb.minimum() or nv > tb.maximum():
+                return
+            tb.setValue(nv)
+            if tb.value() == cur:
+                return   # 더 못 움직임(경계) — 중단
 
     _V_PROBE_Y = 2   # 좌측 오버레이 정렬 확인용 viewport y(첫 스크롤 행 내부의 임의 지점)
 
