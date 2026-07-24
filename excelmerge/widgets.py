@@ -244,6 +244,7 @@ class _FrozenView(QTableView):
     def __init__(self, host):
         super().__init__(host)
         self._host = host
+        self._drag_anchor = None   # (row, col) 모델 좌표 — 오버레이↔본체 경계를 넘는 드래그 선택 앵커
 
     def wheelEvent(self, event):
         self._host.wheelEvent(event)
@@ -252,6 +253,70 @@ class _FrozenView(QTableView):
         """스크롤 위치는 전적으로 FreezeController가 제어한다. 선택/현재 셀 변경 시
         Qt가 자동 호출하는 scrollTo가 고정 뷰를 제 위치에서 밀어내지 않도록 무력화."""
         return
+
+    # ── 경계를 넘는 드래그 선택 ───────────────────────────────────────────────
+    # 고정 열/행은 본체와 분리된 오버레이 위젯이라, 오버레이에서 시작한 드래그는 Qt가 그
+    # 위젯에 마우스를 grab 해 오버레이의 '보이는' 셀(고정 밴드)만 선택된다(스크롤 열/행은
+    # 오버레이에서 숨김). 본체와 selection model 을 공유하므로, 드래그 중 커서를 본체 좌표로
+    # 매핑해 공유 모델에 사각형 선택을 직접 만들어 경계를 넘는 선택을 가능하게 한다.
+    def mousePressEvent(self, event):
+        if event.button() == Qt.LeftButton:
+            idx = self.indexAt(event.pos())
+            self._drag_anchor = (idx.row(), idx.column()) if idx.isValid() else None
+        super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event):
+        if self._drag_anchor is not None and (event.buttons() & Qt.LeftButton):
+            self._extend_drag(event.globalPos())
+            event.accept()
+            return
+        super().mouseMoveEvent(event)
+
+    def mouseReleaseEvent(self, event):
+        self._drag_anchor = None
+        super().mouseReleaseEvent(event)
+
+    def _extend_drag(self, gp):
+        """커서 전역좌표(gp)로 목표 (row, col)을 정하고 본체 공유 모델에 사각형 선택을 만든다.
+        커서가 본체 영역이면 host 좌표(스크롤 열/행), 고정 밴드 위면 이 오버레이 좌표로 매핑한다.
+        끝을 넘으면 host 스크롤바로 오토스크롤(오버레이 scrollTo는 무력화돼 있음)."""
+        host = self._host
+        hv = host.viewport().mapFromGlobal(gp)   # 본체(스크롤 셀) 뷰포트 좌표
+        lv = self.viewport().mapFromGlobal(gp)    # 이 오버레이 뷰포트 좌표
+        ar, ac = self._drag_anchor
+
+        # 목표 열
+        if hv.x() >= 0:
+            col = host.columnAt(hv.x())
+            if col < 0:   # 우측 끝 넘음 → 오토스크롤 + 마지막 보이는 열
+                hb = host.horizontalScrollBar()
+                if hv.x() > host.viewport().width() and hb.value() < hb.maximum():
+                    hb.setValue(hb.value() + 1)
+                col = host.columnAt(max(0, min(hv.x(), host.viewport().width() - 1)))
+                if col < 0:
+                    col = ac
+        else:
+            col = self.columnAt(lv.x())
+            if col < 0:
+                col = ac
+
+        # 목표 행 (열과 대칭)
+        if hv.y() >= 0:
+            row = host.rowAt(hv.y())
+            if row < 0:   # 하단 끝 넘음 → 오토스크롤 + 마지막 보이는 행
+                vb = host.verticalScrollBar()
+                if hv.y() > host.viewport().height() and vb.value() < vb.maximum():
+                    vb.setValue(vb.value() + 1)
+                row = host.rowAt(max(0, min(hv.y(), host.viewport().height() - 1)))
+                if row < 0:
+                    row = ar
+        else:
+            row = self.rowAt(lv.y())
+            if row < 0:
+                row = ar
+
+        host._select_range(ar, ac, row, col)
+        host._set_current_cell_no_update(row, col)
 
 
 class FreezeController(QObject):
