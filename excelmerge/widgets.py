@@ -282,28 +282,30 @@ class _FrozenView(QTableView):
 
     def _extend_drag(self, gp):
         """커서 전역좌표(gp)로 목표 (row, col)을 정하고 본체 공유 모델에 사각형 선택을 만든다.
-        커서가 본체 영역이면 host 좌표(스크롤 열/행), 고정 밴드 위면 이 오버레이 좌표로 매핑한다.
-        host._drag_col_at/_drag_row_at 은 마지막 열/행보다 오른쪽·아래(빈 영역/끝 넘음)에서도
-        마지막 데이터 열/행으로 clamp하고(앵커로 붕괴 방지) 필요 시 오토스크롤한다."""
+        커서가 본체 스크롤 영역이면 host 좌표(끝 clamp/오토스크롤), 고정 밴드 위면 고정 열/행
+        오버레이(left/top) 기준으로 매핑한다. ★ self(=이 오버레이)의 columnAt/rowAt을 쓰면 안 된다:
+        top 오버레이는 고정 열이 숨김이라 고정 밴드에서 -1→0(A)으로 붕괴하고(키 행에서 K→D 드래그가
+        A~D 전체 선택되는 버그), left 오버레이는 고정 행이 숨김이라 대칭 문제가 생긴다. 항상 고정
+        열은 fc.left, 고정 행은 fc.top 기준(_frozen_col_at/_frozen_row_at)으로 매핑한다."""
         host = self._host
+        fc = host._freeze
         hv = host.viewport().mapFromGlobal(gp)   # 본체(스크롤 셀) 뷰포트 좌표
-        lv = self.viewport().mapFromGlobal(gp)    # 이 오버레이 뷰포트 좌표
         ar, ac = self._drag_anchor
 
-        # 목표 열: 본체 영역이면 host 매핑(끝 clamp/오토스크롤), 고정 밴드면 오버레이 열
+        # 목표 열: 본체 영역이면 host 매핑, 고정 밴드(hv.x()<0)면 고정 열 오버레이(fc.left) 기준
         if hv.x() >= 0:
             col = host._drag_col_at(hv.x())
+        elif fc is not None and getattr(fc, "_n_cols", 0) > 0:
+            col = host._frozen_col_at(fc, gp)
         else:
-            col = self.columnAt(lv.x())
-            if col < 0:
-                col = 0 if lv.x() < 0 else ac
-        # 목표 행 (열과 대칭)
+            col = ac
+        # 목표 행 (열과 대칭): 고정 행 밴드(hv.y()<0)면 고정 행 오버레이(fc.top) 기준
         if hv.y() >= 0:
             row = host._drag_row_at(hv.y())
+        elif fc is not None and getattr(fc, "_n_rows", 0) > 0:
+            row = host._frozen_row_at(fc, gp)
         else:
-            row = self.rowAt(lv.y())
-            if row < 0:
-                row = ar
+            row = ar
 
         host._select_range(ar, ac, row, col)
         host._set_current_cell_no_update(row, col)
@@ -948,13 +950,25 @@ class ExcelTableView(QTableView):
     @staticmethod
     def _frozen_col_at(fc, gp):
         """전역좌표 gp 아래의 고정 열 인덱스(0..key_col). 고정 밴드 왼쪽(행 헤더 등)이면 첫
-        고정 열(0), 오른쪽 끝을 넘으면 마지막 고정 열로 clamp. left 오버레이 기준으로 매핑한다."""
+        고정 열(0), 오른쪽 끝을 넘으면 마지막 고정 열로 clamp. left 오버레이 기준으로 매핑한다
+        (left 는 고정 열을 실제로 그리므로, 고정 열이 숨김인 top/본체로 매핑할 때의 오류를 피한다)."""
         left = fc.left
         lv = left.viewport().mapFromGlobal(gp)
         c = left.columnAt(lv.x())
         if c < 0:
             c = 0 if lv.x() < 0 else fc._n_cols - 1
         return c
+
+    @staticmethod
+    def _frozen_row_at(fc, gp):
+        """_frozen_col_at 의 세로 대칭 — 고정 행 인덱스(0..key_row). top 오버레이가 고정 행을
+        실제로 그리므로 그 기준으로 매핑한다(고정 행이 숨김인 left/본체 매핑 오류 회피)."""
+        top = fc.top
+        tv = top.viewport().mapFromGlobal(gp)
+        r = top.rowAt(tv.y())
+        if r < 0:
+            r = 0 if tv.y() < 0 else fc._n_rows - 1
+        return r
 
     def _drag_col_at(self, x):
         """드래그 확장용: 본체 뷰포트 x 아래의 목표 데이터 열. 마지막 열보다 오른쪽(열이 뷰포트를
