@@ -1057,15 +1057,18 @@ class ExcelTableView(QTableView):
 
     @staticmethod
     def _near_section_boundary(header, axis, pos):
-        """pos(헤더 로컬)가 섹션 경계(리사이즈 핸들, ~4px) 근처인가 — 그러면 드래그 선택 대신
-        Qt 기본(열/행 크기 조절)에 맡긴다."""
+        """pos(헤더 로컬)가 리사이즈 핸들 위인가 — 그러면 드래그 선택을 시작하지 않고 Qt 기본
+        (열/행 크기 조절)에 맡긴다. Qt가 그립 위에서 세팅하는 split 커서를 우선 신뢰하고(그립
+        폭이 스타일/DPI마다 달라도 정확), 못 잡으면 섹션 경계 6px 여백으로 보수적으로 판단한다."""
+        if header.cursor().shape() in (Qt.SplitHCursor, Qt.SplitVCursor):
+            return True
         p = pos.x() if axis == "col" else pos.y()
         idx = header.logicalIndexAt(p)
         if idx < 0:
             return False
         start = header.sectionViewportPosition(idx)
         size = header.sectionSize(idx)
-        return (p - start) <= 4 or (start + size - p) <= 4
+        return (p - start) <= 6 or (start + size - p) <= 6
 
     def eventFilter(self, obj, event):
         info = getattr(self, "_header_axis", {}).get(obj)
