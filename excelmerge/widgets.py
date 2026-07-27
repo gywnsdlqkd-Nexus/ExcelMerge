@@ -266,7 +266,11 @@ class _FrozenView(QTableView):
         super().mousePressEvent(event)
 
     def mouseMoveEvent(self, event):
-        if self._drag_anchor is not None and (event.buttons() & Qt.LeftButton):
+        # Ctrl/Shift 드래그는 Qt 기본(ExtendedSelection)에 맡긴다 — 다중 영역 누적/확장 시맨틱을
+        # 보존한다. 그러지 않으면 _extend_drag의 ClearAndSelect가 기존 선택을 지운다(Ctrl+클릭에
+        # 1px 지터가 섞여도 마찬가지). 평범한 좌드래그만 경계 넘는 사각형 선택으로 처리한다.
+        if (self._drag_anchor is not None and (event.buttons() & Qt.LeftButton)
+                and not (event.modifiers() & (Qt.ControlModifier | Qt.ShiftModifier))):
             self._extend_drag(event.globalPos())
             event.accept()
             return
@@ -279,37 +283,23 @@ class _FrozenView(QTableView):
     def _extend_drag(self, gp):
         """커서 전역좌표(gp)로 목표 (row, col)을 정하고 본체 공유 모델에 사각형 선택을 만든다.
         커서가 본체 영역이면 host 좌표(스크롤 열/행), 고정 밴드 위면 이 오버레이 좌표로 매핑한다.
-        끝을 넘으면 host 스크롤바로 오토스크롤(오버레이 scrollTo는 무력화돼 있음)."""
+        host._drag_col_at/_drag_row_at 은 마지막 열/행보다 오른쪽·아래(빈 영역/끝 넘음)에서도
+        마지막 데이터 열/행으로 clamp하고(앵커로 붕괴 방지) 필요 시 오토스크롤한다."""
         host = self._host
         hv = host.viewport().mapFromGlobal(gp)   # 본체(스크롤 셀) 뷰포트 좌표
         lv = self.viewport().mapFromGlobal(gp)    # 이 오버레이 뷰포트 좌표
         ar, ac = self._drag_anchor
 
-        # 목표 열
+        # 목표 열: 본체 영역이면 host 매핑(끝 clamp/오토스크롤), 고정 밴드면 오버레이 열
         if hv.x() >= 0:
-            col = host.columnAt(hv.x())
-            if col < 0:   # 우측 끝 넘음 → 오토스크롤 + 마지막 보이는 열
-                hb = host.horizontalScrollBar()
-                if hv.x() > host.viewport().width() and hb.value() < hb.maximum():
-                    hb.setValue(hb.value() + 1)
-                col = host.columnAt(max(0, min(hv.x(), host.viewport().width() - 1)))
-                if col < 0:
-                    col = ac
+            col = host._drag_col_at(hv.x())
         else:
             col = self.columnAt(lv.x())
             if col < 0:
-                col = ac
-
+                col = 0 if lv.x() < 0 else ac
         # 목표 행 (열과 대칭)
         if hv.y() >= 0:
-            row = host.rowAt(hv.y())
-            if row < 0:   # 하단 끝 넘음 → 오토스크롤 + 마지막 보이는 행
-                vb = host.verticalScrollBar()
-                if hv.y() > host.viewport().height() and vb.value() < vb.maximum():
-                    vb.setValue(vb.value() + 1)
-                row = host.rowAt(max(0, min(hv.y(), host.viewport().height() - 1)))
-                if row < 0:
-                    row = ar
+            row = host._drag_row_at(hv.y())
         else:
             row = self.rowAt(lv.y())
             if row < 0:
@@ -851,6 +841,8 @@ class ExcelTableView(QTableView):
         # 헤더 다중 선택의 anchor (Shift+방향 확장의 고정점)
         self._header_anchor_col: int | None = None
         self._header_anchor_row: int | None = None
+        # 본체에서 시작한 드래그가 왼쪽 고정 열 밴드로 넘어갈 때의 앵커 (row, col) 모델 좌표.
+        self._body_drag_anchor = None
         self.setFont(ui_font(9))
         self.horizontalHeader().setSectionResizeMode(QHeaderView.Interactive)
         # 키/제외 열 헤더의 PNG 아이콘(DecorationRole) 가시성 확보용 크기.
@@ -919,6 +911,87 @@ class ExcelTableView(QTableView):
         if sm is not None and 0 <= r < self.rowCount() and 0 <= c < self.columnCount():
             sm.setCurrentIndex(self._model.index(r, c),
                                QItemSelectionModel.ClearAndSelect)
+
+    # ── 본체→왼쪽 고정 열 밴드로 넘어가는 드래그 선택 ─────────────────────────
+    # 본체에서 시작한 드래그가 왼쪽 고정 열(키 열 및 그 좌측)로 넘어가면, 본체엔 고정 열이
+    # 숨겨져 있어 Qt 기본 드래그가 고정 열을 잡지 못한다(예: 본체에서 K→E 드래그 후 D로 못 이어짐).
+    # 오버레이가 본체와 selection model 을 공유하므로, 커서가 본체 뷰포트 왼쪽을 벗어나면
+    # 앵커→고정열 사각형으로 직접 확장한다. (반대 방향 = 오버레이→본체 는 _FrozenView가 처리.)
+    def mousePressEvent(self, event):
+        if event.button() == Qt.LeftButton:
+            idx = self.indexAt(event.pos())
+            self._body_drag_anchor = (idx.row(), idx.column()) if idx.isValid() else None
+        super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event):
+        # Ctrl/Shift 드래그는 Qt 기본에 맡겨 다중 영역/확장 시맨틱을 보존한다(_FrozenView와 동일).
+        if (self._body_drag_anchor is not None and (event.buttons() & Qt.LeftButton)
+                and not (event.modifiers() & (Qt.ControlModifier | Qt.ShiftModifier))):
+            fc = getattr(self, "_freeze", None)
+            bv = self.viewport().mapFromGlobal(event.globalPos())
+            if (bv.x() < 0 and fc is not None and getattr(fc, "active", False)
+                    and getattr(fc, "_n_cols", 0) > 0):
+                col = self._frozen_col_at(fc, event.globalPos())
+                if col is not None:
+                    row = self._drag_row_at(bv.y())   # 아래 끝 넘음/빈 영역에서도 마지막 행으로 clamp
+                    ar, ac = self._body_drag_anchor
+                    self._select_range(ar, ac, row, col)
+                    self._set_current_cell_no_update(row, col)
+                    event.accept()
+                    return
+        super().mouseMoveEvent(event)
+
+    def mouseReleaseEvent(self, event):
+        self._body_drag_anchor = None
+        super().mouseReleaseEvent(event)
+
+    @staticmethod
+    def _frozen_col_at(fc, gp):
+        """전역좌표 gp 아래의 고정 열 인덱스(0..key_col). 고정 밴드 왼쪽(행 헤더 등)이면 첫
+        고정 열(0), 오른쪽 끝을 넘으면 마지막 고정 열로 clamp. left 오버레이 기준으로 매핑한다."""
+        left = fc.left
+        lv = left.viewport().mapFromGlobal(gp)
+        c = left.columnAt(lv.x())
+        if c < 0:
+            c = 0 if lv.x() < 0 else fc._n_cols - 1
+        return c
+
+    def _drag_col_at(self, x):
+        """드래그 확장용: 본체 뷰포트 x 아래의 목표 데이터 열. 마지막 열보다 오른쪽(열이 뷰포트를
+        안 채운 빈 영역이거나 우측 끝을 넘음)이면 마지막 데이터 열로 clamp(앵커로 붕괴 방지),
+        뷰포트 밖(우측)이면 한 칸 오토스크롤. EXTRA 빈 열은 데이터 범위로 clamp한다."""
+        dc = self._model.data_cols
+        last = max(0, dc - 1)
+        c = self.columnAt(x)
+        if c >= 0:
+            return min(c, last)
+        if x >= self.viewport().width():
+            hb = self.horizontalScrollBar()
+            if hb.value() < hb.maximum():
+                hb.setValue(hb.value() + 1)
+                c = self.columnAt(max(0, self.viewport().width() - 1))
+                if c >= 0:
+                    return min(c, last)
+        return last
+
+    def _drag_row_at(self, y):
+        """_drag_col_at 의 세로 대칭. 위쪽(고정 행/헤더) 넘으면 첫 행, 아래 끝/빈 영역이면
+        마지막 데이터 행으로 clamp, 뷰포트 밖(아래)이면 한 칸 오토스크롤."""
+        dr = self._model.data_rows
+        last = max(0, dr - 1)
+        if y < 0:
+            return 0
+        r = self.rowAt(y)
+        if r >= 0:
+            return min(r, last)
+        if y >= self.viewport().height():
+            vb = self.verticalScrollBar()
+            if vb.value() < vb.maximum():
+                vb.setValue(vb.value() + 1)
+                r = self.rowAt(max(0, self.viewport().height() - 1))
+                if r >= 0:
+                    return min(r, last)
+        return last
 
     # ── 사용자 헤더 크기 추적 ────────────────────────────────────────────────
     def _on_section_h_resized(self, logical_index: int, _old: int, new_size: int):
