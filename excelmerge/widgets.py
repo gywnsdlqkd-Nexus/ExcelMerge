@@ -9,7 +9,7 @@ from PyQt5.QtWidgets import (
 )
 from PyQt5.QtCore import (
     Qt, pyqtSignal, QItemSelection, QItemSelectionRange, QItemSelectionModel,
-    QRect, QPoint, QSize, QObject,
+    QRect, QPoint, QSize, QObject, QEvent,
 )
 from PyQt5.QtGui import (
     QPainter, QPalette, QTextCursor, QTextCharFormat, QTextDocument, QTextOption,
@@ -367,6 +367,8 @@ class FreezeController(QObject):
         # 본체와 어긋나고 셀이 겹쳐 보인다 → 호스트/전 뷰/미러로 전파한다.
         ch.sectionResized.connect(self._on_corner_col_resized)
         cv.sectionResized.connect(self._on_corner_row_resized)
+        # 고정 밴드 경계를 넘는 헤더 드래그 선택: corner 헤더도 host 필터/anchor에 등록.
+        host.register_frozen_headers(self.corner)
 
     def _corner_col_menu(self, pos):
         """고정 열 헤더(corner) 우클릭 — 병합 준비/취소 + 키 열 설정/해제(비모달 popup).
@@ -845,6 +847,9 @@ class ExcelTableView(QTableView):
         self._header_anchor_row: int | None = None
         # 본체에서 시작한 드래그가 왼쪽 고정 열 밴드로 넘어갈 때의 앵커 (row, col) 모델 좌표.
         self._body_drag_anchor = None
+        # 헤더 드래그 선택(경계 넘기): 이벤트 필터를 건 헤더 → 축('col'/'row'), 진행 중 축.
+        self._header_axis = {}
+        self._header_drag_axis = None
         self.setFont(ui_font(9))
         self.horizontalHeader().setSectionResizeMode(QHeaderView.Interactive)
         # 키/제외 열 헤더의 PNG 아이콘(DecorationRole) 가시성 확보용 크기.
@@ -873,6 +878,11 @@ class ExcelTableView(QTableView):
         # 헤더 클릭 시 anchor 갱신 (Shift 없는 클릭 → 새 anchor / Shift 클릭 → 기존 유지)
         self.horizontalHeader().sectionPressed.connect(self._on_h_section_pressed)
         self.verticalHeader().sectionPressed.connect(self._on_v_section_pressed)
+        # 본체 헤더 드래그 선택 필터(고정 밴드 경계 넘기). 헤더의 viewport에 필터를 건다.
+        # corner 헤더는 FreezeController가 register_frozen_headers 로 추가 등록한다.
+        for _h, _ax in ((self.horizontalHeader(), "col"), (self.verticalHeader(), "row")):
+            self._header_axis[_h.viewport()] = (_ax, _h)
+            _h.viewport().installEventFilter(self)
         # 선택 정규화: '변경 행만 보기'로 숨긴(볼 수 없는) 행을 전폭 밴드 선택에서 제외.
         # (DiffView의 A↔B 선택 미러보다 먼저 연결돼야 미러 전에 정규화가 반영된다.)
         self.selectionModel().selectionChanged.connect(self._normalize_selection)
@@ -1006,6 +1016,90 @@ class ExcelTableView(QTableView):
                 if r >= 0:
                     return min(r, last)
         return last
+
+    def _col_under_global(self, gp):
+        """전역 커서 gp 아래의 목표 데이터 열 — 고정 밴드(고정 열 오버레이)·본체 스크롤·끝 clamp를
+        통합한다. 헤더 드래그(가로)에서 커서가 헤더 위여도 열은 x만으로 결정되므로 그대로 쓴다."""
+        bvx = self.viewport().mapFromGlobal(gp).x()
+        if bvx >= 0:
+            return self._drag_col_at(bvx)
+        fc = getattr(self, "_freeze", None)
+        if fc is not None and getattr(fc, "_n_cols", 0) > 0:
+            return self._frozen_col_at(fc, gp)
+        c = self.columnAt(0)
+        return c if c >= 0 else 0
+
+    def _row_under_global(self, gp):
+        """_col_under_global 의 세로 대칭 (고정 행 오버레이·본체·끝 clamp 통합)."""
+        bvy = self.viewport().mapFromGlobal(gp).y()
+        if bvy >= 0:
+            return self._drag_row_at(bvy)
+        fc = getattr(self, "_freeze", None)
+        if fc is not None and getattr(fc, "_n_rows", 0) > 0:
+            return self._frozen_row_at(fc, gp)
+        return 0
+
+    # ── 헤더 드래그 선택 (고정 밴드 경계를 넘는 열/행 헤더 드래그) ──────────────
+    # 고정 열(키 열 이하) 헤더는 corner 오버레이, 스크롤 열 헤더는 본체에 있어 서로 다른 위젯이라
+    # Qt 기본 헤더 드래그는 경계를 못 넘는다(K→A/A→K 실패, 키 행 방향에 따라 10→1 실패 등).
+    # 4개 헤더(본체·corner의 가로/세로)에 이벤트 필터를 걸어, 드래그 중 전역 커서를 열/행로
+    # 매핑(_col_under_global/_row_under_global)해 앵커→목표 범위를 공유 모델에 직접 선택한다.
+    def register_frozen_headers(self, corner):
+        """FreezeController가 corner 오버레이 헤더를 host의 드래그 선택 필터/anchor에 등록."""
+        for h, ax in ((corner.horizontalHeader(), "col"), (corner.verticalHeader(), "row")):
+            # 필터는 헤더의 viewport에 건다 — QHeaderView 마우스 이벤트는 viewport로 전달되므로
+            # 헤더 객체 자체에 걸면 실제 드래그에서 필터가 호출되지 않는다.
+            self._header_axis[h.viewport()] = (ax, h)
+            h.viewport().installEventFilter(self)
+        # corner 헤더 클릭도 anchor를 세팅하도록(본체 헤더와 동일 배선)
+        corner.horizontalHeader().sectionPressed.connect(self._on_h_section_pressed)
+        corner.verticalHeader().sectionPressed.connect(self._on_v_section_pressed)
+
+    @staticmethod
+    def _near_section_boundary(header, axis, pos):
+        """pos(헤더 로컬)가 섹션 경계(리사이즈 핸들, ~4px) 근처인가 — 그러면 드래그 선택 대신
+        Qt 기본(열/행 크기 조절)에 맡긴다."""
+        p = pos.x() if axis == "col" else pos.y()
+        idx = header.logicalIndexAt(p)
+        if idx < 0:
+            return False
+        start = header.sectionViewportPosition(idx)
+        size = header.sectionSize(idx)
+        return (p - start) <= 4 or (start + size - p) <= 4
+
+    def eventFilter(self, obj, event):
+        info = getattr(self, "_header_axis", {}).get(obj)
+        if info is not None:
+            axis, header = info
+            et = event.type()
+            if et == QEvent.MouseButtonPress:
+                # 좌클릭·리사이즈 아님·modifier 없음일 때만 우리가 드래그 선택을 관리한다.
+                # (press는 소비하지 않는다 — Qt가 grab/초기선택/anchor(sectionPressed)를 처리)
+                if (event.button() == Qt.LeftButton
+                        and not self._near_section_boundary(header, axis, event.pos())
+                        and not (event.modifiers() & (Qt.ControlModifier | Qt.ShiftModifier))):
+                    self._header_drag_axis = axis
+                else:
+                    self._header_drag_axis = None
+            elif et == QEvent.MouseMove:
+                if self._header_drag_axis == axis and (event.buttons() & Qt.LeftButton):
+                    if axis == "col" and self._header_anchor_col is not None:
+                        tgt = self._col_under_global(event.globalPos())
+                        if tgt is not None and tgt >= 0:
+                            self._select_column_range(self._header_anchor_col, tgt)
+                            self._set_current_cell_no_update(
+                                max(0, self._current_cell()[0]), tgt)
+                        return True   # Qt 기본 드래그(경계 내 clamp) 대신 우리 선택 사용
+                    if axis == "row" and self._header_anchor_row is not None:
+                        tgt = self._row_under_global(event.globalPos())
+                        if tgt is not None and tgt >= 0:
+                            self._select_row_range(self._header_anchor_row, tgt)
+                            self._set_current_cell_no_update(
+                                tgt, max(0, self._current_cell()[1]))
+                        return True
+            elif et == QEvent.MouseButtonRelease:
+                self._header_drag_axis = None
+        return super().eventFilter(obj, event)
 
     # ── 사용자 헤더 크기 추적 ────────────────────────────────────────────────
     def _on_section_h_resized(self, logical_index: int, _old: int, new_size: int):
