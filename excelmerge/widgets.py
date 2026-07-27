@@ -924,6 +924,58 @@ class ExcelTableView(QTableView):
             sm.setCurrentIndex(self._model.index(r, c),
                                QItemSelectionModel.ClearAndSelect)
 
+    # ── 키보드 방향키 내비게이션 (고정 밴드 인지) ────────────────────────────
+    # 고정 열(키 열 이하)은 본체에서 숨김이라 Qt 기본 moveCursor 가 이를 건너뛴다
+    # (A에서 →누르면 B가 아니라 E로 점프). 그래서 방향키는 '논리적 한 칸'으로 직접 이동한다:
+    #  - 좌/우: 열 ±1 (고정 열에도 착지 — 오버레이가 그림). 데이터 열 범위로 clamp.
+    #  - 위/아래: '변경 행만 보기'로 숨은 행은 건너뛰고 다음 보이는 행으로(_next_visible_row).
+    def moveCursor(self, action, modifiers):
+        cur = self.currentIndex()
+        m = self._model
+        dr, dc = m.data_rows, m.data_cols
+        if dr <= 0 or dc <= 0:
+            return super().moveCursor(action, modifiers)
+        r = cur.row() if cur.isValid() else 0
+        c = cur.column() if cur.isValid() else 0
+        A = QAbstractItemView
+        if action == A.MoveLeft:
+            c = max(0, c - 1)
+        elif action == A.MoveRight:
+            c = min(dc - 1, c + 1)
+        elif action in (A.MoveUp, A.MovePrevious):
+            r = max(0, min(dr - 1, self._next_visible_row(r, -1)))
+        elif action in (A.MoveDown, A.MoveNext):
+            r = max(0, min(dr - 1, self._next_visible_row(r, +1)))
+        elif action == A.MoveHome:
+            c = 0
+        elif action == A.MoveEnd:
+            c = dc - 1
+        else:
+            return super().moveCursor(action, modifiers)   # PageUp/Down 등은 기본에 맡김
+        return m.index(r, c)
+
+    def scrollTo(self, index, hint=QAbstractItemView.EnsureVisible):
+        """틀 고정 인지 스크롤 — 고정 밴드에 걸친 셀은 오버레이가 항상 그리므로 그 축은
+        스크롤하지 않는다(그러지 않으면 키 행으로 이동 시 본체가 그 행까지 스크롤돼 고정이
+        깨진다). '자유' 축만 보이도록 스크롤한다."""
+        fc = getattr(self, "_freeze", None)
+        if index.isValid() and fc is not None and getattr(fc, "active", False):
+            cf = index.column() < fc._n_cols
+            rf = index.row() < fc._n_rows
+            if cf and rf:
+                return   # 코너(고정 행·열) — 항상 보임, 스크롤 불필요
+            if cf:       # 고정 열·자유 행 → 세로만(행 보이게), 가로는 현재 유지
+                c = self.columnAt(1)
+                if c < 0:
+                    c = min(fc._n_cols, self.columnCount() - 1)
+                return super().scrollTo(self._model.index(index.row(), c), hint)
+            if rf:       # 고정 행·자유 열 → 가로만(열 보이게), 세로는 현재 유지
+                r = self.rowAt(1)
+                if r < 0:
+                    r = min(fc._n_rows, self.rowCount() - 1)
+                return super().scrollTo(self._model.index(r, index.column()), hint)
+        return super().scrollTo(index, hint)
+
     # ── 본체→왼쪽 고정 열 밴드로 넘어가는 드래그 선택 ─────────────────────────
     # 본체에서 시작한 드래그가 왼쪽 고정 열(키 열 및 그 좌측)로 넘어가면, 본체엔 고정 열이
     # 숨겨져 있어 Qt 기본 드래그가 고정 열을 잡지 못한다(예: 본체에서 K→E 드래그 후 D로 못 이어짐).
