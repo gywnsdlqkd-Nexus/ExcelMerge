@@ -251,7 +251,7 @@ class DiffView(QWidget):
         QThread가 실행 중인 채로 파괴되면 'QThread destroyed while running' 크래시가 나므로,
         시그널을 막아 종료 중 도착 결과가 슬롯을 건드리지 못하게 한 뒤 완료를 기다린다
         (저장 워커는 중간에 끊기면 데이터 위험이라 특히 끝까지 대기)."""
-        workers = [self._load_worker, self._formula_flag_worker,
+        workers = [self._load_worker, self._diff_worker, self._formula_flag_worker,
                    self._staged_merge_worker, self._sheet_diff_worker,
                    self._preview_workers.get("a"), self._preview_workers.get("b")]
         for w in workers:
