@@ -1619,15 +1619,6 @@ class ExcelTableView(QTableView):
             return True
         return self._model.display_text(r, c) == ""
 
-    def _next_visible_row(self, r: int, dr: int) -> int:
-        """dr 방향의 다음 '보이는' 행 — 숨겨진 행(변경 행만 보기)은 건너뛴다.
-        범위 밖이면 범위 밖 인덱스를 그대로 반환한다."""
-        max_r = self.rowCount() - 1
-        n = r + dr
-        while 0 <= n <= max_r and self.isRowHidden(n):
-            n += dr
-        return n
-
     def _jump_target(self, r: int, c: int, dr: int, dc: int) -> tuple:
         """엑셀의 Ctrl+방향키 시맨틱으로 점프 대상 (row, col) 반환.
         세로 이동은 보이는 행만 밟는다 — 숨겨진 행에는 착지하지 않는다."""
@@ -1638,7 +1629,14 @@ class ExcelTableView(QTableView):
 
         def step(rr, cc):
             if dr:
-                return self._next_visible_row(rr, dr), cc
+                # _next_visible_row 는 경계(더 갈 보이는 행 없음)에서 start(=rr)를 그대로
+                # 돌려준다. 그 값을 그대로 쓰면 in_range 가 계속 참이라 아래 while 루프가
+                # 무한 반복된다(격자 맨끝/맨앞에서 Ctrl+↕ → UI 행). 더 나아갈 수 없으면
+                # off-grid 센티넬로 바꿔 in_range 가 루프를 종료시키게 한다.
+                nn = self._next_visible_row(rr, dr)
+                if nn == rr:
+                    nn = max_r + 1 if dr > 0 else -1
+                return nn, cc
             return rr, cc + dc
 
         def in_range(rr, cc):
