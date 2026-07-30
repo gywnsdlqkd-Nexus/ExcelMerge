@@ -245,6 +245,7 @@ class _FrozenView(QTableView):
         super().__init__(host)
         self._host = host
         self._drag_anchor = None   # (row, col) 모델 좌표 — 오버레이↔본체 경계를 넘는 드래그 선택 앵커
+        self._drag_custom = False  # 이번 드래그에서 _extend_drag로 직접 선택을 만들었는가
 
     def wheelEvent(self, event):
         self._host.wheelEvent(event)
@@ -263,6 +264,7 @@ class _FrozenView(QTableView):
         if event.button() == Qt.LeftButton:
             idx = self.indexAt(event.pos())
             self._drag_anchor = (idx.row(), idx.column()) if idx.isValid() else None
+            self._drag_custom = False
         super().mousePressEvent(event)
 
     def mouseMoveEvent(self, event):
@@ -272,11 +274,22 @@ class _FrozenView(QTableView):
         if (self._drag_anchor is not None and (event.buttons() & Qt.LeftButton)
                 and not (event.modifiers() & (Qt.ControlModifier | Qt.ShiftModifier))):
             self._extend_drag(event.globalPos())
+            self._drag_custom = True
             event.accept()
             return
         super().mouseMoveEvent(event)
 
     def mouseReleaseEvent(self, event):
+        # 커스텀 드래그(_extend_drag)로 이동을 소비했으면 Qt는 드래그 상태로 진입하지 못한 채라,
+        # super()의 릴리즈가 이를 '클릭'으로 보고 선택을 릴리즈 셀 하나로 리셋(고정 셀이면 0으로
+        # 붕괴)해 방금 만든 다중 선택을 지운다(A열 키+ A1,B1 선택 시 풀림 버그). 커스텀 드래그였다면
+        # super()를 건너뛰고 상태만 정리해 선택을 보존한다.
+        if self._drag_custom:
+            self._drag_custom = False
+            self._drag_anchor = None
+            self.setState(QAbstractItemView.NoState)
+            event.accept()
+            return
         self._drag_anchor = None
         super().mouseReleaseEvent(event)
 
@@ -847,6 +860,7 @@ class ExcelTableView(QTableView):
         self._header_anchor_row: int | None = None
         # 본체에서 시작한 드래그가 왼쪽 고정 열 밴드로 넘어갈 때의 앵커 (row, col) 모델 좌표.
         self._body_drag_anchor = None
+        self._body_drag_custom = False   # 이번 드래그에서 경계 넘기 커스텀 선택을 만들었는가
         # 헤더 드래그 선택(경계 넘기): 이벤트 필터를 건 헤더 → 축('col'/'row'), 진행 중 축.
         self._header_axis = {}
         self._header_drag_axis = None
@@ -933,6 +947,7 @@ class ExcelTableView(QTableView):
         if event.button() == Qt.LeftButton:
             idx = self.indexAt(event.pos())
             self._body_drag_anchor = (idx.row(), idx.column()) if idx.isValid() else None
+            self._body_drag_custom = False
         super().mousePressEvent(event)
 
     def mouseMoveEvent(self, event):
@@ -949,11 +964,21 @@ class ExcelTableView(QTableView):
                     ar, ac = self._body_drag_anchor
                     self._select_range(ar, ac, row, col)
                     self._set_current_cell_no_update(row, col)
+                    self._body_drag_custom = True
                     event.accept()
                     return
         super().mouseMoveEvent(event)
 
     def mouseReleaseEvent(self, event):
+        # 커스텀 경계-넘기 드래그로 이동을 소비했으면 Qt는 드래그 상태로 진입하지 못한 채라,
+        # super()의 릴리즈가 이를 '클릭'으로 보고 선택을 리셋해 방금 만든 선택을 지운다
+        # (_FrozenView와 동일 이유). 커스텀 드래그였다면 super()를 건너뛰고 상태만 정리한다.
+        if self._body_drag_custom:
+            self._body_drag_custom = False
+            self._body_drag_anchor = None
+            self.setState(QAbstractItemView.NoState)
+            event.accept()
+            return
         self._body_drag_anchor = None
         super().mouseReleaseEvent(event)
 
