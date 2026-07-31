@@ -13,10 +13,10 @@ import re
 
 from PyQt5.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout,
-    QPushButton, QLabel, QSplitter, QLineEdit, QMessageBox,
+    QPushButton, QSplitter, QMessageBox,
     QShortcut, QAbstractItemView,
 )
-from PyQt5.QtCore import Qt, QSize, pyqtSignal, QThread
+from PyQt5.QtCore import Qt, pyqtSignal, QThread
 from PyQt5.QtGui import QIcon, QKeySequence
 from openpyxl.utils import get_column_letter
 
@@ -28,7 +28,7 @@ from .theme import APP_QSS, DIFF_COLORS, ui_font, ext_tab_icon
 from .constants import STATUS_SAME, DIR_A2B, DIR_B2A
 from .compare_toolbar import build_find_box, add_legend
 from .widgets import (
-    ExcelTableView, MinimapScrollBar, make_find_icon, SheetTabBar, FreezeController,
+    ExcelTableView, MinimapScrollBar, SheetTabBar, FreezeController,
 )
 from .workers import (
     LoadWorker, PreviewWorker, StagedMergeWorker, FormulaFlagWorker, SheetDiffWorker,
@@ -853,9 +853,6 @@ class DiffView(QWidget):
         self.panel_a.table.setFocus()
 
     # ── 찾기 ──
-    def _make_find_icon(self, kind: str) -> QIcon:
-        return make_find_icon(kind)   # 공용 구현(widgets)
-
     def _focus_find(self):
         """Ctrl+F — 찾기 입력란 포커스 + 전체 선택."""
         if self.find_edit.isEnabled():

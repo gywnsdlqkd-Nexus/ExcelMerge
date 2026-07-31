@@ -1,8 +1,9 @@
-"""리팩토링 단계별 스모크 테스트.
+"""로더 → diff → 테이블 표시 E2E 스모크 테스트.
 
-QT_QPA_PLATFORM=offscreen 환경에서 로더 → diff → 테이블 표시 파이프라인이
-동작하는지 검증한다. 모놀리스/패키지 어느 단계에서도 실행 가능하도록
-excelmerge 패키지를 우선 시도하고 실패 시 excel_diff_merge에서 가져온다.
+QT_QPA_PLATFORM=offscreen 환경에서 파이프라인 전체(로더 → compute_diff →
+DiffTableModel 표시 → staged 오버라이드 → 색상)를 한 번에 검증한다.
+유일한 E2E 경로이므로 pytest 가 수집하도록 `test_` 이름을 유지할 것.
+(단독 실행도 가능: `python tests/smoke_test.py`)
 """
 import os
 import sys
@@ -14,28 +15,11 @@ ROOT = os.path.dirname(HERE)                               # 프로젝트 루트
 sys.path.insert(0, ROOT)                                   # excelmerge/·진입점 import용
 FIXTURE_DIR = os.path.join(HERE, "fixtures")
 
-try:
-    from excelmerge.loaders import load_values_any
-    from excelmerge.diff_engine import compute_diff
-except ImportError:
-    from excel_diff_merge import load_values_any, compute_diff
-
-try:
-    from excelmerge.widgets import EXTRA_ROWS
-except ImportError:
-    from excel_diff_merge import EXTRA_ROWS
-
-try:
-    from excelmerge.theme import DIFF_COLORS
-except ImportError:
-    from excel_diff_merge import DIFF_COLORS
-
-import excel_diff_merge  # 진입점이 항상 import 가능해야 한다
-
-try:
-    from excelmerge.main_window import MainWindow
-except ImportError:
-    from excel_diff_merge import MainWindow
+from excelmerge.loaders import load_values_any
+from excelmerge.diff_engine import compute_diff
+from excelmerge.diff_model import EXTRA_ROWS
+from excelmerge.theme import DIFF_COLORS
+from excelmerge.main_window import MainWindow
 
 
 def make_fixtures():
@@ -71,7 +55,11 @@ def display_text(table, r, c):
     return item.text() if item is not None else ""
 
 
-def main():
+def test_smoke_pipeline():
+    # 진입점 모듈이 항상 import 가능해야 한다(빌드/배포가 이 모듈을 실행한다).
+    import excel_diff_merge
+    assert hasattr(excel_diff_merge, "main"), "진입점 excel_diff_merge.main 없음"
+
     path_a, path_b = make_fixtures()
 
     # 1. 로더 — 값(계산값)만 로드
@@ -91,6 +79,7 @@ def main():
     # 3. UI 파이프라인
     from PyQt5.QtWidgets import QApplication
     app = QApplication.instance() or QApplication([])
+    assert app is not None          # 위젯 생성 동안 QApplication 참조 유지
     win = MainWindow()
     # MainWindow는 탭 셸 — 실제 비교 UI는 활성 탭의 DiffView에 있다.
     view = win.tabs.currentWidget()
@@ -120,4 +109,4 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    test_smoke_pipeline()

@@ -19,8 +19,6 @@ _TAG_SHEETDATA = f"{{{_NS}}}sheetData"
 _TAG_ROW = f"{{{_NS}}}row"
 _TAG_C = f"{{{_NS}}}c"
 _TAG_F = f"{{{_NS}}}f"
-_TAG_IS = f"{{{_NS}}}is"
-_TAG_T = f"{{{_NS}}}t"
 _TAG_V = f"{{{_NS}}}v"
 
 

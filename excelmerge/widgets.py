@@ -19,7 +19,6 @@ from PyQt5 import sip
 from openpyxl.utils import get_column_letter
 
 from .diff_model import DiffTableModel
-from .diff_model import EXTRA_ROWS as EXTRA_ROWS  # smoke_test 재노출
 from .loaders import _SUPPORTED_EXTS
 from .constants import DIR_A2B, DIR_B2A
 from .theme import (

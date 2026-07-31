@@ -625,7 +625,6 @@ def test_goto_changed_focus_and_selection_color():
 def test_load_xlsx_with_empty_fill():
     """styles.xml에 빈 <fill/>이 있는 파일도 로드되는지 회귀 테스트.
     openpyxl은 빈 fill에 'expected Fill' TypeError를 던진다 — 정제 후 재시도해야 함."""
-    import io
     import re
     import zipfile
     import tempfile
