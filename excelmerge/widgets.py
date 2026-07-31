@@ -265,7 +265,6 @@ class _FrozenView(QTableView):
             idx = self.indexAt(event.pos())
             self._drag_anchor = (idx.row(), idx.column()) if idx.isValid() else None
             self._drag_custom = False
-            self._host._drag_selecting = True   # 오버레이 드래그 중 A↔B 미러 억제(공유 모델)
         super().mousePressEvent(event)
 
     def mouseMoveEvent(self, event):
@@ -290,11 +289,9 @@ class _FrozenView(QTableView):
             self._drag_anchor = None
             self.setState(QAbstractItemView.NoState)
             event.accept()
-            self._host._end_drag_select()
             return
         self._drag_anchor = None
         super().mouseReleaseEvent(event)
-        self._host._end_drag_select()
 
     def _extend_drag(self, gp):
         """커서 전역좌표(gp)로 목표 (row, col)을 정하고 본체 공유 모델에 사각형 선택을 만든다.
@@ -836,7 +833,6 @@ class ExcelTableView(QTableView):
     columns_exclude_set = pyqtSignal(list, bool)   # (cols, exclude) — True: 제외 추가, False: 제외 해제
     column_resized    = pyqtSignal(int, int)   # (col, new_width) — 사용자 조작에 의한 변경만
     row_resized       = pyqtSignal(int, int)   # (row, new_height) — 사용자 조작에 의한 변경만
-    drag_selection_finished = pyqtSignal()     # 드래그 선택 종료 — A↔B 미러를 1회만 수행하도록
 
     def __init__(self, side: str, parent=None):
         super().__init__(parent)
@@ -868,10 +864,6 @@ class ExcelTableView(QTableView):
         # 헤더 드래그 선택(경계 넘기): 이벤트 필터를 건 헤더 → 축('col'/'row'), 진행 중 축.
         self._header_axis = {}
         self._header_drag_axis = None
-        self._header_drag_target = None   # 헤더 드래그 스로틀: 마지막으로 선택한 대상 열/행
-        # 드래그(셀/헤더/오버레이) 진행 중이면 A↔B 선택 미러를 매 스텝 하지 않고(대형 선택에서
-        # 미러의 전범위 ClearAndSelect가 O(선택셀수)라 극심한 지연) 드래그 종료 시 1회만 미러한다.
-        self._drag_selecting = False
         self.setFont(ui_font(9))
         self.horizontalHeader().setSectionResizeMode(QHeaderView.Interactive)
         # 키/제외 열 헤더의 PNG 아이콘(DecorationRole) 가시성 확보용 크기.
@@ -951,18 +943,11 @@ class ExcelTableView(QTableView):
     # 숨겨져 있어 Qt 기본 드래그가 고정 열을 잡지 못한다(예: 본체에서 K→E 드래그 후 D로 못 이어짐).
     # 오버레이가 본체와 selection model 을 공유하므로, 커서가 본체 뷰포트 왼쪽을 벗어나면
     # 앵커→고정열 사각형으로 직접 확장한다. (반대 방향 = 오버레이→본체 는 _FrozenView가 처리.)
-    def _end_drag_select(self):
-        """드래그 선택 종료 — 진행 중이었으면 A↔B 미러를 1회만 수행하도록 신호."""
-        if self._drag_selecting:
-            self._drag_selecting = False
-            self.drag_selection_finished.emit()
-
     def mousePressEvent(self, event):
         if event.button() == Qt.LeftButton:
             idx = self.indexAt(event.pos())
             self._body_drag_anchor = (idx.row(), idx.column()) if idx.isValid() else None
             self._body_drag_custom = False
-            self._drag_selecting = True   # 드래그 중 A↔B 미러 억제(종료 시 1회 미러)
         super().mousePressEvent(event)
 
     def mouseMoveEvent(self, event):
@@ -993,11 +978,9 @@ class ExcelTableView(QTableView):
             self._body_drag_anchor = None
             self.setState(QAbstractItemView.NoState)
             event.accept()
-            self._end_drag_select()
             return
         self._body_drag_anchor = None
         super().mouseReleaseEvent(event)
-        self._end_drag_select()
 
     @staticmethod
     def _frozen_col_at(fc, gp):
@@ -1126,33 +1109,24 @@ class ExcelTableView(QTableView):
                     self._header_drag_axis = axis
                 else:
                     self._header_drag_axis = None
-                if event.button() == Qt.LeftButton:
-                    self._drag_selecting = True   # 헤더 드래그 중 A↔B 미러 억제(종료 시 1회)
-                self._header_drag_target = None    # 스로틀 기준 초기화
             elif et == QEvent.MouseMove:
                 if self._header_drag_axis == axis and (event.buttons() & Qt.LeftButton):
-                    # 스로틀: 대상 열/행이 바뀔 때만 재선택 — 한 열/행 위 픽셀 이동마다 전열/전행
-                    # 범위를 ClearAndSelect 하는 중복을 없앤다(대형 파일 지연 완화).
                     if axis == "col" and self._header_anchor_col is not None:
                         tgt = self._col_under_global(event.globalPos())
-                        if tgt is not None and tgt >= 0 and tgt != self._header_drag_target:
-                            self._header_drag_target = tgt
+                        if tgt is not None and tgt >= 0:
                             self._select_column_range(self._header_anchor_col, tgt)
                             self._set_current_cell_no_update(
                                 max(0, self._current_cell()[0]), tgt)
                         return True   # Qt 기본 드래그(경계 내 clamp) 대신 우리 선택 사용
                     if axis == "row" and self._header_anchor_row is not None:
                         tgt = self._row_under_global(event.globalPos())
-                        if tgt is not None and tgt >= 0 and tgt != self._header_drag_target:
-                            self._header_drag_target = tgt
+                        if tgt is not None and tgt >= 0:
                             self._select_row_range(self._header_anchor_row, tgt)
                             self._set_current_cell_no_update(
                                 tgt, max(0, self._current_cell()[1]))
                         return True
             elif et == QEvent.MouseButtonRelease:
                 self._header_drag_axis = None
-                self._header_drag_target = None
-                self._end_drag_select()
         return super().eventFilter(obj, event)
 
     # ── 사용자 헤더 크기 추적 ────────────────────────────────────────────────

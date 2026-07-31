@@ -222,10 +222,6 @@ class DiffView(QWidget):
             # selectionModel().selectionChanged 사용 (selectionModel은 ctor에서 1회 생성)
             src.table.selectionModel().selectionChanged.connect(
                 lambda *_, s=src.table, d=dst.table: self._sync_selection(s, d))
-            # 드래그 선택 중에는 매 스텝 미러하지 않고(대형 선택 미러가 O(선택셀수)라 지연),
-            # 드래그 종료 시 1회만 미러한다.
-            src.table.drag_selection_finished.connect(
-                lambda s=src.table, d=dst.table: self._sync_selection(s, d))
             # 셀값란 높이 스플리터 동기화 (A↔B 대칭)
             src.v_split.splitterMoved.connect(
                 lambda _pos, _i, s=src, d=dst: self._sync_splitter(s, d))
@@ -1332,10 +1328,6 @@ class DiffView(QWidget):
 
     def _sync_selection(self, src: ExcelTableView, dst: ExcelTableView):
         if self._syncing_selection or src._populating or dst._populating:
-            return
-        # 드래그 진행 중이면 미러 보류 — 종료 시 drag_selection_finished 로 1회만 미러한다
-        # (대형 선택에서 매 스텝 전범위 ClearAndSelect 미러가 O(선택셀수)라 극심한 지연).
-        if getattr(src, "_drag_selecting", False):
             return
         self._syncing_selection = True
         try:
