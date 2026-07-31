@@ -70,12 +70,22 @@ class DiffTableModel(QAbstractTableModel):
         # 담고 own/other는 리셋 없이는 안 바뀌므로 안전. 리셋 경로에서만 무효화한다.
         # (staged/merged 게이팅은 diff_char_ranges가 조회 전에 재평가 → 스테일 없음)
         self._char_range_cache: dict = {}
+        # col/row 에 값이 하나라도 있는지 메모이즈 — Ctrl(+Shift)+방향키 블록 점프가
+        # 열/행을 훑으며 판정을 반복 호출해 전체 스캔이 누적되던 것을 없앤다.
+        # 무효화: 리셋 3경로 + notify_cells(저장 확정 시 diff_matrix 가 제자리 변형됨).
+        self._col_values_cache: dict = {}
+        self._row_values_cache: dict = {}
+
+    def _clear_value_caches(self):
+        self._col_values_cache.clear()
+        self._row_values_cache.clear()
 
     # ── 모드 전환 (전부 모델 리셋) ────────────────────────────────────────────
     def set_diff_data(self, diff_matrix: list, row_meta: list,
                       staged: dict, merged: set, excluded_cols: set):
         self.beginResetModel()
         self._char_range_cache.clear()
+        self._clear_value_caches()
         self._mode = MODE_DIFF
         self._diff_matrix = diff_matrix
         self._row_meta = row_meta or []
@@ -91,6 +101,7 @@ class DiffTableModel(QAbstractTableModel):
     def set_preview_data(self, data: list):
         self.beginResetModel()
         self._char_range_cache.clear()
+        self._clear_value_caches()
         self._mode = MODE_PREVIEW
         self._preview = data
         self._diff_matrix = []
@@ -113,6 +124,7 @@ class DiffTableModel(QAbstractTableModel):
     def clear(self):
         self.beginResetModel()
         self._char_range_cache.clear()
+        self._clear_value_caches()
         self._mode = MODE_EMPTY
         self._diff_matrix = []
         self._row_meta = []
@@ -127,6 +139,9 @@ class DiffTableModel(QAbstractTableModel):
         """변경된 (r, c) 집합을 행별 col-span으로 병합해 dataChanged 방출."""
         if not cells:
             return
+        # 저장 확정 경로는 모델 리셋 없이 diff_matrix 셀을 제자리 변형(a/b 값이 서로
+        # 복사됨)하므로 값 유무 판정이 뒤집힐 수 있다 → 보수적으로 전체 무효화.
+        self._clear_value_caches()
         by_row: dict[int, list[int]] = {}
         for (r, c) in cells:
             if 0 <= r < self._data_rows and 0 <= c < self._data_cols:
@@ -195,7 +210,16 @@ class DiffTableModel(QAbstractTableModel):
     def col_has_values(self, c: int) -> bool:
         """열에 값이 하나라도 있는지 (A/B 어느 쪽이든).
         엑셀 유령 셀(서식만 있고 값 없음) 열과 여분 열은 False —
-        헤더 단위 Ctrl+Shift 점프의 빈/값 판정에 쓴다."""
+        헤더 단위 Ctrl+Shift 점프의 빈/값 판정에 쓴다.
+
+        점프 1회가 열들을 훑으며 반복 호출하므로 결과를 메모이즈한다(열당 O(R) → 1회)."""
+        hit = self._col_values_cache.get(c)
+        if hit is not None:
+            return hit
+        self._col_values_cache[c] = res = self._compute_col_has_values(c)
+        return res
+
+    def _compute_col_has_values(self, c: int) -> bool:
         if self._mode == MODE_DIFF:
             for row in self._diff_matrix:
                 if c < len(row) and (row[c][1] != "" or row[c][2] != ""):
@@ -208,7 +232,14 @@ class DiffTableModel(QAbstractTableModel):
         return False
 
     def row_has_values(self, r: int) -> bool:
-        """행에 값이 하나라도 있는지 (A/B 어느 쪽이든)."""
+        """행에 값이 하나라도 있는지 (A/B 어느 쪽이든). col_has_values 와 동일하게 메모이즈."""
+        hit = self._row_values_cache.get(r)
+        if hit is not None:
+            return hit
+        self._row_values_cache[r] = res = self._compute_row_has_values(r)
+        return res
+
+    def _compute_row_has_values(self, r: int) -> bool:
         if not (0 <= r < self._data_rows):
             return False
         if self._mode == MODE_DIFF:

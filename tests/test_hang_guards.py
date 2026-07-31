@@ -48,3 +48,32 @@ def test_mirror_scroll_reentrancy_guard(qapp):
         assert dv._syncing_scroll is False   # 항상 정상 복원(try/finally)
     finally:
         w.close(); w.deleteLater(); qapp.processEvents()
+
+
+def test_value_caches_memoize_and_invalidate(qapp):
+    """col/row_has_values 메모이즈 — 반복 호출은 재스캔하지 않고,
+    저장 확정(notify_cells)으로 diff_matrix 가 제자리 변형되면 무효화돼야 한다."""
+    from excelmerge.constants import STATUS_SAME, STATUS_MODIFIED
+    m = DiffTableModel("a")
+    # 2열: 0열엔 값 있음, 1열은 A/B 모두 빈 값
+    dm = [[(STATUS_SAME, "x", "x"), (STATUS_SAME, "", "")],
+          [(STATUS_SAME, "y", "y"), (STATUS_SAME, "", "")]]
+    m.set_diff_data(dm, [(0, 0), (1, 1)], {}, set(), set())
+
+    assert m.col_has_values(0) is True
+    assert m.col_has_values(1) is False
+    # 캐시 적재 확인 + 재호출이 같은 결과
+    assert m._col_values_cache == {0: True, 1: False}
+    assert m.col_has_values(1) is False
+
+    # 저장 확정 경로 시뮬레이션: 빈 열에 값이 복사되어 들어옴(제자리 변형, 리셋 없음)
+    dm[0][1] = (STATUS_MODIFIED, "new", "new")
+    m.notify_cells({(0, 1)})
+    assert m._col_values_cache == {}, "notify_cells 후 캐시가 무효화되지 않음"
+    assert m.col_has_values(1) is True, "제자리 변형 후 스테일 결과 반환"
+
+    # row 쪽도 동일하게 메모이즈/무효화
+    assert m.row_has_values(0) is True
+    assert m._row_values_cache == {0: True}
+    m.notify_cells({(0, 0)})
+    assert m._row_values_cache == {}
