@@ -824,6 +824,82 @@ class FreezeController(QObject):
             host.row_resized.emit(idx, new)
 
 
+class _Axis:
+    """열/행 대칭 로직의 '축' 서술자 — 같은 알고리즘을 두 축에 공유하기 위한 파라미터.
+
+    이 파일의 과거 버그 다수가 열 쪽만 고치고 행 쪽을 빼먹은(또는 그 반대) **축 불일치**
+    였다. 그래서 대칭 연산의 알고리즘은 `_axis_*` 한 곳에만 두고, 기존 이름
+    (`_select_col`/`_select_row` 등)은 축만 넘기는 얇은 위임으로 남긴다 — 호출부와
+    테스트 표면은 그대로 유지하면서 한쪽만 고쳐지는 일을 구조적으로 막는다.
+
+    주의: 아래 좌표/오버레이 매핑은 '이 축의 고정 밴드를 **실제로 그리는** 오버레이'를
+    쓴다(열=left, 행=top). 본체에서는 고정 밴드가 숨김이라 매핑이 틀어지기 때문이다.
+    """
+    __slots__ = ("name", "is_col")
+
+    def __init__(self, is_col: bool):
+        self.is_col = is_col
+        self.name = "col" if is_col else "row"
+
+    # ── 뷰/모델 크기 ─────────────────────────────────────────────────────────
+    def count(self, view) -> int:
+        """이 축의 섹션 수(열축이면 열 수)."""
+        return view.columnCount() if self.is_col else view.rowCount()
+
+    def cross_count(self, view) -> int:
+        """직교 축의 섹션 수(열축이면 행 수) — 전체 열/행 선택의 길이."""
+        return view.rowCount() if self.is_col else view.columnCount()
+
+    def cross_data_count(self, model) -> int:
+        """직교 축의 데이터 개수(열축이면 데이터 행 수)."""
+        return model.data_rows if self.is_col else model.data_cols
+
+    def index(self, model, i: int, cross: int):
+        """이 축 i, 직교 축 cross 위치의 QModelIndex."""
+        return model.index(cross, i) if self.is_col else model.index(i, cross)
+
+    def kind(self, model, i: int, cross: int) -> str:
+        return model.cell_kind(cross, i) if self.is_col else model.cell_kind(i, cross)
+
+    def of_staged(self, coord) -> int:
+        """staged 좌표 (r, c) 에서 이 축 성분만."""
+        r, c = coord
+        return c if self.is_col else r
+
+    # ── 선택 range ───────────────────────────────────────────────────────────
+    def lo(self, rng) -> int:
+        return rng.left() if self.is_col else rng.top()
+
+    def hi(self, rng) -> int:
+        return rng.right() if self.is_col else rng.bottom()
+
+    # ── 좌표 / 히트테스트 ────────────────────────────────────────────────────
+    def pos(self, point) -> int:
+        return point.x() if self.is_col else point.y()
+
+    def section_at(self, view, v: int) -> int:
+        return view.columnAt(v) if self.is_col else view.rowAt(v)
+
+    def overlay(self, fc):
+        """이 축의 고정 밴드를 실제로 그리는 오버레이(열=left, 행=top)."""
+        return fc.left if self.is_col else fc.top
+
+    def frozen_count(self, fc) -> int:
+        return fc._n_cols if self.is_col else fc._n_rows
+
+    # ── 뷰의 축별 헬퍼 위임 ──────────────────────────────────────────────────
+    def full_selected(self, view):
+        return (view._full_columns_selected() if self.is_col
+                else view._full_rows_selected())
+
+    def touched(self, view):
+        return view._touched_cols() if self.is_col else view._touched_rows()
+
+
+AX_COL = _Axis(True)
+AX_ROW = _Axis(False)
+
+
 class ExcelTableView(QTableView):
     stage_requested   = pyqtSignal(str)   # direction: 'a_to_b' | 'b_to_a'
     unstage_requested = pyqtSignal()
@@ -982,27 +1058,27 @@ class ExcelTableView(QTableView):
         super().mouseReleaseEvent(event)
 
     @staticmethod
+    def _frozen_axis_at(ax: _Axis, fc, gp):
+        """전역좌표 gp 아래의 고정 열/행 인덱스. 밴드 앞(행 헤더 등)이면 첫 고정 섹션(0),
+        끝을 넘으면 마지막 고정 섹션으로 clamp.
+
+        이 축의 고정 밴드를 **실제로 그리는** 오버레이(열=left, 행=top) 기준으로 매핑한다 —
+        고정 섹션이 숨김인 본체/반대 오버레이로 매핑하면 좌표가 틀어지기 때문."""
+        ov = ax.overlay(fc)
+        p = ov.viewport().mapFromGlobal(gp)
+        v = ax.pos(p)
+        s = ax.section_at(ov, v)
+        if s < 0:
+            s = 0 if v < 0 else ax.frozen_count(fc) - 1
+        return s
+
+    @staticmethod
     def _frozen_col_at(fc, gp):
-        """전역좌표 gp 아래의 고정 열 인덱스(0..key_col). 고정 밴드 왼쪽(행 헤더 등)이면 첫
-        고정 열(0), 오른쪽 끝을 넘으면 마지막 고정 열로 clamp. left 오버레이 기준으로 매핑한다
-        (left 는 고정 열을 실제로 그리므로, 고정 열이 숨김인 top/본체로 매핑할 때의 오류를 피한다)."""
-        left = fc.left
-        lv = left.viewport().mapFromGlobal(gp)
-        c = left.columnAt(lv.x())
-        if c < 0:
-            c = 0 if lv.x() < 0 else fc._n_cols - 1
-        return c
+        return ExcelTableView._frozen_axis_at(AX_COL, fc, gp)
 
     @staticmethod
     def _frozen_row_at(fc, gp):
-        """_frozen_col_at 의 세로 대칭 — 고정 행 인덱스(0..key_row). top 오버레이가 고정 행을
-        실제로 그리므로 그 기준으로 매핑한다(고정 행이 숨김인 left/본체 매핑 오류 회피)."""
-        top = fc.top
-        tv = top.viewport().mapFromGlobal(gp)
-        r = top.rowAt(tv.y())
-        if r < 0:
-            r = 0 if tv.y() < 0 else fc._n_rows - 1
-        return r
+        return ExcelTableView._frozen_axis_at(AX_ROW, fc, gp)
 
     def _drag_col_at(self, x):
         """드래그 확장용: 본체 뷰포트 x 아래의 목표 데이터 열. 마지막 열보다 오른쪽(열이 뷰포트를
@@ -1302,75 +1378,71 @@ class ExcelTableView(QTableView):
         self._excluded_cols = set(cols)
         self._model.set_excluded_cols(self._excluded_cols)
 
-    def _col_has_changed(self, col: int) -> bool:
-        """지정 열에 changed 셀이 있는가 — 첫 changed에서 조기 종료(O(발견까지의 행))."""
+    # ── 축 대칭 연산 (열/행 공용 구현 + 축만 넘기는 위임) ──────────────────────
+    # 알고리즘은 _axis_* 하나뿐이다. 열/행 중 한쪽만 고쳐져 생기던 축 불일치 버그를
+    # 구조적으로 막기 위한 것이며, 기존 이름은 호출부·테스트 호환을 위해 유지한다.
+    def _axis_has_changed(self, ax: _Axis, i: int) -> bool:
+        """지정 열/행에 changed 셀이 있는가 — 첫 changed에서 조기 종료."""
         m = self._model
-        return any(m.cell_kind(r, col) == "changed" for r in range(m.data_rows))
+        return any(ax.kind(m, i, x) == "changed"
+                   for x in range(ax.cross_data_count(m)))
+
+    def _axis_have_staged(self, ax: _Axis, items) -> bool:
+        """대상 열/행들 중 하나라도 staged 셀을 포함하는가 — O(#staged)."""
+        want = set(items)
+        return any(ax.of_staged(coord) in want
+                   for coord in self._model.staged_coords())
+
+    def _select_axis(self, ax: _Axis, i: int) -> None:
+        """해당 열/행 전체 셀을 선택 상태로 설정."""
+        sm = self.selectionModel()
+        n = ax.count(self)
+        cross = ax.cross_count(self)
+        if sm is None or cross == 0 or n == 0 or not (0 <= i < n):
+            return
+        model = self.model()
+        sel = QItemSelection(ax.index(model, i, 0), ax.index(model, i, cross - 1))
+        sm.select(sel, QItemSelectionModel.ClearAndSelect)
+
+    def _select_axis_multi(self, ax: _Axis, items) -> None:
+        """여러 열/행 전체 셀을 한 번에 선택 (비연속 지원)."""
+        sm = self.selectionModel()
+        cross = ax.cross_count(self)
+        i_max = ax.count(self) - 1
+        if sm is None or cross == 0 or i_max < 0:
+            return
+        model = self.model()
+        sel = QItemSelection()
+        for i in items:
+            if 0 <= i <= i_max:
+                sel.append(QItemSelectionRange(
+                    ax.index(model, i, 0), ax.index(model, i, cross - 1)))
+        sm.select(sel, QItemSelectionModel.ClearAndSelect)
+
+    def _col_has_changed(self, col: int) -> bool:
+        return self._axis_has_changed(AX_COL, col)
 
     def _row_has_changed(self, row: int) -> bool:
-        m = self._model
-        return any(m.cell_kind(row, c) == "changed" for c in range(m.data_cols))
+        return self._axis_has_changed(AX_ROW, row)
 
     def _cols_have_staged(self, cols) -> bool:
-        """대상 열들 중 하나라도 staged 셀을 포함하는가 — staged 집합 기반 O(#staged)."""
-        col_set = set(cols)
-        return any(c in col_set for (_r, c) in self._model.staged_coords())
+        return self._axis_have_staged(AX_COL, cols)
 
     def _rows_have_staged(self, rows) -> bool:
-        row_set = set(rows)
-        return any(r in row_set for (r, _c) in self._model.staged_coords())
+        return self._axis_have_staged(AX_ROW, rows)
 
     def _select_col(self, col: int):
-        """해당 열 전체 셀을 선택 상태로 설정."""
-        sm = self.selectionModel()
-        rows = self.rowCount()
-        cols = self.columnCount()
-        if sm is None or rows == 0 or cols == 0 or not (0 <= col < cols):
-            return
-        model = self.model()
-        sel = QItemSelection(model.index(0, col), model.index(rows - 1, col))
-        sm.select(sel, QItemSelectionModel.ClearAndSelect)
+        self._select_axis(AX_COL, col)
 
     def _select_cols(self, cols) -> None:
-        """여러 열 전체 셀을 한 번에 선택 (비연속 지원) — 다중 열 병합 준비용."""
-        sm = self.selectionModel()
-        rows = self.rowCount()
-        col_max = self.columnCount() - 1
-        if sm is None or rows == 0 or col_max < 0:
-            return
-        model = self.model()
-        sel = QItemSelection()
-        for c in cols:
-            if 0 <= c <= col_max:
-                sel.append(QItemSelectionRange(
-                    model.index(0, c), model.index(rows - 1, c)))
-        sm.select(sel, QItemSelectionModel.ClearAndSelect)
+        """여러 열 전체 셀을 한 번에 선택 — 다중 열 병합 준비용."""
+        self._select_axis_multi(AX_COL, cols)
 
     def _select_row(self, row: int):
-        """해당 행 전체 셀을 선택 상태로 설정."""
-        sm = self.selectionModel()
-        rows = self.rowCount()
-        cols = self.columnCount()
-        if sm is None or rows == 0 or cols == 0 or not (0 <= row < rows):
-            return
-        model = self.model()
-        sel = QItemSelection(model.index(row, 0), model.index(row, cols - 1))
-        sm.select(sel, QItemSelectionModel.ClearAndSelect)
+        self._select_axis(AX_ROW, row)
 
     def _select_rows(self, rows) -> None:
-        """여러 행 전체 셀을 한 번에 선택 (비연속 지원)."""
-        sm = self.selectionModel()
-        cols = self.columnCount()
-        row_max = self.rowCount() - 1
-        if sm is None or cols == 0 or row_max < 0:
-            return
-        model = self.model()
-        sel = QItemSelection()
-        for r in rows:
-            if 0 <= r <= row_max:
-                sel.append(QItemSelectionRange(
-                    model.index(r, 0), model.index(r, cols - 1)))
-        sm.select(sel, QItemSelectionModel.ClearAndSelect)
+        self._select_axis_multi(AX_ROW, rows)
 
     # 전폭 행-밴드에서 '변경 행만 보기'로 숨긴 데이터 행을 한 번에 제거할지 판단하는 상한.
     # 조각(range) 폭주로 페인팅/질의가 느려지는 걸 막는다 — 넘으면 그 밴드는 건드리지 않는다.
@@ -1424,42 +1496,36 @@ class ExcelTableView(QTableView):
         if not dead.isEmpty():
             sm.select(dead, QItemSelectionModel.Deselect)
 
-    def _touched_rows(self) -> set[int]:
-        """선택 range가 닿은 모든 행(부분 선택 포함). O(#range × 평균행폭)."""
+    def _axis_touched(self, ax: _Axis) -> set[int]:
+        """선택 range가 닿은 모든 열/행(부분 선택 포함). O(#range × 평균 폭)."""
         sm = self.selectionModel()
-        rows: set[int] = set()
+        out: set[int] = set()
         if sm is not None:
             for rng in sm.selection():
-                rows.update(range(rng.top(), rng.bottom() + 1))
-        return rows
+                out.update(range(ax.lo(rng), ax.hi(rng) + 1))
+        return out
+
+    def _axis_selected_header(self, ax: _Axis, anchor: int) -> list[int]:
+        """헤더 우클릭 시 대상 열/행 집합 결정.
+        - 우클릭한 열/행이 현재 다중 선택에 포함되어 있으면 그 선택 전체.
+        - 아니면 우클릭한 단일 열/행만.
+        range 기반 — 전체 열/행 선택 우선, 없으면 닿은 집합(selectedIndexes 폴백과 동일 의미)."""
+        items = set(ax.full_selected(self)) or ax.touched(self)
+        if anchor in items and len(items) > 1:
+            return sorted(items)
+        return [anchor]
+
+    def _touched_rows(self) -> set[int]:
+        return self._axis_touched(AX_ROW)
 
     def _touched_cols(self) -> set[int]:
-        sm = self.selectionModel()
-        cols: set[int] = set()
-        if sm is not None:
-            for rng in sm.selection():
-                cols.update(range(rng.left(), rng.right() + 1))
-        return cols
+        return self._axis_touched(AX_COL)
 
     def _selected_header_rows(self, anchor_row: int) -> list[int]:
-        """우클릭 시 대상 행 집합 결정 (열 헤더 _selected_header_cols와 대칭).
-        - 우클릭한 행이 현재 다중 선택에 포함되어 있으면 그 선택 전체.
-        - 아니면 우클릭한 단일 행만.
-        range 기반 — 전체 행 선택 우선, 없으면 닿은 행 집합(기존 selectedIndexes 폴백과 동일 의미)."""
-        rows = set(self._full_rows_selected()) or self._touched_rows()
-        if anchor_row in rows and len(rows) > 1:
-            return sorted(rows)
-        return [anchor_row]
+        return self._axis_selected_header(AX_ROW, anchor_row)
 
     def _selected_header_cols(self, anchor_col: int) -> list[int]:
-        """우클릭 시 대상 열 집합 결정.
-        - 우클릭한 열이 현재 헤더 다중 선택에 포함되어 있으면 그 선택 전체.
-        - 아니면 우클릭한 단일 열만.
-        range 기반 — 전체 열 선택 우선, 없으면 닿은 열 집합. O(#range)."""
-        cols = set(self._full_columns_selected()) or self._touched_cols()
-        if anchor_col in cols and len(cols) > 1:
-            return sorted(cols)
-        return [anchor_col]
+        return self._axis_selected_header(AX_COL, anchor_col)
 
     def _show_header_context_menu(self, pos, header=None):
         # header: 클릭된 실제 가로 헤더(기본=본체). 틀 고정 corner 헤더에서도 호출될 수 있다.
