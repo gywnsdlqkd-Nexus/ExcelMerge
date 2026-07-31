@@ -10,14 +10,15 @@ import sys
 import traceback
 import faulthandler
 
+from .constants import appdata_path
+
 _fault_file = None   # faulthandler가 세그폴트 덤프에 쓰는 파일 핸들(수명 유지용)
 
 _MAX_BYTES = 1024 * 1024   # crash.log 크기 상한(1MB). 초과 시 .1 로 1세대 로테이트.
 
 
 def log_path() -> str:
-    base = os.environ.get("APPDATA") or os.path.expanduser("~")
-    return os.path.join(base, "ExcelMerge", "crash.log")
+    return appdata_path("crash.log")
 
 
 def _rotate_if_large():

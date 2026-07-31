@@ -10,6 +10,7 @@ import json
 import os
 
 from .logutil import log
+from .constants import appdata_path
 
 _DEFAULT_KEY_ROW = 0
 _DEFAULT_KEY_COL = 0
@@ -17,8 +18,7 @@ _LAST_SHEETS_MAX = 50   # 파일별 마지막 시트 기억 상한(오래된 항
 
 
 def _prefs_path() -> str:
-    base = os.environ.get("APPDATA") or os.path.expanduser("~")
-    return os.path.join(base, "ExcelMerge", "prefs.json")
+    return appdata_path("prefs.json")
 
 
 def _read_prefs() -> dict:

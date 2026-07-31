@@ -26,6 +26,7 @@ from PyQt5.QtCore import QThread, pyqtSignal
 from PyQt5.QtWidgets import QMessageBox, QProgressDialog
 
 from . import __version__
+from .constants import appdata_path
 
 # 업데이트 소스 — 둘 중 하나를 설정(둘 다 비면 자동 업데이트 비활성 = 현재 수동 배포 그대로).
 #  1) GITHUB_REPO: 공개 repo "owner/name" — releases/latest API를 매니페스트로 사용(권장).
@@ -43,8 +44,7 @@ _GH_HEADERS = {"User-Agent": "ExcelMerge-Updater",
 
 # ── 소스 결정 ────────────────────────────────────────────────────────────────
 def _config_path() -> str:
-    base = os.environ.get("APPDATA") or os.path.expanduser("~")
-    return os.path.join(base, "ExcelMerge", "update.json")
+    return appdata_path("update.json")
 
 
 def _config() -> dict:

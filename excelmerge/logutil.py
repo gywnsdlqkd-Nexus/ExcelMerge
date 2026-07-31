@@ -9,13 +9,14 @@ import logging
 import logging.handlers
 import os
 
+from .constants import appdata_path
+
 _LOGGER_NAME = "excelmerge"
 _configured = False
 
 
 def log_path() -> str:
-    base = os.environ.get("APPDATA") or os.path.expanduser("~")
-    return os.path.join(base, "ExcelMerge", "excelmerge.log")
+    return appdata_path("excelmerge.log")
 
 
 def get_logger() -> logging.Logger:
