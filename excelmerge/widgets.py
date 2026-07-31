@@ -235,6 +235,114 @@ class DiffHighlightDelegate(QStyledItemDelegate):
         painter.restore()
 
 
+class _Axis:
+    """열/행 대칭 로직의 '축' 서술자 — 같은 알고리즘을 두 축에 공유하기 위한 파라미터.
+
+    이 파일의 과거 버그 다수가 열 쪽만 고치고 행 쪽을 빼먹은(또는 그 반대) **축 불일치**
+    였다. 그래서 대칭 연산의 알고리즘은 `_axis_*` 한 곳에만 두고, 기존 이름
+    (`_select_col`/`_select_row` 등)은 축만 넘기는 얇은 위임으로 남긴다 — 호출부와
+    테스트 표면은 그대로 유지하면서 한쪽만 고쳐지는 일을 구조적으로 막는다.
+
+    주의: 아래 좌표/오버레이 매핑은 '이 축의 고정 밴드를 **실제로 그리는** 오버레이'를
+    쓴다(열=left, 행=top). 본체에서는 고정 밴드가 숨김이라 매핑이 틀어지기 때문이다.
+    """
+    __slots__ = ("name", "is_col")
+
+    def __init__(self, is_col: bool):
+        self.is_col = is_col
+        self.name = "col" if is_col else "row"
+
+    # ── 뷰/모델 크기 ─────────────────────────────────────────────────────────
+    def count(self, view) -> int:
+        """이 축의 섹션 수(열축이면 열 수)."""
+        return view.columnCount() if self.is_col else view.rowCount()
+
+    def cross_count(self, view) -> int:
+        """직교 축의 섹션 수(열축이면 행 수) — 전체 열/행 선택의 길이."""
+        return view.rowCount() if self.is_col else view.columnCount()
+
+    def cross_data_count(self, model) -> int:
+        """직교 축의 데이터 개수(열축이면 데이터 행 수)."""
+        return model.data_rows if self.is_col else model.data_cols
+
+    def index(self, model, i: int, cross: int):
+        """이 축 i, 직교 축 cross 위치의 QModelIndex."""
+        return model.index(cross, i) if self.is_col else model.index(i, cross)
+
+    def kind(self, model, i: int, cross: int) -> str:
+        return model.cell_kind(cross, i) if self.is_col else model.cell_kind(i, cross)
+
+    def of_staged(self, coord) -> int:
+        """staged 좌표 (r, c) 에서 이 축 성분만."""
+        r, c = coord
+        return c if self.is_col else r
+
+    # ── 선택 range ───────────────────────────────────────────────────────────
+    def lo(self, rng) -> int:
+        return rng.left() if self.is_col else rng.top()
+
+    def hi(self, rng) -> int:
+        return rng.right() if self.is_col else rng.bottom()
+
+    # ── 좌표 / 히트테스트 ────────────────────────────────────────────────────
+    def pos(self, point) -> int:
+        return point.x() if self.is_col else point.y()
+
+    def section_at(self, view, v: int) -> int:
+        return view.columnAt(v) if self.is_col else view.rowAt(v)
+
+    def overlay(self, fc):
+        """이 축의 고정 밴드를 실제로 그리는 오버레이(열=left, 행=top)."""
+        return fc.left if self.is_col else fc.top
+
+    def frozen_count(self, fc) -> int:
+        return fc._n_cols if self.is_col else fc._n_rows
+
+    # ── 섹션 크기 / 숨김 (틀 고정 크기 반영용) ───────────────────────────────
+    def hidden(self, view, i: int) -> bool:
+        return view.isColumnHidden(i) if self.is_col else view.isRowHidden(i)
+
+    def set_hidden(self, view, i: int, h: bool) -> None:
+        if self.is_col:
+            view.setColumnHidden(i, h)
+        else:
+            view.setRowHidden(i, h)
+
+    def size(self, view, i: int) -> int:
+        """이 축 섹션의 크기(열=폭, 행=높이)."""
+        return view.columnWidth(i) if self.is_col else view.rowHeight(i)
+
+    def set_size(self, view, i: int, v: int) -> None:
+        if self.is_col:
+            view.setColumnWidth(i, v)
+        else:
+            view.setRowHeight(i, v)
+
+    def user_sizes(self, host) -> dict:
+        """사용자가 직접 조절한 크기 기록(축별 dict)."""
+        return host._user_col_widths if self.is_col else host._user_row_heights
+
+    @property
+    def span_attr(self) -> str:
+        """FreezeController 의 고정 밴드 총 크기 속성명(_fw/_fh)."""
+        return "_fw" if self.is_col else "_fh"
+
+    def resized_signal(self, host):
+        return host.column_resized if self.is_col else host.row_resized
+
+    # ── 뷰의 축별 헬퍼 위임 ──────────────────────────────────────────────────
+    def full_selected(self, view):
+        return (view._full_columns_selected() if self.is_col
+                else view._full_rows_selected())
+
+    def touched(self, view):
+        return view._touched_cols() if self.is_col else view._touched_rows()
+
+
+AX_COL = _Axis(True)
+AX_ROW = _Axis(False)
+
+
 class _FrozenView(QTableView):
     """틀 고정 헬퍼 뷰 — 본체 모델/선택모델을 공유한다. 자체 스크롤바 없음.
     휠 이벤트는 본체로 전달해 본체가 스크롤되고 컨트롤러가 헬퍼를 되동기하게 한다.
@@ -754,150 +862,57 @@ class FreezeController(QObject):
         self._sync_sizes()
         self.host.updateGeometries()
 
-    def _on_corner_col_resized(self, idx, old, new):
-        """corner 오버레이에서 키 열(고정 열) 폭을 드래그로 조절한 경우."""
+    def _on_corner_resized(self, ax: _Axis, idx, new):
+        """corner 오버레이에서 고정(키) 열 폭 / 행 높이를 드래그로 조절한 경우."""
         if new <= 0 or not self._alive() or not self._active \
-                or idx >= self._n_cols or getattr(self.host, "_applying_sizes", False):
+                or idx >= ax.frozen_count(self) \
+                or getattr(self.host, "_applying_sizes", False):
             return
-        self._apply_frozen_col_width(idx, new, mirror=True)
+        self._apply_frozen_size(ax, idx, new, mirror=True)
+
+    def _on_corner_col_resized(self, idx, old, new):
+        self._on_corner_resized(AX_COL, idx, new)
 
     def _on_corner_row_resized(self, idx, old, new):
-        """corner 오버레이에서 키 행(고정 행) 높이를 드래그로 조절한 경우."""
-        if new <= 0 or not self._alive() or not self._active \
-                or idx >= self._n_rows or getattr(self.host, "_applying_sizes", False):
+        self._on_corner_resized(AX_ROW, idx, new)
+
+    def _apply_frozen_size(self, ax: _Axis, idx, new, mirror=False):
+        """고정(키) 열 폭 / 행 높이 변경을 호스트·전 헬퍼 뷰·_fw(_fh)·본체 여백에 반영
+        (+선택적 미러). 열/행 공용 구현 — 한쪽만 고쳐지는 축 불일치를 막는다.
+
+        키 열/행은 본체에서 숨겨져 있어 host.setColumnWidth/setRowHeight 가 무시되므로,
+        잠시 숨김을 풀고 크기를 심어 Qt 가 기억하게 한다(이후 refresh 가 그 크기를 캡처)."""
+        if not self._alive() or new <= 0 or idx < 0 or idx >= ax.frozen_count(self):
             return
-        self._apply_frozen_row_height(idx, new, mirror=True)
+        host = self.host
+        prev = getattr(host, "_applying_sizes", False)
+        host._applying_sizes = True
+        try:
+            was_hidden = ax.hidden(host, idx)
+            if was_hidden:
+                ax.set_hidden(host, idx, False)
+            if ax.size(host, idx) != new:
+                ax.set_size(host, idx, new)
+            if was_hidden:
+                ax.set_hidden(host, idx, True)
+            ax.user_sizes(host)[idx] = new
+            for v in self._views:
+                if ax.size(v, idx) != new:
+                    ax.set_size(v, idx, new)
+        finally:
+            host._applying_sizes = prev
+        # 고정 밴드 총 크기 재계산(corner 기준 — host 는 숨김이라 0)
+        setattr(self, ax.span_attr,
+                sum(ax.size(self.corner, i) for i in range(ax.frozen_count(self))))
+        host.updateGeometries()
+        if mirror:
+            ax.resized_signal(host).emit(idx, new)
 
     def _apply_frozen_col_width(self, idx, new, mirror=False):
-        """고정(키) 열 폭 변경을 호스트·전 헬퍼 뷰·_fw·본체 여백에 반영(+선택적 미러).
-        키 열은 본체에서 숨겨져 있어 host.setColumnWidth 가 무시되므로, 잠시 숨김을 풀고
-        폭을 심어 Qt 가 기억하게 한다(이후 refresh 가 그 폭을 캡처)."""
-        if not self._alive() or new <= 0 or idx < 0 or idx >= self._n_cols:
-            return
-        host = self.host
-        prev = getattr(host, "_applying_sizes", False)
-        host._applying_sizes = True
-        try:
-            was_hidden = host.isColumnHidden(idx)
-            if was_hidden:
-                host.setColumnHidden(idx, False)
-            if host.columnWidth(idx) != new:
-                host.setColumnWidth(idx, new)
-            if was_hidden:
-                host.setColumnHidden(idx, True)
-            host._user_col_widths[idx] = new
-            for v in self._views:
-                if v.columnWidth(idx) != new:
-                    v.setColumnWidth(idx, new)
-        finally:
-            host._applying_sizes = prev
-        # 고정 열 폭 합 재계산(corner 기준 — host 는 숨김이라 0)
-        self._fw = sum(self.corner.columnWidth(c) for c in range(self._n_cols))
-        host.updateGeometries()
-        if mirror:
-            host.column_resized.emit(idx, new)
+        self._apply_frozen_size(AX_COL, idx, new, mirror=mirror)
 
     def _apply_frozen_row_height(self, idx, new, mirror=False):
-        """고정(키) 행 높이 변경을 호스트·전 헬퍼 뷰·_fh·본체 여백에 반영(+선택적 미러)."""
-        if not self._alive() or new <= 0 or idx < 0 or idx >= self._n_rows:
-            return
-        host = self.host
-        prev = getattr(host, "_applying_sizes", False)
-        host._applying_sizes = True
-        try:
-            was_hidden = host.isRowHidden(idx)
-            if was_hidden:
-                host.setRowHidden(idx, False)
-            if host.rowHeight(idx) != new:
-                host.setRowHeight(idx, new)
-            if was_hidden:
-                host.setRowHidden(idx, True)
-            host._user_row_heights[idx] = new
-            for v in self._views:
-                if v.rowHeight(idx) != new:
-                    v.setRowHeight(idx, new)
-        finally:
-            host._applying_sizes = prev
-        self._fh = sum(self.corner.rowHeight(r) for r in range(self._n_rows))
-        host.updateGeometries()
-        if mirror:
-            host.row_resized.emit(idx, new)
-
-
-class _Axis:
-    """열/행 대칭 로직의 '축' 서술자 — 같은 알고리즘을 두 축에 공유하기 위한 파라미터.
-
-    이 파일의 과거 버그 다수가 열 쪽만 고치고 행 쪽을 빼먹은(또는 그 반대) **축 불일치**
-    였다. 그래서 대칭 연산의 알고리즘은 `_axis_*` 한 곳에만 두고, 기존 이름
-    (`_select_col`/`_select_row` 등)은 축만 넘기는 얇은 위임으로 남긴다 — 호출부와
-    테스트 표면은 그대로 유지하면서 한쪽만 고쳐지는 일을 구조적으로 막는다.
-
-    주의: 아래 좌표/오버레이 매핑은 '이 축의 고정 밴드를 **실제로 그리는** 오버레이'를
-    쓴다(열=left, 행=top). 본체에서는 고정 밴드가 숨김이라 매핑이 틀어지기 때문이다.
-    """
-    __slots__ = ("name", "is_col")
-
-    def __init__(self, is_col: bool):
-        self.is_col = is_col
-        self.name = "col" if is_col else "row"
-
-    # ── 뷰/모델 크기 ─────────────────────────────────────────────────────────
-    def count(self, view) -> int:
-        """이 축의 섹션 수(열축이면 열 수)."""
-        return view.columnCount() if self.is_col else view.rowCount()
-
-    def cross_count(self, view) -> int:
-        """직교 축의 섹션 수(열축이면 행 수) — 전체 열/행 선택의 길이."""
-        return view.rowCount() if self.is_col else view.columnCount()
-
-    def cross_data_count(self, model) -> int:
-        """직교 축의 데이터 개수(열축이면 데이터 행 수)."""
-        return model.data_rows if self.is_col else model.data_cols
-
-    def index(self, model, i: int, cross: int):
-        """이 축 i, 직교 축 cross 위치의 QModelIndex."""
-        return model.index(cross, i) if self.is_col else model.index(i, cross)
-
-    def kind(self, model, i: int, cross: int) -> str:
-        return model.cell_kind(cross, i) if self.is_col else model.cell_kind(i, cross)
-
-    def of_staged(self, coord) -> int:
-        """staged 좌표 (r, c) 에서 이 축 성분만."""
-        r, c = coord
-        return c if self.is_col else r
-
-    # ── 선택 range ───────────────────────────────────────────────────────────
-    def lo(self, rng) -> int:
-        return rng.left() if self.is_col else rng.top()
-
-    def hi(self, rng) -> int:
-        return rng.right() if self.is_col else rng.bottom()
-
-    # ── 좌표 / 히트테스트 ────────────────────────────────────────────────────
-    def pos(self, point) -> int:
-        return point.x() if self.is_col else point.y()
-
-    def section_at(self, view, v: int) -> int:
-        return view.columnAt(v) if self.is_col else view.rowAt(v)
-
-    def overlay(self, fc):
-        """이 축의 고정 밴드를 실제로 그리는 오버레이(열=left, 행=top)."""
-        return fc.left if self.is_col else fc.top
-
-    def frozen_count(self, fc) -> int:
-        return fc._n_cols if self.is_col else fc._n_rows
-
-    # ── 뷰의 축별 헬퍼 위임 ──────────────────────────────────────────────────
-    def full_selected(self, view):
-        return (view._full_columns_selected() if self.is_col
-                else view._full_rows_selected())
-
-    def touched(self, view):
-        return view._touched_cols() if self.is_col else view._touched_rows()
-
-
-AX_COL = _Axis(True)
-AX_ROW = _Axis(False)
+        self._apply_frozen_size(AX_ROW, idx, new, mirror=mirror)
 
 
 class ExcelTableView(QTableView):
