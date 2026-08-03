@@ -1,6 +1,7 @@
 """UE5 DataTable .uasset 바이너리 파서 (excel_diff_merge.py에서 분리)."""
 import struct
 
+from .constants import bool_to_str
 from .logutil import log
 
 
@@ -355,7 +356,7 @@ def _read_array_value(buf, off, end, tag, names) -> str:
                 items.append(str(buf[cur])); cur += 1
             elif inner == "BoolProperty":
                 if cur >= end: break
-                items.append("true" if buf[cur] else "false"); cur += 1
+                items.append(bool_to_str(buf[cur])); cur += 1
             elif inner == "NameProperty":
                 if cur + 8 > end: break
                 n, cur = _read_fname(buf, cur, names)
@@ -407,7 +408,7 @@ def _read_property_value(buf, value_off, value_end, tag, names) -> str:
         if t == "DoubleProperty":
             return _fmt_num(struct.unpack_from("<d", buf, value_off)[0])
         if t == "BoolProperty":
-            return "true" if tag.get("bool_value") else "false"
+            return bool_to_str(tag.get("bool_value"))
         if t == "ByteProperty":
             if tag.get("enum_name") and tag["enum_name"] != "None":
                 name, _ = _read_fname(buf, value_off, names)

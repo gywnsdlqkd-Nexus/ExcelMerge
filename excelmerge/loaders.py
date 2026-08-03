@@ -16,6 +16,7 @@ from collections import OrderedDict
 import openpyxl
 
 from . import ooxml
+from .constants import bool_to_str
 from .uasset_parser import load_uasset_as_matrix
 from .logutil import log
 
@@ -129,9 +130,17 @@ def _open_workbook(path: str, data_only: bool):
 
 
 def _cell_to_str(v) -> str:
-    """openpyxl 캐시값을 문자열로 변환 (정수형 float은 정수로)."""
+    """openpyxl 캐시값을 문자열로 변환 (정수형 float은 정수로).
+
+    bool 은 파이썬 기본 str() 이 "True"/"False" 를 주는데, json/uasset 로더는 "true"/"false"
+    를 쓴다. 그대로 두면 **같은 논리값인데도 xlsx↔json 비교에서 전부 '변경'으로 잡히는**
+    거짓 차이가 생기므로 공용 정본(constants.bool_to_str)으로 통일한다.
+    bool 은 int 의 서브클래스라 숫자 분기보다 먼저 처리해야 한다.
+    """
     if v is None:
         return ""
+    if isinstance(v, bool):
+        return bool_to_str(v)
     if isinstance(v, float) and v == int(v):
         return str(int(v))
     return str(v)
@@ -222,7 +231,7 @@ def _json_value_to_str(v) -> str:
     if v is None:
         return ""
     if isinstance(v, bool):
-        return "true" if v else "false"
+        return bool_to_str(v)          # 정본은 constants — xlsx/uasset 과 표기 일치
     if isinstance(v, (int, float)):
         return _cell_to_str(v)
     if isinstance(v, str):

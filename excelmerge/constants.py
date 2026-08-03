@@ -20,6 +20,18 @@ def appdata_path(*parts: str) -> str:
     return os.path.join(base, APP_DIR_NAME, *parts)
 
 
+# 크로스포맷 bool 표기 — 같은 논리값이 포맷마다 다르게 찍혀 '거짓 차이'로 잡히던 것을
+# 하나로 고정한다. json/uasset 관례인 **소문자**를 정본으로 삼는다(3개 포맷 중 2개가 이미
+# 소문자였고, xlsx 만 파이썬 str(bool) 의 "True"/"False" 를 써서 유일한 이탈자였다).
+BOOL_TRUE = "true"
+BOOL_FALSE = "false"
+
+
+def bool_to_str(v) -> str:
+    """bool → 셀 표시/비교용 정본 문자열. 모든 로더가 이 함수만 쓴다."""
+    return BOOL_TRUE if v else BOOL_FALSE
+
+
 # diff 셀 상태 — compute_diff가 diff_matrix 각 셀 튜플의 첫 요소로 채운다.
 STATUS_SAME = "same"
 STATUS_ADDED = "added"
