@@ -8,6 +8,7 @@ from collections import defaultdict
 from lxml import etree
 from openpyxl.utils import get_column_letter, column_index_from_string
 
+from . import ooxml
 from .logutil import log
 
 
@@ -190,40 +191,14 @@ def _write_patches_to_file(
         raise
 
 
-def _rel_target_to_path(target: str) -> str:
-    """workbook.xml.rels의 worksheet Target을 zip 내부 경로로 정규화."""
-    if target.startswith("/"):
-        # 절대경로(패키지 루트 기준, openpyxl 등) → 선행 슬래시 제거
-        return target[1:]
-    if not target.startswith("xl/"):
-        # 상대경로(워크북 기준) → xl/ 접두
-        return "xl/" + target
-    return target
-
-
 def _find_sheet_path_by_name(zin: zipfile.ZipFile, sheet_name: str):
     """워크북에서 sheet_name에 해당하는 워크시트 XML 경로를 해석. 못 찾으면 None.
-    workbook.xml의 <sheet name= r:id=>에서 이름을 매칭하고 rels에서 target을 찾는다."""
-    if not sheet_name:
-        return None
-    try:
-        ns_wb = _NS
-        ns_r  = "http://schemas.openxmlformats.org/officeDocument/2006/relationships"
-        wb_root = etree.fromstring(zin.read("xl/workbook.xml"))
-        rid = None
-        for sh in wb_root.iter(f"{{{ns_wb}}}sheet"):
-            if sh.get("name") == sheet_name:
-                rid = sh.get(f"{{{ns_r}}}id")
-                break
-        if rid is None:
-            return None
-        rels_root = etree.fromstring(zin.read("xl/_rels/workbook.xml.rels"))
-        for rel in rels_root:
-            if rel.get("Id") == rid and rel.get("Type", "").endswith("/worksheet"):
-                return _rel_target_to_path(rel.get("Target", ""))
-    except Exception:
-        pass
-    return None
+
+    해석은 ooxml 모듈(단일 출처)에 위임한다 — 읽기(loaders)와 쓰기가 서로 다른 구현을
+    갖고 있으면 '읽은 시트'와 '쓴 시트'가 갈라져 엉뚱한 시트에 저장될 수 있다.
+    쓰기 경로는 worksheet 타입 rel 만 인정한다(엄격).
+    """
+    return ooxml.sheet_path_by_name(zin, sheet_name, require_worksheet_type=True)
 
 
 def _resolve_sheet_path(zin: zipfile.ZipFile, sheet_name) -> str:
@@ -240,28 +215,8 @@ def _resolve_sheet_path(zin: zipfile.ZipFile, sheet_name) -> str:
 
 
 def _find_active_sheet_path(zin: zipfile.ZipFile) -> str:
-    try:
-        ns_wb = _NS
-        ns_r  = "http://schemas.openxmlformats.org/officeDocument/2006/relationships"
-        wb_xml  = zin.read("xl/workbook.xml")
-        wb_root = etree.fromstring(wb_xml)
-        active_tab = 0
-        for bv in wb_root.iter(f"{{{ns_wb}}}bookView"):
-            active_tab = int(bv.get("activeTab", 0))
-            break
-        rids = [sh.get(f"{{{ns_r}}}id")
-                for sh in wb_root.iter(f"{{{ns_wb}}}sheet")]
-        if not rids:
-            return "xl/worksheets/sheet1.xml"
-        rid = rids[min(active_tab, len(rids) - 1)]
-        rels_xml  = zin.read("xl/_rels/workbook.xml.rels")
-        rels_root = etree.fromstring(rels_xml)
-        for rel in rels_root:
-            if rel.get("Id") == rid and rel.get("Type", "").endswith("/worksheet"):
-                return _rel_target_to_path(rel.get("Target", ""))
-    except Exception:
-        pass
-    return "xl/worksheets/sheet1.xml"
+    """시트 이름 미지정(단일 시트 등)일 때 쓸 activeTab 시트 경로. 실패 시 관례적 첫 시트."""
+    return ooxml.active_sheet_path(zin) or ooxml.DEFAULT_SHEET_PATH
 
 
 # ── 서식(cell style) 크로스-파일 병합 ────────────────────────────────────────

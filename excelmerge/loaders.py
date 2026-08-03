@@ -11,11 +11,11 @@ import json
 import html
 import zipfile
 import threading
-import xml.etree.ElementTree as ET
 from collections import OrderedDict
 
 import openpyxl
 
+from . import ooxml
 from .uasset_parser import load_uasset_as_matrix
 from .logutil import log
 
@@ -407,8 +407,6 @@ def load_values_any(path: str, progress=None, sheet_name=None) -> list[list]:
 # 수식 셀 판별용 — 시트 XML에서 <c r="C2" ...><f ...> 형태(셀 여는 태그 직후 <f>)를 찾는다.
 # 공유/배열 수식의 후속 셀도 빈 <f .../>를 가지므로 모두 수식으로 잡힌다.
 _FORMULA_CELL_RE = re.compile(rb'<c\b[^>]*\br="([A-Z]+)(\d+)"[^>]*>\s*<f[\s>/]')
-_OOXML_MAIN_NS = "http://schemas.openxmlformats.org/spreadsheetml/2006/main"
-_OOXML_REL_NS = "http://schemas.openxmlformats.org/officeDocument/2006/relationships"
 
 
 def _col_letters_to_idx(letters: bytes) -> int:
@@ -420,29 +418,15 @@ def _col_letters_to_idx(letters: bytes) -> int:
 
 
 def _sheet_xml_path_in_zip(z: zipfile.ZipFile, sheet_name) -> str:
-    """sheet_name에 해당하는 워크시트 XML의 zip 내부 경로. 미지정/실패 시 첫 시트."""
-    try:
-        wb = ET.fromstring(z.read("xl/workbook.xml"))
-        sheets = wb.findall(f"{{{_OOXML_MAIN_NS}}}sheets/{{{_OOXML_MAIN_NS}}}sheet")
-        rid = None
-        if sheet_name:
-            for sh in sheets:
-                if sh.get("name") == sheet_name:
-                    rid = sh.get(f"{{{_OOXML_REL_NS}}}id")
-                    break
-        if rid is None and sheets:
-            rid = sheets[0].get(f"{{{_OOXML_REL_NS}}}id")
-        if rid is not None:
-            rels = ET.fromstring(z.read("xl/_rels/workbook.xml.rels"))
-            for rel in rels:
-                if rel.get("Id") == rid:
-                    tgt = rel.get("Target", "")
-                    if tgt.startswith("/"):
-                        return tgt[1:]
-                    return tgt if tgt.startswith("xl/") else "xl/" + tgt
-    except Exception:
-        pass
-    return "xl/worksheets/sheet1.xml"
+    """sheet_name에 해당하는 워크시트 XML의 zip 내부 경로. 미지정/실패 시 첫 시트.
+
+    해석 자체는 ooxml 모듈(단일 출처)에 위임하고, **관대한 폴백 정책만 여기 남긴다** —
+    읽기/미리보기는 실패보다 첫 시트라도 보여주는 게 낫다. 쓰기 경로는 반대로 raise 한다
+    (엉뚱한 시트를 덮어쓰면 데이터가 손상되므로). 자세한 배경은 ooxml 모듈 docstring 참고.
+    """
+    return (ooxml.sheet_path_by_name(z, sheet_name)
+            or ooxml.first_sheet_path(z)
+            or ooxml.DEFAULT_SHEET_PATH)
 
 
 def load_formula_flags_any(path: str, sheet_name=None) -> set:
