@@ -25,6 +25,7 @@ from .loaders import _EXCEL_EXTS, list_sheet_names, clear_values_cache
 from .panels import FilePanel
 from .prefs import load_key_prefs, save_key_prefs, load_last_sheet, save_last_sheet
 from .theme import APP_QSS, DIFF_COLORS, ui_font, ext_tab_icon
+from . import staging
 from .constants import STATUS_SAME, DIR_A2B, DIR_B2A
 from .compare_toolbar import build_find_box, add_legend
 from .widgets import (
@@ -988,20 +989,8 @@ class DiffView(QWidget):
     # ── 선택 셀 스테이징 (우클릭) ─────────────────────────────────────────────
 
     def _key_cells_for_selection(self, cells: set) -> set:
-        """선택 셀 집합에 대해 보충할 키 열/행 셀 좌표를 반환.
-        선택된 각 행 r 에는 키 열 0..key_col, 선택된 각 열 c 에는 키 행 0..key_row 를 더한다.
-        (틀 고정으로 본체에서 숨겨져 러버밴드 선택에 안 잡히는 키 셀 보충용.)"""
-        if not cells:
-            return set()
-        extra = set()
-        kc, kr = self._key_col, self._key_row
-        if kc is not None and kc >= 0:
-            for r in {r for (r, _c) in cells}:
-                extra.update((r, c) for c in range(kc + 1))
-        if kr is not None and kr >= 0:
-            for c in {c for (_r, c) in cells}:
-                extra.update((r, c) for r in range(kr + 1))
-        return extra
+        """선택 셀 집합에 대해 보충할 키 열/행 셀 좌표 (규칙은 staging 모듈)."""
+        return staging.key_cells_for_selection(cells, self._key_row, self._key_col)
 
     def _stage_selected(self, direction: str):
         if not self._diff_matrix:
@@ -1017,13 +1006,7 @@ class DiffView(QWidget):
         # (아래 status != same 필터가 매칭 행의 동일 키 셀은 자동으로 제외하고, 신규 행의
         #  키 셀만 남긴다 — 신규 행을 복사할 때 UniqueID 등 키 값이 빠지지 않도록.)
         cells |= self._key_cells_for_selection(cells)
-        cells = {
-            (r, c) for (r, c) in cells
-            if r < len(self._diff_matrix)
-            and c < len(self._diff_matrix[r])
-            and c not in self._excluded_cols
-            and self._diff_matrix[r][c][0] != STATUS_SAME
-        }
+        cells = staging.stageable_cells(self._diff_matrix, cells, self._excluded_cols)
         if not cells:
             QMessageBox.information(self, "알림", "선택한 셀 중 변경된 셀이 없습니다.")
             return
@@ -1037,13 +1020,8 @@ class DiffView(QWidget):
         # staged 셀에 대해 양쪽 패널의 셀값란 표시값(병합될 값)을 미리 계산.
         # 값으로 병합하므로 소스 side의 계산값을 양쪽 셀값란에 동일하게 표시한다.
         for (r, c) in cells:
-            dir_ = self._staged[r, c]
-            try:
-                _, a_val, b_val = self._diff_matrix[r][c]
-            except (IndexError, TypeError):
-                a_val, b_val = "", ""
-
-            display = a_val if dir_ == DIR_A2B else b_val
+            display = staging.staged_display_value(
+                self._diff_matrix, r, c, self._staged[r, c])
             self.panel_a._staged_display[r, c] = display
             self.panel_b._staged_display[r, c] = display
 
@@ -1268,16 +1246,13 @@ class DiffView(QWidget):
         if not cols:
             return
         if exclude:
-            cols = [c for c in cols if c != self._key_col]
-            if not cols:
+            new_cols = staging.excludable_cols(cols, self._key_col, self._excluded_cols)
+            if not new_cols:
                 return
-            new_cols = [c for c in cols if c not in self._excluded_cols]
             for c in new_cols:
                 self._excluded_cols.add(c)
             # 새로 제외된 열들의 기존 staged 항목 자동 해제.
-            new_set = set(new_cols)
-            staged_keys = [k for k in self._staged if k[1] in new_set]
-            for key in staged_keys:
+            for key in staging.staged_keys_in_cols(self._staged, new_cols):
                 del self._staged[key]
                 self.panel_a._staged_display.pop(key, None)
                 self.panel_b._staged_display.pop(key, None)
