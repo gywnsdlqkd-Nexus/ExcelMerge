@@ -1141,10 +1141,17 @@ class ExcelTableView(QTableView):
         return last
 
     def _drag_row_at(self, y):
-        """_drag_col_at 의 세로 대칭. 위쪽(고정 행/헤더) 넘으면 첫 행, 아래 끝/빈 영역이면
-        마지막 데이터 행으로 clamp, 뷰포트 밖(아래)이면 한 칸 오토스크롤."""
-        dr = self._model.data_rows
-        last = max(0, dr - 1)
+        """_drag_col_at 의 세로 대칭. 위쪽(고정 행/헤더) 넘으면 첫 행, 뷰포트 밖(아래)이면
+        한 칸 오토스크롤, 행이 없는 빈 영역이면 마지막 행으로 clamp.
+
+        **커서 위에 실제로 행이 있으면 그 행을 그대로 쓴다** — EXTRA(빈) 행이어도 마찬가지.
+        예전에는 데이터 범위(data_rows-1)로 clamp 했는데, '변경점만 보기' ON 이면 보이는 행
+        대부분이 EXTRA 행이라(예: 24개 중 20개) 그 위에서 드래그할 때 목표가 항상 마지막
+        데이터 행으로 접혀 **선택이 커서를 따라가지 않고, 드래그하지도 않은 위쪽 행이 선택**
+        되는 문제가 있었다. 엑셀처럼 드래그한 범위가 그대로 선택되게 한다(EXTRA 행은 diff
+        상태가 없어 병합 준비에서 자동 제외되므로 병합 동작에는 영향이 없다).
+        """
+        last = max(0, self.rowCount() - 1)
         if y < 0:
             return 0
         r = self.rowAt(y)
@@ -1210,7 +1217,13 @@ class ExcelTableView(QTableView):
             return False
         start = header.sectionViewportPosition(idx)
         size = header.sectionSize(idx)
-        return (p - start) <= 6 or (start + size - p) <= 6
+        # 고정 6px 은 얇은 섹션을 통째로 삼켰다: 행 높이 22px 에서 앞뒤 6px = 13px(59%)이
+        # '리사이즈'로 판정돼 드래그 선택이 절반 이상 먹지 않았다(실측). Qt 가 실제로 쓰는
+        # 그립 폭(PM_HeaderGripMargin, 보통 4px)에 맞추고, 얇은 섹션에서는 그 1/3 이하로
+        # 캡해 섹션 전체가 그립이 되는 일을 막는다. 리사이즈 자체는 그대로 동작한다.
+        grip = QApplication.style().pixelMetric(QStyle.PM_HeaderGripMargin) or 4
+        m = max(1, min(grip, max(1, size // 3)))
+        return (p - start) < m or (start + size - p) <= m
 
     def eventFilter(self, obj, event):
         info = getattr(self, "_header_axis", {}).get(obj)
