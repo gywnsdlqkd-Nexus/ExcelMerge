@@ -954,6 +954,10 @@ class ExcelTableView(QTableView):
         # 헤더 드래그 선택(경계 넘기): 이벤트 필터를 건 헤더 → 축('col'/'row'), 진행 중 축.
         self._header_axis = {}
         self._header_drag_axis = None
+        # 헤더 드래그 스로틀: 마지막으로 선택을 적용한 대상 열/행. 한 열/행 위에서 픽셀이
+        # 움직일 때마다 같은 범위를 다시 선택하는 낭비를 없앤다(Qt 는 동일 선택이면
+        # selectionChanged 를 안 쏘므로 큰 이득은 아니지만, 파이썬 작업 자체를 줄인다).
+        self._header_drag_target = None
         self.setFont(ui_font(9))
         self.horizontalHeader().setSectionResizeMode(QHeaderView.Interactive)
         # 키/제외 열 헤더의 PNG 아이콘(DecorationRole) 가시성 확보용 크기.
@@ -1199,24 +1203,31 @@ class ExcelTableView(QTableView):
                     self._header_drag_axis = axis
                 else:
                     self._header_drag_axis = None
+                self._header_drag_target = None    # 새 드래그 — 스로틀 기준 초기화
             elif et == QEvent.MouseMove:
                 if self._header_drag_axis == axis and (event.buttons() & Qt.LeftButton):
+                    # 스로틀: 대상 열/행이 바뀔 때만 재선택한다.
                     if axis == "col" and self._header_anchor_col is not None:
                         tgt = self._col_under_global(event.globalPos())
-                        if tgt is not None and tgt >= 0:
+                        if (tgt is not None and tgt >= 0
+                                and tgt != self._header_drag_target):
+                            self._header_drag_target = tgt
                             self._select_column_range(self._header_anchor_col, tgt)
                             self._set_current_cell_no_update(
                                 max(0, self._current_cell()[0]), tgt)
                         return True   # Qt 기본 드래그(경계 내 clamp) 대신 우리 선택 사용
                     if axis == "row" and self._header_anchor_row is not None:
                         tgt = self._row_under_global(event.globalPos())
-                        if tgt is not None and tgt >= 0:
+                        if (tgt is not None and tgt >= 0
+                                and tgt != self._header_drag_target):
+                            self._header_drag_target = tgt
                             self._select_row_range(self._header_anchor_row, tgt)
                             self._set_current_cell_no_update(
                                 tgt, max(0, self._current_cell()[1]))
                         return True
             elif et == QEvent.MouseButtonRelease:
                 self._header_drag_axis = None
+                self._header_drag_target = None
         return super().eventFilter(obj, event)
 
     # ── 사용자 헤더 크기 추적 ────────────────────────────────────────────────
