@@ -1,4 +1,4 @@
-"""릴리스 헬퍼 — 빌드된 exe로 latest.json(자동 업데이트 매니페스트)을 생성한다.
+"""릴리스 헬퍼 - 빌드된 exe로 latest.json(자동 업데이트 매니페스트)을 생성한다.
 
 사용법:
     python make_release.py [--base-url https://.../ ] [--notes "이번 변경점"]
@@ -8,7 +8,7 @@
   - sha256 계산
   - dist/latest.json 작성 { version, url, sha256, notes }
     · --base-url 을 주면 url = base_url + "ExcelMerge_v<ver>.exe"
-    · 안 주면 url 은 자리표시자("") — 업로드 후 실제 직링크로 채워 넣으면 됨
+    · 안 주면 url 은 자리표시자("") - 업로드 후 실제 직링크로 채워 넣으면 됨
 
 이후: dist/ExcelMerge_v<ver>.exe 와 dist/latest.json 을 배포 위치(클라우드/사내 웹)에 올리면 끝.
 """
@@ -20,6 +20,17 @@ import sys
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
+
+# 콘솔 코드페이지가 표현하지 못하는 문자 때문에 릴리스 흐름이 죽지 않게 한다.
+# (한국어 Windows 콘솔은 cp949 라서 em dash 하나로 이 스크립트가 traceback 을 냈다:
+#  sha256 까지 계산한 뒤 안내 문구를 찍다가 죽어서, RELEASE.md 가 안내하는 첫 명령이 실패했다.)
+# 인코딩은 그대로 두고 에러 핸들러만 바꿔 한글은 정상 출력하고 표현 불가 문자만 대체한다.
+for _stream in (sys.stdout, sys.stderr):
+    try:
+        _stream.reconfigure(errors="replace")
+    except Exception:
+        pass
+
 from excelmerge import __version__
 
 
@@ -78,9 +89,9 @@ def main():
             return
 
         if gh:
-            print("\ngh CLI 감지됨 — 실제 게시는 --publish, 또는 아래 명령을 수동 실행:")
+            print("\ngh CLI 감지됨 - 실제 게시는 --publish, 또는 아래 명령을 수동 실행:")
         else:
-            print("\ngh CLI 미설치 — 웹 UI로 올리거나 gh 설치 후 아래 명령 사용:")
+            print("\ngh CLI 미설치 - 웹 UI로 올리거나 gh 설치 후 아래 명령 사용:")
         print(printable)
         print("\n또는 웹: repo → Releases → Draft new release →")
         print(f"  Tag: {tag}  /  첨부: dist/{exe_name}  /  Publish")
@@ -108,7 +119,7 @@ def main():
     print(f"[완료] {out}")
     print(json.dumps(manifest, ensure_ascii=False, indent=2))
     if not url:
-        print("\n※ url이 비어 있습니다 — 업로드 후 latest.json의 url을 실제 직링크로 채워 넣으세요.")
+        print("\n※ url이 비어 있습니다 - 업로드 후 latest.json의 url을 실제 직링크로 채워 넣으세요.")
     print("\n다음: dist/{0} 와 dist/latest.json 을 배포 위치에 업로드하세요.".format(exe_name))
 
 
