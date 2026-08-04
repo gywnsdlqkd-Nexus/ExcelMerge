@@ -372,6 +372,9 @@ class _FrozenView(QTableView):
             idx = self.indexAt(event.pos())
             self._drag_anchor = (idx.row(), idx.column()) if idx.isValid() else None
             self._drag_custom = False
+            # 오버레이 드래그 중에도 A↔B 미러를 억제한다(본체와 선택 모델을 공유하므로
+            # 호스트 플래그를 쓴다). 종료 시 1회만 미러된다.
+            self._host._drag_selecting = True
         super().mousePressEvent(event)
 
     def mouseMoveEvent(self, event):
@@ -396,9 +399,11 @@ class _FrozenView(QTableView):
             self._drag_anchor = None
             self.setState(QAbstractItemView.NoState)
             event.accept()
+            self._host._end_drag_select()
             return
         self._drag_anchor = None
         super().mouseReleaseEvent(event)
+        self._host._end_drag_select()
 
     def _extend_drag(self, gp):
         """커서 전역좌표(gp)로 목표 (row, col)을 정하고 본체 공유 모델에 사각형 선택을 만든다.
@@ -923,6 +928,7 @@ class ExcelTableView(QTableView):
     columns_exclude_set = pyqtSignal(list, bool)   # (cols, exclude) — True: 제외 추가, False: 제외 해제
     column_resized    = pyqtSignal(int, int)   # (col, new_width) — 사용자 조작에 의한 변경만
     row_resized       = pyqtSignal(int, int)   # (row, new_height) — 사용자 조작에 의한 변경만
+    drag_selection_finished = pyqtSignal()     # 드래그 선택 종료 — A↔B 미러를 1회만 수행
 
     def __init__(self, side: str, parent=None):
         super().__init__(parent)
@@ -958,6 +964,10 @@ class ExcelTableView(QTableView):
         # 움직일 때마다 같은 범위를 다시 선택하는 낭비를 없앤다(Qt 는 동일 선택이면
         # selectionChanged 를 안 쏘므로 큰 이득은 아니지만, 파이썬 작업 자체를 줄인다).
         self._header_drag_target = None
+        # 드래그(셀/헤더/오버레이) 진행 중 표시. 진행 중에는 A↔B 선택 미러를 보류하고
+        # 종료 시 1회만 미러한다 — 미러가 드래그 지연의 지배적 원인이었다(측정: 실제 변화가
+        # 생기는 선택 갱신 24.6ms 중 약 22ms 가 미러, 미러 지연만으로 7.6x 개선).
+        self._drag_selecting = False
         self.setFont(ui_font(9))
         self.horizontalHeader().setSectionResizeMode(QHeaderView.Interactive)
         # 키/제외 열 헤더의 PNG 아이콘(DecorationRole) 가시성 확보용 크기.
@@ -1037,11 +1047,22 @@ class ExcelTableView(QTableView):
     # 숨겨져 있어 Qt 기본 드래그가 고정 열을 잡지 못한다(예: 본체에서 K→E 드래그 후 D로 못 이어짐).
     # 오버레이가 본체와 selection model 을 공유하므로, 커서가 본체 뷰포트 왼쪽을 벗어나면
     # 앵커→고정열 사각형으로 직접 확장한다. (반대 방향 = 오버레이→본체 는 _FrozenView가 처리.)
+    def _end_drag_select(self):
+        """드래그 선택 종료 — 진행 중이었다면 A↔B 미러를 1회 수행하도록 신호한다.
+
+        본체/오버레이/헤더의 **모든 release 경로**에서 불려야 한다. 한 곳이라도 빠지면
+        플래그가 켜진 채 남아 그 뒤의 선택이 반대 패널에 미러되지 않는다.
+        """
+        if self._drag_selecting:
+            self._drag_selecting = False
+            self.drag_selection_finished.emit()
+
     def mousePressEvent(self, event):
         if event.button() == Qt.LeftButton:
             idx = self.indexAt(event.pos())
             self._body_drag_anchor = (idx.row(), idx.column()) if idx.isValid() else None
             self._body_drag_custom = False
+            self._drag_selecting = True   # 드래그 중 미러 억제(종료 시 1회)
         super().mousePressEvent(event)
 
     def mouseMoveEvent(self, event):
@@ -1072,9 +1093,11 @@ class ExcelTableView(QTableView):
             self._body_drag_anchor = None
             self.setState(QAbstractItemView.NoState)
             event.accept()
+            self._end_drag_select()
             return
         self._body_drag_anchor = None
         super().mouseReleaseEvent(event)
+        self._end_drag_select()
 
     @staticmethod
     def _frozen_axis_at(ax: _Axis, fc, gp):
@@ -1204,6 +1227,8 @@ class ExcelTableView(QTableView):
                 else:
                     self._header_drag_axis = None
                 self._header_drag_target = None    # 새 드래그 — 스로틀 기준 초기화
+                if event.button() == Qt.LeftButton:
+                    self._drag_selecting = True    # 드래그 중 미러 억제(종료 시 1회)
             elif et == QEvent.MouseMove:
                 if self._header_drag_axis == axis and (event.buttons() & Qt.LeftButton):
                     # 스로틀: 대상 열/행이 바뀔 때만 재선택한다.
@@ -1228,6 +1253,7 @@ class ExcelTableView(QTableView):
             elif et == QEvent.MouseButtonRelease:
                 self._header_drag_axis = None
                 self._header_drag_target = None
+                self._end_drag_select()
         return super().eventFilter(obj, event)
 
     # ── 사용자 헤더 크기 추적 ────────────────────────────────────────────────
