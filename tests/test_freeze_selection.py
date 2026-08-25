@@ -254,13 +254,16 @@ def test_single_cell_selection_not_supplemented(frozen_view):
 
 
 def test_select_all_not_supplemented_or_fragmented(frozen_view):
-    """selectAll 은 이미 키를 포함하므로 보충 안 함 → range 조각화 없이 데이터 열 전체 보고."""
+    """selectAll 은 range 조각화 없이 전 열을 그대로 보고한다(키 밴드 포함).
+
+    선택에 셀을 더하지 않으므로(엑셀식) selectAll 의 결과는 통짜 range 하나다.
+    조각화되면 _full_columns_selected 가 일부 열을 놓친다."""
     dv = frozen_view
     host = dv.panel_a.table
     host.selectAll()
     QApplication.instance().processEvents()
-    # 조각화되면 _full_columns_selected 가 일부 열을 놓친다 → 키 열(0,1) 제외 전 열이 연속으로.
-    expected = list(range(2, host.columnCount()))   # key_col=1 → 첫 데이터 열=2
+    # 키 밴드(0,1)도 실제로 선택돼 있으므로 그대로 보고돼야 한다.
+    expected = list(range(host.columnCount()))
     assert host._full_columns_selected() == expected, host._full_columns_selected()
 
 
@@ -380,3 +383,51 @@ def test_frozen_band_cell_right_click_opens_merge_menu(frozen_view):
         for m in menus:
             m.close()
         app.processEvents()
+
+
+# ── 헤더 다중 선택 → 병합 대상 (키 밴드 누락 회귀) ──────────────────────────
+def test_header_multiselect_spanning_key_band_keeps_all_columns(frozen_view):
+    """키 밴드를 가로지르는 헤더 다중 선택은 그 밴드도 병합 대상에 남아야 한다.
+
+    회귀: _full_columns_selected 가 키 밴드(0..key_col)를 기본으로 걸러내, A~G 헤더를
+    잡고 병합 준비해도 A~D 가 조용히 빠졌다(E~G 만 준비됨). 그 필터는 선택에 키 열을
+    자동 보충하던 시절의 잔재이고, 지금은 '터치한 셀만' 선택하므로 걸러낼 이유가 없다.
+    """
+    host = frozen_view.panel_a.table
+    kc = host._key_col
+    last = min(kc + 3, host.model().data_cols - 1)
+    assert last > kc, "전제: 키 밴드 오른쪽에 데이터 열이 있어야 한다"
+    host._select_column_range(0, last)          # A..last 헤더 다중 선택
+    QApplication.instance().processEvents()
+
+    want = list(range(0, last + 1))
+    assert host._full_columns_selected() == want, host._full_columns_selected()
+    # 우클릭 앵커가 데이터 열이든 키 밴드든 대상 집합은 선택 전체
+    assert host._selected_header_cols(last) == want, "키 밴드가 병합 대상에서 빠짐"
+    assert host._selected_header_cols(0) == want, "키 밴드 앵커에서도 선택 전체여야"
+
+
+def test_single_data_column_header_does_not_pull_key_band(frozen_view):
+    """반대 방향 회귀 — 데이터 열 하나만 선택하면 키 밴드가 딸려오면 안 된다."""
+    host = frozen_view.panel_a.table
+    data_col = host._key_col + 1
+    host._select_col(data_col)
+    QApplication.instance().processEvents()
+    assert host._full_columns_selected() == [data_col]
+    assert host._selected_header_cols(data_col) == [data_col]
+
+
+def test_header_multiselect_spanning_key_row_band_keeps_all_rows(frozen_view):
+    """행 축 대칭 — 키 행 밴드를 가로지르는 행 헤더 다중 선택도 그대로 유지."""
+    dv = frozen_view
+    dv.diff_only_btn.setChecked(False)   # 전체 행 표시
+    QApplication.instance().processEvents()
+    host = dv.panel_a.table
+    kr = host._key_row
+    last = min(kr + 3, host.model().data_rows - 1)
+    assert last > kr, "전제: 키 행 밴드 아래에 데이터 행이 있어야 한다"
+    host._select_row_range(0, last)
+    QApplication.instance().processEvents()
+    want = list(range(0, last + 1))
+    assert host._full_rows_selected() == want, host._full_rows_selected()
+    assert host._selected_header_rows(last) == want, "키 행 밴드가 병합 대상에서 빠짐"

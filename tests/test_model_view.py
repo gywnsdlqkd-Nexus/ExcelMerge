@@ -1116,15 +1116,16 @@ def test_large_selection_queries_range_based():
     host.selectAll()
     t = time.perf_counter()
     fc = host._full_columns_selected()
-    shc = host._selected_header_cols(1)   # 데이터 열 앵커(키 열 0 제외)
-    shr = host._selected_header_rows(1)   # 데이터 행 앵커(키 행 0 제외)
+    shc = host._selected_header_cols(1)
+    shr = host._selected_header_rows(1)
     hs = host._has_staged_selection()
     dt = time.perf_counter() - t
     assert dt < 0.5, f"대량 선택 조회가 느림(회귀 의심): {dt:.2f}s"
-    # _full_columns_selected / _full_rows_selected 는 고정 키 열(0)·키 행(0)을 제외한다.
-    assert fc == list(range(1, cols)), f"전체 열 판정 오류: {len(fc)}/{cols}"
-    assert shc == list(range(1, cols)), "헤더 대상 열 오류"
-    assert len(shr) == host.rowCount() - 1, "헤더 대상 행 오류"
+    # selectAll 은 고정 키 열(0)·키 행(0)까지 실제로 선택하므로 그대로 보고된다
+    # (예전엔 여기서 키 밴드를 걸러내 A~G 헤더 선택 시 A~D 가 병합 대상에서 빠졌다).
+    assert fc == list(range(cols)), f"전체 열 판정 오류: {len(fc)}/{cols}"
+    assert shc == list(range(cols)), "헤더 대상 열 오류"
+    assert len(shr) == host.rowCount(), "헤더 대상 행 오류"
     assert hs is False, "staged 없는데 True"
 
     # 부분 선택 정확성 (비연속)
