@@ -263,11 +263,15 @@ class DiffTableModel(QAbstractTableModel):
         return a_val if self.side == "a" else b_val
 
     def cell_kind(self, r: int, c: int) -> str:
-        """'changed' | 'staged' | 'merged' | 'same' — 배경색 스니핑 대체.
-        우선순위는 populate 색상 로직과 동일: 제외 > merged > staged > status."""
+        """'changed' | 'staged' | 'merged' | 'same' — **병합 자격** 판정.
+        우선순위: merged > staged > status.
+
+        ★ 배경색(data/BackgroundRole)과 의도적으로 갈라진다. 여기서는 '변경 검사에서
+        제외'한 열도 실제 status 를 그대로 보고한다 — 제외 열 헤더/셀 우클릭에서도
+        병합 준비 메뉴가 떠야 하기 때문(제외는 표시·집계 전용이고 병합은 명시적 지시).
+        반면 배경색은 준비/완료가 아닌 제외 셀을 계속 회색으로 둔다(제외 열이 노랗게
+        물들면 제외 기능의 의미가 없어진다)."""
         if self._mode != MODE_DIFF or not self.is_data_cell(r, c):
-            return STATUS_SAME
-        if c in self._excluded:
             return STATUS_SAME
         if (r, c) in self._merged:
             return "merged"
@@ -361,12 +365,14 @@ class DiffTableModel(QAbstractTableModel):
         if role == Qt.BackgroundRole:
             if self._mode != MODE_DIFF or not self.is_data_cell(r, c):
                 return None   # 기본(흰색) — 기존 아이템 없는 여분 셀과 동일
-            if c in self._excluded:
-                return EXCLUDED_CELL_BG   # 제외 열은 회색 배경으로 구분
+            # 병합 준비/완료가 제외보다 우선 — 제외 열도 병합 대상이므로, 준비된 셀은
+            # 회색(제외)이 아니라 준비/완료 색으로 보여야 상태를 확인할 수 있다.
             if (r, c) in self._merged:
                 return DIFF_COLORS["merged"]
             if (r, c) in self._staged:
                 return DIFF_COLORS["staged"]
+            if c in self._excluded:
+                return EXCLUDED_CELL_BG   # 그 외 제외 열은 회색 배경으로 구분
             status, a_val, b_val = self._diff_matrix[r][c]
             if status == STATUS_ADDED:
                 # 신규(연초록)는 값이 실제로 있는 쪽 패널에만 표시.

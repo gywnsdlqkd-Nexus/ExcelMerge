@@ -19,8 +19,9 @@ os.environ["APPDATA"] = tempfile.mkdtemp(prefix="em_test_appdata_")
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import pytest
-from PyQt5.QtCore import QItemSelection, QItemSelectionModel
-from PyQt5.QtWidgets import QApplication
+from PyQt5.QtCore import Qt, QEvent, QItemSelection, QItemSelectionModel, QPoint
+from PyQt5.QtGui import QMouseEvent
+from PyQt5.QtWidgets import QApplication, QMenu
 
 
 def _wait_diff(win, timeout_ms=5000):
@@ -282,3 +283,100 @@ def test_normalize_no_infinite_loop(frozen_view):
     host._select_col(2)
     QApplication.instance().processEvents()
     assert host._supplementing is False   # 항상 정상 복원(try/finally)
+
+
+
+# ── 헤더 좌클릭 선택 (헤더 교체 회귀 방지) ──────────────────────────────────
+def _click(widget, pos):
+    """실제 좌클릭 시퀀스(press → release)를 위젯에 보낸다."""
+    gp = widget.mapToGlobal(pos)
+    for et, buttons in ((QEvent.MouseButtonPress, Qt.LeftButton),
+                        (QEvent.MouseButtonRelease, Qt.NoButton)):
+        QApplication.sendEvent(widget, QMouseEvent(
+            et, pos, gp, Qt.LeftButton, buttons, Qt.NoModifier))
+        QApplication.instance().processEvents()
+
+
+def test_headers_are_clickable(frozen_view):
+    """ExcelTableView 는 헤더를 _BandHeaderView 로 교체한다. QTableView 가 **자기가 만든
+    기본 헤더에만** 켜 주는 sectionsClickable/highlightSections 를 교체본에 다시 켜지
+    않으면 헤더 좌클릭이 sectionPressed 를 아예 안 쏜다."""
+    t = frozen_view.panel_a.table
+    for hdr, name in ((t.horizontalHeader(), "가로"), (t.verticalHeader(), "세로")):
+        assert hdr.sectionsClickable(), f"{name} 헤더가 클릭 불가 — 헤더 선택이 죽는다"
+        assert hdr.highlightSections(), f"{name} 헤더 선택 하이라이트 꺼짐"
+
+
+def test_col_header_click_selects_that_column(frozen_view):
+    """데이터 열 헤더를 좌클릭하면 그 열만 선택되고 앵커가 그 열로 갱신된다.
+
+    앵커 갱신은 sectionPressed 로만 일어난다 — 안 쏘면 _header_anchor_col 이 낡은 값에
+    머물러, 살짝만 끌어도 그 낡은 앵커부터 통째로 선택된다(F 를 눌렀는데 A~F 선택).
+    """
+    dv = frozen_view
+    t = dv.panel_a.table
+    hh = t.horizontalHeader()
+    body_cols = [c for c in range(t.model().data_cols) if not t.isColumnHidden(c)]
+    assert len(body_cols) >= 2, "전제: 고정 밴드 밖 데이터 열이 2개 이상"
+    for c in body_cols[:2]:
+        t.clearSelection()
+        x = hh.sectionViewportPosition(c) + hh.sectionSize(c) // 2
+        _click(hh.viewport(), QPoint(x, hh.viewport().height() // 2))
+        sel = sorted({i.column() for i in t.selectionModel().selectedIndexes()})
+        assert sel == [c], f"{c}열 헤더 클릭 → 선택 {sel}"
+        assert t._header_anchor_col == c, "헤더 앵커가 갱신 안 됨(낡은 앵커 오염)"
+
+
+def test_row_header_click_selects_that_row(frozen_view):
+    """가로의 세로 대칭 — 행 헤더 좌클릭도 동일하게 동작해야 한다."""
+    t = frozen_view.panel_a.table
+    vh = t.verticalHeader()
+    r = next(r for r in range(t.model().data_rows) if not t.isRowHidden(r))
+    t.clearSelection()
+    y = vh.sectionViewportPosition(r) + vh.sectionSize(r) // 2
+    _click(vh.viewport(), QPoint(vh.viewport().width() // 2, y))
+    rows = sorted({i.row() for i in t.selectionModel().selectedIndexes()})
+    assert rows == [r], f"{r}행 헤더 클릭 → 선택 {rows}"
+    assert t._header_anchor_row == r
+
+
+# ── 고정 밴드 셀 우클릭 (병합 메뉴 배선) ────────────────────────────────────
+def test_frozen_overlays_have_cell_context_menu(frozen_view):
+    """키 열·그 좌측 열·키 행 셀은 본체에서 숨겨져 오버레이가 그린다. 오버레이에 셀
+    우클릭이 배선돼 있지 않으면 그 셀들은 우클릭해도 아무 메뉴가 안 뜬다."""
+    fc = frozen_view._freeze["a"]
+    for name, v in (("left", fc.left), ("top", fc.top), ("corner", fc.corner)):
+        assert v.contextMenuPolicy() == Qt.CustomContextMenu, f"{name} 오버레이 우클릭 미배선"
+        assert v.receivers(v.customContextMenuRequested) > 0, f"{name} 오버레이 핸들러 없음"
+
+
+def test_frozen_band_cell_right_click_opens_merge_menu(frozen_view):
+    """고정 밴드의 '변경' 셀을 우클릭하면 본체와 동일한 병합 준비 메뉴가 떠야 한다."""
+    dv = frozen_view
+    app = QApplication.instance()
+    t = dv.panel_a.table
+    fc = dv._freeze["a"]
+    r = 5   # 데이터 행(키 행=1 이므로 2행부터 본문)
+    dv._diff_matrix[r][0] = ("modified", "old", "new")   # 고정 열 0 을 변경 상태로
+    dv._notify_cells({(r, 0)})
+    app.processEvents()
+    assert t.model().cell_kind(r, 0) == "changed"
+
+    rect = fc.left.visualRect(fc.left.model().index(r, 0))
+    assert rect.isValid() and rect.width() > 0, "left 오버레이가 고정 셀을 그리지 않음"
+    t._select_range(r, 0, r, 0)
+    app.processEvents()
+
+    before = {w for w in app.topLevelWidgets() if isinstance(w, QMenu)}
+    fc._overlay_cell_menu(fc.left, rect.center())
+    app.processEvents()
+    menus = [w for w in app.topLevelWidgets()
+             if isinstance(w, QMenu) and w.isVisible() and w not in before]
+    try:
+        assert menus, "고정 밴드 셀 우클릭에 병합 준비 메뉴가 안 뜬다"
+        texts = [a.text() for a in menus[0].actions() if a.text()]
+        assert any("A → B" in x for x in texts), texts
+    finally:
+        for m in menus:
+            m.close()
+        app.processEvents()

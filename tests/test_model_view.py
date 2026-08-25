@@ -60,12 +60,14 @@ def oracle_cell(diff_matrix, which, merged_set, staged, excluded_cols, r, c):
         text = b_val
     else:
         text = a_val if which == "a" else b_val
-    if c in excluded_cols:
-        color = EXCLUDED_CELL_BG   # 제외 열은 회색 배경(v166~)
-    elif (r, c) in merged_set:
+    # 우선순위: merged > staged > 제외 > status.
+    # 제외 열도 병합 대상이므로 준비/완료 셀은 회색이 아니라 준비/완료 색으로 보인다.
+    if (r, c) in merged_set:
         color = DIFF_COLORS["merged"]
     elif direction is not None:
         color = DIFF_COLORS["staged"]
+    elif c in excluded_cols:
+        color = EXCLUDED_CELL_BG   # 그 외 제외 열은 회색 배경(v166~)
     elif status == "added":
         # 신규 색은 값이 있는 쪽 패널에만 (빈 쪽은 흰색=same)
         own = a_val if which == "a" else b_val
@@ -182,12 +184,53 @@ def test_cell_kind():
     m.set_diff_data(dm, meta, staged, merged, excluded)
     assert m.cell_kind(1, 1) == "staged"
     assert m.cell_kind(2, 1) == "merged"
-    assert m.cell_kind(1, 2) == "same"        # excluded 열 → same 취급
+    # 제외 열도 실제 status 를 보고한다(병합 자격 판정) — 배경색만 회색으로 남는다.
+    assert m.cell_kind(1, 2) == "changed"    # excluded 열이지만 added
     assert m.cell_kind(2, 0) == "staged"
     assert m.cell_kind(1, 0) == "same"
     assert m.cell_kind(3, 0) == "changed"     # added
     assert m.cell_kind(len(dm) + 1, 0) == "same"   # 여분 행
     print("PASS test_cell_kind")
+
+
+def test_excluded_col_is_stageable_and_shows_staged_color():
+    """'변경 검사에서 제외'한 열도 병합 준비 대상이고, 준비되면 준비 색으로 보여야 한다.
+
+    B 에만 있는 텍스트키 행을 A→B 로 지우려 할 때, 제외 열(en/ja/zh_Hans 등)의 셀이
+    병합 준비에서 탈락해 B 에 값이 남던 회귀를 막는다. 예전 동작:
+    stageable_cells 가 제외 열을 버리고, BackgroundRole 이 제외(회색)를 staged 보다
+    먼저 반환했다.
+    """
+    from excelmerge import staging
+
+    # 1행 1열 격자로 단순화: 열 1 은 제외 열이면서 B 에만 값이 있는 신규(added) 셀.
+    dm = [
+        [("same", "ID", "ID"), ("added", "", "keep-me-not")],
+    ]
+    meta = [(None, 0)]     # A 에 없는(B 전용) 행
+    staged, merged, excluded = {}, set(), {1}
+
+    # ① 제외 열이어도 병합 준비 대상으로 남는다.
+    assert staging.stageable_cells(dm, {(0, 1)}) == {(0, 1)}
+
+    m = DiffTableModel("b")
+    m.set_diff_data(dm, meta, staged, merged, excluded)
+    # 준비 전: 제외 열은 회색
+    assert m.data(m.index(0, 1), Qt.BackgroundRole) == EXCLUDED_CELL_BG
+    assert m.cell_kind(0, 1) == "changed", "제외 열도 병합 자격 판정에선 changed"
+
+    # ② 준비 후: 회색이 아니라 staged 색 + cell_kind 도 staged
+    staged[(0, 1)] = "a_to_b"          # 참조 공유 dict 변형 = 실제 스테이징 경로
+    assert m.data(m.index(0, 1), Qt.BackgroundRole) == DIFF_COLORS["staged"],         "제외 열의 병합 준비 셀이 회색으로 남음"
+    assert m.cell_kind(0, 1) == "staged"
+    # 표시값은 병합될 값(A 의 빈 값) — 저장 시 B 셀이 지워진다.
+    assert m.display_text(0, 1) == ""
+
+    # ③ 병합 완료(merged)도 제외보다 우선
+    staged.clear()
+    merged.add((0, 1))
+    assert m.data(m.index(0, 1), Qt.BackgroundRole) == DIFF_COLORS["merged"]
+    print("PASS test_excluded_col_is_stageable_and_shows_staged_color")
 
 
 def test_view_behaviors():
@@ -888,12 +931,13 @@ def test_freeze_setup():
     # corner는 고정 열만, top은 스크롤 열만 표시
     assert not fc.corner.isColumnHidden(1) and fc.corner.isColumnHidden(2), "corner 고정 열 오류"
     assert fc.top.isColumnHidden(1) and not fc.top.isColumnHidden(2), "top 스크롤 열 오류"
-    # 스크롤 동기
+    # 스크롤 동기 — 본체는 ScrollPerItem, 오버레이는 스크롤 축이 ScrollPerPixel 이라
+    # '값'이 아니라 본체 헤더의 픽셀 오프셋을 미러한다(_sync_top_h/_sync_left_v).
     win.diff_only_btn.setChecked(False)   # 전체 행 표시 → 세로 스크롤 여지
     t.verticalScrollBar().setValue(3); t.horizontalScrollBar().setValue(1)
     fc._sync_scroll()
-    assert fc.left.verticalScrollBar().value() == t.verticalScrollBar().value()
-    assert fc.top.horizontalScrollBar().value() == t.horizontalScrollBar().value()
+    assert fc.left.verticalScrollBar().value() == t.verticalHeader().offset()
+    assert fc.top.horizontalScrollBar().value() == t.horizontalHeader().offset()
     win.close()
     print("PASS test_freeze_setup")
 
@@ -1115,6 +1159,7 @@ if __name__ == "__main__":
     test_headers()
     test_notify_equals_fresh_populate()
     test_cell_kind()
+    test_excluded_col_is_stageable_and_shows_staged_color()
     test_view_behaviors()
     test_header_multiselect_extension()
     test_ctrl_jump_single_selection()

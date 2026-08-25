@@ -445,7 +445,8 @@ class FreezeController(QObject):
       corner:(fr, fr, hdrW+fw, hdrH+fh)          헤더 표시 → 고정 눈금 + 고정 코너 셀
       top   :(fr+hdrW+fw, fr+hdrH, 본체폭, fh)    헤더 숨김, 가로 동기 → 고정 행 데이터
       left  :(fr+hdrW, fr+hdrH+fh, fw, 본체높이)  헤더 숨김, 세로 동기 → 고정 열 데이터
-    본체 여백은 ExcelTableView.updateGeometries() 오버라이드가 reposition()과 함께 적용한다.
+    본체 여백은 ExcelTableView.updateGeometries() 오버라이드가 reposition()과 함께 적용한다
+    (여백 예약은 _BandHeaderView 의 sizeHint — 이유는 그 오버라이드 주석 참고).
     """
     _MIN_BODY_W = 80    # 고정 영역이 본체를 다 먹으면 freeze 중단(잔여 본체 최소치)
     _MIN_BODY_H = 44
@@ -606,6 +607,14 @@ class FreezeController(QObject):
             return   # 키 행인데 병합할 것도 없음 → 메뉴 미표시
         m.popup(cv.mapToGlobal(pos))
 
+    def _overlay_cell_menu(self, view, pos):
+        """고정 밴드(오버레이) 셀 우클릭 → 본체의 셀 메뉴를 그대로 띄운다.
+        오버레이는 본체와 선택 모델을 공유하므로 판단·동작이 본체와 동일하다.
+        (헤더는 각자 자기 정책을 쓰므로 corner 헤더 메뉴와 충돌하지 않는다.)"""
+        if not self._alive():
+            return
+        self.host._popup_cell_menu(view.viewport().mapToGlobal(pos))
+
     def _make_view(self, headers: bool):
         host = self.host
         v = _FrozenView(host)
@@ -620,6 +629,12 @@ class FreezeController(QObject):
         # 선택색 통일(비포커스에도 파랑) — 본체와 동일 팔레트.
         force_active_highlight(v)
         v.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        # 고정 밴드 셀 우클릭 → 본체와 동일한 병합 준비/취소 메뉴. 이 배선이 없으면 키 열
+        # 및 그 좌측 열·키 행 셀은 본체에서 숨겨져 있어(오버레이가 그림) 우클릭해도 아무
+        # 메뉴가 안 뜬다 — 그 열들을 셀 우클릭으로 병합 준비할 방법이 없어진다.
+        v.setContextMenuPolicy(Qt.CustomContextMenu)
+        v.customContextMenuRequested.connect(
+            lambda pos, _v=v: self._overlay_cell_menu(_v, pos))
         v.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         v.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         v.setHorizontalScrollMode(QAbstractItemView.ScrollPerItem)
@@ -920,6 +935,42 @@ class FreezeController(QObject):
         self._apply_frozen_size(AX_ROW, idx, new, mirror=mirror)
 
 
+class _BandHeaderView(QHeaderView):
+    """틀 고정 밴드 크기를 sizeHint 에 포함시키는 헤더.
+
+    QTableView.updateGeometries() 는 ① 헤더 sizeHint 로 뷰포트 여백을 잡고
+    ② **그 시점의 뷰포트 크기**로 스크롤바 range 를 계산한다. 고정 밴드 자리를
+    뒤늦게 setViewportMargins 로 더하면 range 는 이미 '밴드를 안 뺀 더 넓은
+    뷰포트' 기준으로 계산된 뒤라, 넘치는 폭이 밴드 폭보다 작을 때 range 가 0 이
+    되어 **스크롤바가 아예 안 뜬다**. 밴드를 sizeHint 에 미리 넣어 Qt 가 처음부터
+    올바른 여백·range 를 계산하게 한다(설계 배경은 updateGeometries 주석 참고).
+    """
+
+    # 클래스 속성 기본값 — QHeaderView.__init__ 이 끝나기 전에도 Qt 가 sizeHint()를
+    # 호출할 수 있어(가상 함수 콜백), 인스턴스 속성만으론 AttributeError 로 죽는다.
+    _band = 0   # 세로 헤더=고정 열 폭 합 / 가로 헤더=고정 행 높이 합
+
+    def set_band(self, px: int):
+        px = max(0, int(px))
+        if px != self._band:
+            self._band = px
+            self.updateGeometry()
+
+    def natural_size(self) -> QSize:
+        """밴드를 뺀 헤더 본래 크기 — 헤더 재배치 계산은 반드시 이 값을 쓴다.
+        width()/height() 는 super().updateGeometries() 가 '밴드 포함' 크기로
+        세팅해 둔 값이라 그대로 쓰면 밴드가 이중 반영된다."""
+        return QHeaderView.sizeHint(self)
+
+    def sizeHint(self) -> QSize:
+        sh = QHeaderView.sizeHint(self)
+        if self._band <= 0:
+            return sh
+        if self.orientation() == Qt.Vertical:
+            return QSize(sh.width() + self._band, sh.height())
+        return QSize(sh.width(), sh.height() + self._band)
+
+
 class ExcelTableView(QTableView):
     stage_requested   = pyqtSignal(str)   # direction: 'a_to_b' | 'b_to_a'
     unstage_requested = pyqtSignal()
@@ -934,8 +985,21 @@ class ExcelTableView(QTableView):
         super().__init__(parent)
         # 틀 고정 — updateGeometries() 오버라이드가 setModel 등에서 조기 호출될 수 있어 먼저 초기화.
         self._freeze = None            # FreezeController(생성 시 자기 자신을 여기 설정)
-        self._in_update_geoms = False  # setViewportMargins 재진입 가드
+        self._in_update_geoms = False  # updateGeometries 재진입 가드
         self.side = side
+        # 헤더 교체는 setModel 및 아래 헤더 설정(리사이즈 모드/아이콘/시그널/이벤트 필터)
+        # 보다 먼저. 나중에 바꾸면 그 설정들이 버려지는 옛 헤더에 적용된다.
+        for _hdr, _setter in ((_BandHeaderView(Qt.Horizontal, self), self.setHorizontalHeader),
+                              (_BandHeaderView(Qt.Vertical, self), self.setVerticalHeader)):
+            # ★ QTableView 는 이 두 속성을 **자기가 만든 기본 헤더에만** 켠다
+            #   (QTableViewPrivate::init — setHorizontalHeader/setVerticalHeader 안이 아니다).
+            #   헤더를 교체하면서 이걸 빠뜨리면 sectionsClickable 이 False 라 헤더 좌클릭이
+            #   sectionPressed 를 아예 안 쏜다 → ① 열/행 헤더를 클릭해도 선택이 안 되고,
+            #   ② _header_anchor_col/_row 가 갱신되지 않아 살짝만 끌어도 **낡은 앵커**부터
+            #   현재 열까지 통째로 선택된다(F 를 눌렀는데 A~F 가 선택되던 증상).
+            _hdr.setSectionsClickable(True)
+            _hdr.setHighlightSections(True)
+            _setter(_hdr)
         self._model = DiffTableModel(side, self)
         self.setModel(self._model)   # selectionModel은 여기서 1회 생성 — 이후 교체 없음
         # A/B 값이 다른 문자 구간을 셀 안에서 핑크로 강조 (modified 셀 한정)
@@ -1407,33 +1471,56 @@ class ExcelTableView(QTableView):
         self._model.set_key_row(row)
 
     def updateGeometries(self):
-        """틀 고정 활성 시 상단/좌측 여백을 예약(setViewportMargins)해 고정 헬퍼 자리를 확보하고
-        본체 데이터 뷰포트를 그만큼 밀어낸다(가림 방지). Qt가 지오메트리를 재계산할 때마다
-        (리사이즈·헤더폭 변화·스크롤·스플리터) 여백을 다시 적용하고 헬퍼 위치를 갱신한다."""
+        """틀 고정 활성 시 상단/좌측에 고정 헬퍼 자리를 예약하고 본체 데이터 뷰포트를
+        그만큼 밀어낸다(가림 방지). Qt가 지오메트리를 재계산할 때마다(리사이즈·헤더폭
+        변화·스크롤·스플리터) 예약을 다시 적용하고 헬퍼 위치를 갱신한다.
+
+        ★ 예약은 setViewportMargins 가 아니라 **헤더 sizeHint**(_BandHeaderView.set_band)로
+        한다. QTableView.updateGeometries() 는 ① 헤더 sizeHint 로 여백을 잡은 뒤
+        ② 그 뷰포트 크기로 스크롤바 range 를 계산하므로, 여백을 super() 뒤에 더하면
+        range 가 고정 밴드 폭만큼 과소평가된다. 그 결과 '넘치는 폭 < 밴드 폭'이면
+        range 가 0 이 되어 **가로 스크롤바가 아예 안 뜨고 오른쪽 열을 못 본다**
+        (세로도 고정 행 높이만큼 동일한 오차). 밴드를 sizeHint 에 미리 넣으면 Qt 가
+        여백과 range 를 한 번에 정확히 계산한다.
+        """
         if self._in_update_geoms:
-            # 재진입(내 setViewportMargins가 유발) — super()를 다시 부르면 방금 설정한 여백이
-            # 헤더 크기로 리셋되므로 아무것도 하지 않고 내 여백을 보존한다.
+            # 재진입(헤더 setGeometry → geometriesChanged 등) — 한 패스에서 두 번
+            # 계산하지 않도록 무시한다.
             return
         self._in_update_geoms = True
         try:
-            super().updateGeometries()
             fc = self._freeze
+            vh, hh = self.verticalHeader(), self.horizontalHeader()
+            # ctor 에서 헤더를 교체하기 전에도 Qt 가 이 함수를 부른다(기본 QHeaderView).
+            # 그땐 틀 고정도 없으므로 밴드 처리 없이 super() 만 태운다.
+            if not isinstance(vh, _BandHeaderView) or not isinstance(hh, _BandHeaderView):
+                super().updateGeometries()
+                return
+            active = fc is not None and fc.active
             # 벌크(_applying_sizes: 필터의 setRowHidden 폭풍/크기 일괄 적용) 중엔 무거운 freeze
-            # 작업(여백·헤더 재배치·reposition)을 건너뛴다 — 벌크가 끝난 뒤 refresh가 1회만 재적용.
-            if fc is not None and fc.active and not self._applying_sizes:
-                fr = self.frameWidth()
-                hdr_w = self.verticalHeader().width()
-                hdr_h = self.horizontalHeader().height()
+            # 작업(밴드 재계산·헤더 재배치·reposition)을 건너뛴다 — 벌크가 끝난 뒤 refresh가
+            # 1회만 재적용. 이때 밴드 값은 건드리지 않아 예약된 여백이 그대로 유지된다.
+            do_freeze = active and not self._applying_sizes
+            if do_freeze:
                 fw, fh = fc.frozen_px()
-                self.setViewportMargins(hdr_w + fw, hdr_h + fh, 0, 0)
+                vh.set_band(fw)
+                hh.set_band(fh)
+            elif not active:
+                vh.set_band(0)
+                hh.set_band(0)
+            super().updateGeometries()
+            if do_freeze:
+                fr = self.frameWidth()
+                # 밴드를 뺀 '본래' 헤더 크기. width()/height()는 super()가 밴드 포함
+                # 크기로 세팅해 둔 값이라 쓰면 밴드가 이중 반영된다.
+                hdr_w = vh.natural_size().width()
+                hdr_h = hh.natural_size().height()
                 # 본체 헤더를 밀어낸 뷰포트에 맞춰 재배치 — 그래야 고정 눈금(corner) 옆에
-                # 스크롤 눈금(본체 헤더)이 정확히 이어진다. QTableView는 추가 여백만큼
-                # 헤더를 옮기지 않으므로 수동 정렬한다.
+                # 스크롤 눈금(본체 헤더)이 정확히 이어진다. QTableView는 헤더를 밴드 포함
+                # 크기로 배치하므로 수동 정렬한다.
                 vp = self.viewport().geometry()
-                self.horizontalHeader().setGeometry(
-                    fr + hdr_w + fw, fr, vp.width(), hdr_h)
-                self.verticalHeader().setGeometry(
-                    fr, fr + hdr_h + fh, hdr_w, vp.height())
+                hh.setGeometry(fr + hdr_w + fw, fr, vp.width(), hdr_h)
+                vh.setGeometry(fr, fr + hdr_h + fh, hdr_w, vp.height())
                 fc.reposition()
         finally:
             self._in_update_geoms = False
@@ -1605,7 +1692,8 @@ class ExcelTableView(QTableView):
         cols_label = ", ".join(get_column_letter(c + 1) for c in target_cols)
 
         # 병합 준비/취소는 단일·다중 모두 지원 — 대상 열들 중 하나라도 변경/스테이징 셀이 있으면 노출.
-        # (제외 열은 cell_kind가 'same'이라 has_changed/has_staged에 기여하지 않는다.)
+        # (변경 검사 제외 열도 cell_kind가 실제 status를 보고하므로 여기에 기여한다 — 제외 열만
+        #  골라 병합 준비하는 것도 가능. 제외는 표시·집계 전용이고 병합은 명시적 지시다.)
         # has_changed는 열별 조기 종료(_col_has_changed) + any(), has_staged는 staged 집합 기반.
         has_changed = any(self._col_has_changed(c) for c in target_cols)
         has_staged  = self._cols_have_staged(target_cols)
@@ -1739,6 +1827,20 @@ class ExcelTableView(QTableView):
             self.key_row_changed.emit(orig_row)
 
     def _show_context_menu(self, pos):
+        """본체 셀 우클릭 — pos 는 본체 위젯 좌표."""
+        self._popup_cell_menu(self.viewport().mapToGlobal(pos))
+
+    def _popup_cell_menu(self, global_pos):
+        """선택 셀에 대한 병합 준비/취소 메뉴를 global_pos 에 띄운다.
+
+        본체와 **틀 고정 오버레이(키 열/행 밴드)** 가 공유하는 단일 진입점이다. 고정 밴드의
+        셀(키 열 및 그 좌측 열, 키 행)은 본체에서 숨겨져 오버레이가 그리므로, 오버레이에
+        메뉴를 배선하지 않으면 그 위 우클릭은 아무 메뉴도 못 띄운다(예: 키 열이 D면
+        #Description2(C) 셀에서 병합 준비 불가).
+
+        ★ 반드시 popup()(비모달). 오버레이 이벤트 처리 중 모달 메뉴(exec_ 중첩 이벤트루프)를
+        쓰면 Qt 상태가 깨져 access violation 이 난다(corner 헤더 메뉴와 동일한 제약).
+        """
         # has_changed: any()가 첫 changed에서 조기 종료. has_staged: staged 집합 기반(소수).
         # 과거엔 전 선택 셀을 순회하며 둘 다 찾을 때까지 멈추지 않아, 전체 선택+staged 없음이면
         # 수백만 셀을 훑어 우클릭이 지연됐다.
@@ -1749,24 +1851,20 @@ class ExcelTableView(QTableView):
 
         menu = QMenu(self)
         menu.setStyleSheet(MENU_QSS)
+        menu.setAttribute(Qt.WA_DeleteOnClose)
 
-        act_a2b     = menu.addAction("A → B  병합 준비") if has_changed else None
-        act_b2a     = menu.addAction("B → A  병합 준비") if has_changed else None
-        act_unstage = None
+        if has_changed:
+            menu.addAction("A → B  병합 준비").triggered.connect(
+                lambda _=False: self.stage_requested.emit(DIR_A2B))
+            menu.addAction("B → A  병합 준비").triggered.connect(
+                lambda _=False: self.stage_requested.emit(DIR_B2A))
         if has_staged:
             if has_changed:
                 menu.addSeparator()
-            act_unstage = menu.addAction("병합 준비 취소")
+            menu.addAction("병합 준비 취소").triggered.connect(
+                lambda _=False: self.unstage_requested.emit())
 
-        act = menu.exec_(self.viewport().mapToGlobal(pos))
-        if act is None:
-            return
-        if act_a2b is not None and act == act_a2b:
-            self.stage_requested.emit(DIR_A2B)
-        elif act_b2a is not None and act == act_b2a:
-            self.stage_requested.emit(DIR_B2A)
-        elif act_unstage is not None and act == act_unstage:
-            self.unstage_requested.emit()
+        menu.popup(global_pos)
 
     # ── 엑셀식 키보드 네비/선택/병합 단축키 ──────────────────────────────────
     def _is_empty_cell(self, r: int, c: int) -> bool:

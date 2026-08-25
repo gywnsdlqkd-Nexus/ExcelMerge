@@ -992,10 +992,6 @@ class DiffView(QWidget):
 
     # ── 선택 셀 스테이징 (우클릭) ─────────────────────────────────────────────
 
-    def _key_cells_for_selection(self, cells: set) -> set:
-        """선택 셀 집합에 대해 보충할 키 열/행 셀 좌표 (규칙은 staging 모듈)."""
-        return staging.key_cells_for_selection(cells, self._key_row, self._key_col)
-
     def _stage_selected(self, direction: str):
         if not self._diff_matrix:
             return
@@ -1004,13 +1000,13 @@ class DiffView(QWidget):
             self.panel_a.table.get_selected_cells()
             | self.panel_b.table.get_selected_cells()
         )
-        # 키 열/행 보충 — 본체에서 키 열(0..key_col)·키 행(0..key_row)은 '틀 고정'으로 숨겨져
-        # 러버밴드 셀 선택 range에 들어가지 않는다. '행 전체 병합 준비'(_select_rows)가 키 열을
-        # 포함하는 것과 동일하게, 선택된 행에는 키 열을, 선택된 열에는 키 행을 보충한다.
-        # (아래 status != same 필터가 매칭 행의 동일 키 셀은 자동으로 제외하고, 신규 행의
-        #  키 셀만 남긴다 — 신규 행을 복사할 때 UniqueID 등 키 값이 빠지지 않도록.)
-        cells |= self._key_cells_for_selection(cells)
-        cells = staging.stageable_cells(self._diff_matrix, cells, self._excluded_cols)
+        # ★ 키 열/행 자동 보충은 하지 않는다 — **고른 셀만** 병합 준비된다.
+        # 예전엔 선택 행에 키 열 0..key_col, 선택 열에 키 행 0..key_row 를 끼워 넣었다.
+        # 그런데 키 열 왼쪽 열(#Description 등)은 키가 아니라 단지 고정 밴드에 있을 뿐이라,
+        # E 열 셀 하나를 준비했는데 B~D 까지 함께 준비되는 문제가 있었다(신규 행은 전 열이
+        # added 라 status 필터로도 안 걸러진다). 행/열 전체를 준비하려면 헤더로 전체를
+        # 선택하면 된다 — 그때는 키 열/행이 '실제 선택'에 들어오므로 그대로 포함된다.
+        cells = staging.stageable_cells(self._diff_matrix, cells)
         if not cells:
             QMessageBox.information(self, "알림", "선택한 셀 중 변경된 셀이 없습니다.")
             return
@@ -1255,11 +1251,9 @@ class DiffView(QWidget):
                 return
             for c in new_cols:
                 self._excluded_cols.add(c)
-            # 새로 제외된 열들의 기존 staged 항목 자동 해제.
-            for key in staging.staged_keys_in_cols(self._staged, new_cols):
-                del self._staged[key]
-                self.panel_a._staged_display.pop(key, None)
-                self.panel_b._staged_display.pop(key, None)
+            # 기존 병합 준비는 유지한다 — 제외는 표시·집계 전용이라 사용자가 명시적으로
+            # 지시한 병합을 취소할 이유가 없다. (준비 셀은 제외 회색이 아니라 준비 색으로
+            # 보이므로 '숨겨진 채 저장되는' 위험도 없다.)
         else:
             for c in cols:
                 self._excluded_cols.discard(c)

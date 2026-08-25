@@ -13,31 +13,18 @@ UI 효과 적용만 남는다.
 from .constants import STATUS_SAME, DIR_A2B
 
 
-def key_cells_for_selection(cells, key_row, key_col) -> set:
-    """선택 셀 집합에 대해 보충할 키 열/행 셀 좌표를 반환.
-
-    선택된 각 행 r 에는 키 열 0..key_col, 선택된 각 열 c 에는 키 행 0..key_row 를 더한다.
-    틀 고정으로 본체에서 숨겨진 키 셀은 러버밴드 선택 range 에 안 잡히기 때문 — 신규 행을
-    복사할 때 UniqueID 등 키 값이 빠지지 않게 하려는 보충이다.
-    """
-    if not cells:
-        return set()
-    extra = set()
-    if key_col is not None and key_col >= 0:
-        for r in {r for (r, _c) in cells}:
-            extra.update((r, c) for c in range(key_col + 1))
-    if key_row is not None and key_row >= 0:
-        for c in {c for (_r, c) in cells}:
-            extra.update((r, c) for r in range(key_row + 1))
-    return extra
-
-
-def stageable_cells(diff_matrix, cells, excluded_cols) -> set:
+def stageable_cells(diff_matrix, cells) -> set:
     """cells 중 실제로 병합 준비할 수 있는 셀만 남긴다.
 
-    제외 기준: 격자 범위 밖 / 변경 검사 제외 열 / 변경 없음(same).
+    탈락 기준: 격자 범위 밖 / 변경 없음(same). 그것뿐이다.
     키 보충으로 들어온 셀 중 '매칭 행의 동일한 키 셀'은 same 이라 여기서 자동 탈락하고,
     신규 행의 키 셀만 남는다.
+
+    ★ '변경 검사에서 제외'한 열은 **탈락시키지 않는다.** 제외는 차이를 표시·집계하지
+    않겠다는 뜻이고, 병합 준비는 사용자의 명시적 지시다. 예전엔 제외 열을 버려서, B 에만
+    있는 행을 A→B 로 지울 때 제외 열(en/ja/zh_Hans 등)의 텍스트가 B 에 그대로 남았다.
+    (diff_matrix 는 제외와 무관하게 실제 status 를 담고 있다 — compute_diff 는 제외를
+    아예 모른다. 그래서 이 필터만 제거하면 실제 차이가 그대로 병합 대상이 된다.)
     """
     if not diff_matrix:
         return set()
@@ -47,8 +34,6 @@ def stageable_cells(diff_matrix, cells, excluded_cols) -> set:
             continue
         row = diff_matrix[r]
         if not (0 <= c < len(row)):
-            continue
-        if c in excluded_cols:
             continue
         if row[c][0] == STATUS_SAME:
             continue
@@ -67,12 +52,6 @@ def staged_display_value(diff_matrix, r: int, c: int, direction: str) -> str:
     except (IndexError, TypeError, ValueError):
         return ""
     return a_val if direction == DIR_A2B else b_val
-
-
-def staged_keys_in_cols(staged, cols) -> list:
-    """staged 중 지정 열들에 속한 키 목록 — 열을 변경 검사에서 제외할 때 자동 해제 대상."""
-    want = set(cols)
-    return [k for k in staged if k[1] in want]
 
 
 def excludable_cols(cols, key_col, excluded_cols) -> list:

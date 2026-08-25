@@ -26,57 +26,34 @@ def _matrix():
     ]
 
 
-# ── key_cells_for_selection ─────────────────────────────────────────────────
-def test_key_cells_empty_selection():
-    assert staging.key_cells_for_selection(set(), 0, 0) == set()
-
-
-def test_key_cells_adds_key_col_for_selected_rows():
-    got = staging.key_cells_for_selection({(3, 5)}, key_row=-1, key_col=1)
-    assert got == {(3, 0), (3, 1)}
-
-
-def test_key_cells_adds_key_row_for_selected_cols():
-    got = staging.key_cells_for_selection({(3, 5)}, key_row=1, key_col=-1)
-    assert got == {(0, 5), (1, 5)}
-
-
-def test_key_cells_both_axes():
-    got = staging.key_cells_for_selection({(2, 2)}, key_row=0, key_col=0)
-    assert got == {(2, 0), (0, 2)}
-
-
-def test_key_cells_none_and_negative_are_ignored():
-    assert staging.key_cells_for_selection({(1, 1)}, None, None) == set()
-    assert staging.key_cells_for_selection({(1, 1)}, -1, -1) == set()
-
-
 # ── stageable_cells ─────────────────────────────────────────────────────────
 def test_stageable_keeps_only_changed():
     m = _matrix()
     cells = {(0, 0), (1, 1), (2, 2), (1, 2)}
-    assert staging.stageable_cells(m, cells, set()) == {(1, 1), (2, 2)}
+    assert staging.stageable_cells(m, cells) == {(1, 1), (2, 2)}
 
 
-def test_stageable_drops_excluded_cols():
+def test_stageable_keeps_excluded_cols():
+    """'변경 검사에서 제외'한 열도 병합 준비 대상이다 — 제외는 표시·집계 전용.
+    (예전엔 제외 열을 버려서, B 에만 있는 행을 A→B 로 지울 때 제외 열 텍스트가 남았다.)"""
     m = _matrix()
-    assert staging.stageable_cells(m, {(1, 1), (2, 2)}, {1}) == {(2, 2)}
+    assert staging.stageable_cells(m, {(1, 1), (2, 2)}) == {(1, 1), (2, 2)}
 
 
 def test_stageable_drops_out_of_range():
     m = _matrix()
     cells = {(99, 1), (1, 99), (-1, 1), (1, -1), (1, 1)}
-    assert staging.stageable_cells(m, cells, set()) == {(1, 1)}
+    assert staging.stageable_cells(m, cells) == {(1, 1)}
 
 
 def test_stageable_empty_matrix():
-    assert staging.stageable_cells([], {(0, 0)}, set()) == set()
+    assert staging.stageable_cells([], {(0, 0)}) == set()
 
 
 def test_stageable_ragged_row():
     """행 길이가 들쭉날쭉해도 그 행의 실제 길이로 판정해야 한다."""
     m = [[_cell("modified", "a", "b")], [_cell("modified", "c", "d"), _cell("modified", "e", "f")]]
-    assert staging.stageable_cells(m, {(0, 1), (1, 1)}, set()) == {(1, 1)}
+    assert staging.stageable_cells(m, {(0, 1), (1, 1)}) == {(1, 1)}
 
 
 # ── staged_display_value ────────────────────────────────────────────────────
@@ -97,13 +74,7 @@ def test_display_value_malformed_cell_is_blank():
     assert staging.staged_display_value([["oops"]], 0, 0, DIR_A2B) == ""
 
 
-# ── staged_keys_in_cols / excludable_cols ───────────────────────────────────
-def test_staged_keys_in_cols():
-    staged = {(1, 1): DIR_A2B, (2, 2): DIR_A2B, (3, 1): DIR_B2A}
-    assert sorted(staging.staged_keys_in_cols(staged, [1])) == [(1, 1), (3, 1)]
-    assert staging.staged_keys_in_cols(staged, []) == []
-
-
+# ── excludable_cols ─────────────────────────────────────────────────────────
 def test_excludable_cols_filters_key_and_already_excluded():
     # 키 열(0)은 제외 불가, 이미 제외된 2는 중복 제외 대상 아님
     assert staging.excludable_cols([0, 1, 2, 3], key_col=0, excluded_cols={2}) == [1, 3]
