@@ -124,27 +124,35 @@ def content_equal(path_a: str, path_b: str) -> bool:
     return False
 
 
+def _cache_key(path_a: str, path_b: str):
+    """(경로,mtime,size)×2 캐시 키. stat 실패면 None(=캐시 우회)."""
+    try:
+        sa, sb = os.stat(path_a), os.stat(path_b)
+        return (path_a, sa.st_mtime, sa.st_size, path_b, sb.st_mtime, sb.st_size)
+    except OSError:
+        return None
+
+
+def _cache_put(key, value: bool) -> bool:
+    if key is not None:
+        if len(_pair_equal_cache) > _CACHE_CAP:
+            _pair_equal_cache.clear()
+        _pair_equal_cache[key] = value
+    return value
+
+
 def _pair_same(path_a: str, path_b: str) -> bool:
     """파일쌍이 (논리적으로) 동일한지 — (경로,mtime,size) 캐시 경유.
     바이트가 같으면 SAME, 다르면 내용 비교로 재확인(재저장 오탐 보정). stat 실패 시 캐시 우회."""
-    try:
-        sa, sb = os.stat(path_a), os.stat(path_b)
-        key = (path_a, sa.st_mtime, sa.st_size, path_b, sb.st_mtime, sb.st_size)
-    except OSError:
-        key = None
+    key = _cache_key(path_a, path_b)
     if key is not None:
         cached = _pair_equal_cache.get(key)
         if cached is not None:
             return cached
-    same = files_equal(path_a, path_b) or content_equal(path_a, path_b)
-    if key is not None:
-        if len(_pair_equal_cache) > _CACHE_CAP:
-            _pair_equal_cache.clear()
-        _pair_equal_cache[key] = same
-    return same
+    return _cache_put(key, files_equal(path_a, path_b) or content_equal(path_a, path_b))
 
 
-def compare_folders(root_a: str, root_b: str, progress=None) -> list:
+def compare_folders(root_a: str, root_b: str, progress=None, deep: bool = True) -> list:
     """A/B 폴더를 비교해 FolderEntry 리스트를 rel_path 정렬 순으로 반환한다.
 
     한쪽 root가 비어 있으면(폴더 미지정) 반대쪽 파일만 only_* 로 나열한다.
@@ -152,7 +160,11 @@ def compare_folders(root_a: str, root_b: str, progress=None) -> list:
     양쪽에 있는 파일쌍의 동일성 판정(바이트 비교 + 내용 비교)은 스레드 풀로 병렬화하며
     (경로,mtime,size) 캐시로 반복 스캔의 재계산을 피한다. 결과 순서는 최종 조립에서 rel_path
     정렬로 결정론적으로 유지된다.
-    progress(done, total) 콜백이 주어지면 파일쌍 판정 진행 상황을 보고한다(소비 스레드 1곳에서만 호출)."""
+    progress(done, total) 콜백이 주어지면 파일쌍 판정 진행 상황을 보고한다(소비 스레드 1곳에서만 호출).
+
+    deep=False 면 **바이트 비교까지만** 하고 즉시 반환한다(전체 폴더 353쌍 기준 7.5초 → 0.6초).
+    바이트가 다른 쌍은 일단 MODIFIED 로 두고, 값까지 같은 재저장 오탐은 refine_modified 가
+    뒤에서 정정한다 — 목록을 먼저 띄우고 정밀 판정을 백그라운드로 미루기 위한 2단계 경로."""
     a_map = scan_folder(root_a)
     b_map = scan_folder(root_b)
 
@@ -161,7 +173,9 @@ def compare_folders(root_a: str, root_b: str, progress=None) -> list:
 
     def _classify(key):
         pa, pb = a_map[key][1], b_map[key][1]
-        return key, SAME if _pair_same(pa, pb) else MODIFIED
+        # deep=False: 바이트 비교까지만(빠름). 재저장 오탐 보정은 refine_modified 가 뒤에서 한다.
+        same = _pair_same(pa, pb) if deep else files_equal(pa, pb)
+        return key, SAME if same else MODIFIED
 
     status_map: dict = {}
     if matched:
@@ -185,6 +199,45 @@ def compare_folders(root_a: str, root_b: str, progress=None) -> list:
         else:
             entries.append(FolderEntry(b[0], "", b[1], ONLY_B))
     return entries
+
+
+def refine_modified(entries: list, progress=None) -> list:
+    """1차(바이트) 판정에서 MODIFIED 로 남은 쌍을 내용 비교로 재확인한다.
+
+    반환: **실제로는 동일해서 SAME 으로 정정해야 할** entries 인덱스 리스트.
+    정정 방향이 MODIFIED→SAME 뿐이라(넓게 잡은 것을 좁히는 방향) 정정 전 목록으로
+    작업해도 위험하지 않다 — 같은 파일을 병합해도 내용이 같아 무해하다.
+
+    깊은 판정 결과는 _pair_same 과 같은 캐시에 넣어, 다음 스캔(deep=True 포함)이 즉시 끝나게 한다."""
+    targets = [(i, e.path_a, e.path_b) for i, e in enumerate(entries)
+               if e.status == MODIFIED and e.path_a and e.path_b]
+    if not targets:
+        return []
+
+    def _check(item):
+        i, pa, pb = item
+        key = _cache_key(pa, pb)
+        if key is not None:
+            cached = _pair_equal_cache.get(key)
+            if cached is not None:
+                return i, cached
+        try:
+            same = content_equal(pa, pb)   # 바이트는 이미 다름이 확정 → 내용만 보면 된다
+        except Exception:
+            same = False
+        return i, _cache_put(key, same)
+
+    fixed = []
+    total = len(targets)
+    done = 0
+    with ThreadPoolExecutor(max_workers=_CMP_WORKERS) as ex:
+        for i, same in ex.map(_check, targets):
+            if same:
+                fixed.append(i)
+            done += 1
+            if progress is not None:
+                progress(done, total)
+    return fixed
 
 
 def summarize(entries: list) -> dict:

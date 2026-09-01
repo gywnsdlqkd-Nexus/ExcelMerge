@@ -53,6 +53,8 @@ class DiffTableModel(QAbstractTableModel):
         super().__init__(parent)
         self.side = side                     # 'a' | 'b'
         self._mode = MODE_EMPTY                 # 'empty' | 'diff' | 'preview'
+        self._row_count = 0   # rowCount() 가 그대로 반환 — _sync_counts 가 갱신
+        self._col_count = 0
         self._diff_matrix: list = []
         self._row_meta: list = []
         self._staged: dict = {}
@@ -96,6 +98,7 @@ class DiffTableModel(QAbstractTableModel):
         self._formula_flags = []   # 새 비교 — 수식 플래그는 지연 로딩으로 다시 채운다
         self._data_rows = len(diff_matrix)
         self._data_cols = len(diff_matrix[0]) if diff_matrix else 0
+        self._sync_counts()
         self.endResetModel()
 
     def set_preview_data(self, data: list):
@@ -109,6 +112,7 @@ class DiffTableModel(QAbstractTableModel):
         self._formula_flags = []
         self._data_rows = len(data)
         self._data_cols = max((len(r) for r in data), default=0)
+        self._sync_counts()
         self.endResetModel()
 
     def set_formula_flags(self, flags: list):
@@ -132,6 +136,7 @@ class DiffTableModel(QAbstractTableModel):
         self._formula_flags = []
         self._data_rows = 0
         self._data_cols = 0
+        self._sync_counts()
         self.endResetModel()
 
     # ── 부분 갱신 — 상태는 이미 MainWindow가 변형한 뒤 호출된다 ───────────────
@@ -195,6 +200,13 @@ class DiffTableModel(QAbstractTableModel):
     @property
     def data_cols(self) -> int:
         return self._data_cols
+
+    def _sync_counts(self) -> None:
+        """rowCount/columnCount 가 그대로 반환할 값을 갱신한다 — 상태가 바뀔 때만 호출.
+        (모드/데이터 크기가 바뀌는 지점: set_diff_data / set_preview_data / clear)"""
+        empty = self._mode == MODE_EMPTY
+        self._row_count = 0 if empty else self._data_rows + EXTRA_ROWS
+        self._col_count = 0 if empty else self._data_cols + EXTRA_COLS
 
     def is_data_cell(self, r: int, c: int) -> bool:
         return 0 <= r < self._data_rows and 0 <= c < self._data_cols
@@ -342,18 +354,19 @@ class DiffTableModel(QAbstractTableModel):
         return own == ""
 
     # ── Qt 오버라이드 ─────────────────────────────────────────────────────────
+    # rowCount/columnCount 는 Qt 가 **선택 한 번에 20만 회** 부르는 초핫패스다
+    # (실측: Ctrl+A 974ms 중 파이썬 모델 콜백이 37%). 그래서 문자열 비교·덧셈 없이
+    # 미리 계산해 둔 정수를 그대로 돌려준다(_sync_counts 가 상태 변경 시 1회 갱신).
     def rowCount(self, parent=QModelIndex()):
-        if parent.isValid() or self._mode == MODE_EMPTY:
-            return 0
-        return self._data_rows + EXTRA_ROWS
+        return 0 if parent.isValid() else self._row_count
 
     def columnCount(self, parent=QModelIndex()):
-        if parent.isValid() or self._mode == MODE_EMPTY:
-            return 0
-        return self._data_cols + EXTRA_COLS
+        return 0 if parent.isValid() else self._col_count
 
-    def flags(self, index):
-        return Qt.ItemIsEnabled | Qt.ItemIsSelectable
+    # flags() 는 오버라이드하지 않는다 — QAbstractTableModel 기본값이 이미
+    # ItemIsSelectable|ItemIsEnabled 이고(+ItemIsDropEnabled), 이 뷰는 드래그앤드롭이
+    # 꺼져 있어(acceptDrops/dragDropMode 모두 off) 그 플래그가 아무 일도 하지 않는다.
+    # 파이썬 오버라이드를 두면 같은 핫패스에서 20만 회가 파이썬으로 넘어온다.
 
     def data(self, index, role=Qt.DisplayRole):
         if not index.isValid():

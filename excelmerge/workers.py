@@ -8,7 +8,7 @@ from PyQt5.QtCore import QThread, pyqtSignal
 
 from .loaders import load_values_any, load_formula_flags_any
 from .diff_engine import compute_diff, count_changed, count_dropped_key_rows
-from .folder_compare import compare_folders
+from .folder_compare import compare_folders, refine_modified
 from .xlsx_writer import _promote_empty_cols_to_delete, _write_patches_to_file
 from .merge_build import build_side_patches
 from .constants import DIR_A2B, DIR_B2A
@@ -201,10 +201,15 @@ class SheetDiffWorker(QThread):
 
 
 class FolderScanWorker(QThread):
-    """폴더 비교(compare_folders)를 백그라운드에서 수행 — UI 프리즈 방지.
-    파일쌍 판정 진행 상황을 progress로 보고한다(취소는 미지원)."""
-    done = pyqtSignal(object)        # list[FolderEntry]
-    progress = pyqtSignal(int, int)  # (done, total)
+    """폴더 비교를 백그라운드에서 2단계로 수행 — 목록을 먼저 띄우고 정밀 판정을 뒤로 미룬다.
+
+    1단계: 바이트 비교까지만(deep=False) → done 으로 목록 즉시 전달.
+    2단계: 바이트가 다른 쌍만 내용 비교로 재확인 → refined 로 정정 인덱스 전달.
+    전체 폴더(353쌍) 기준 1단계 0.6초 / 예전 단일 단계 7.5초. 취소는 미지원."""
+    done = pyqtSignal(object)        # list[FolderEntry] — 1단계(바이트) 결과
+    refined = pyqtSignal(object)     # list[int] — SAME 으로 정정할 entries 인덱스
+    progress = pyqtSignal(int, int)  # (done, total) — 1단계
+    refine_progress = pyqtSignal(int, int)   # (done, total) — 2단계
     error = pyqtSignal(str)
 
     def __init__(self, root_a, root_b):
@@ -223,7 +228,20 @@ class FolderScanWorker(QThread):
                     last[0] = now
                     self.progress.emit(done, total)
 
-            self.done.emit(compare_folders(self.root_a, self.root_b, progress=_cb))
+            entries = compare_folders(self.root_a, self.root_b,
+                                      progress=_cb, deep=False)
+            self.done.emit(entries)
+
+            # 2단계 — 재저장 오탐(바이트는 다른데 값은 같음) 정정. 목록은 이미 떠 있다.
+            last2 = [0.0]
+
+            def _cb2(done, total):
+                now = time.monotonic()
+                if done >= total or now - last2[0] >= _PROGRESS_INTERVAL:
+                    last2[0] = now
+                    self.refine_progress.emit(done, total)
+
+            self.refined.emit(refine_modified(entries, progress=_cb2))
         except Exception as e:
             self.error.emit(str(e))
 

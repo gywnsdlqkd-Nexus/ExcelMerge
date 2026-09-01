@@ -178,6 +178,60 @@ def test_notify_equals_fresh_populate():
     print("PASS test_notify_equals_fresh_populate")
 
 
+
+def test_row_col_count_cache_tracks_every_state(qapp):
+    """rowCount/columnCount 는 미리 계산한 값을 반환한다 — 상태가 바뀌면 반드시 갱신돼야 한다.
+
+    Qt 가 선택 한 번에 이 둘을 20만 회씩 부르는 핫패스라 캐시했다(Ctrl+A 683→367ms).
+    _sync_counts 를 어느 전이 하나에서라도 빠뜨리면 격자 크기가 낡은 값으로 굳는다.
+    """
+    from excelmerge.diff_model import DiffTableModel, EXTRA_ROWS, EXTRA_COLS, MODE_EMPTY
+
+    m = DiffTableModel('a')
+
+    def expected():
+        if m._mode == MODE_EMPTY:
+            return 0, 0
+        return m._data_rows + EXTRA_ROWS, m._data_cols + EXTRA_COLS
+
+    def check(tag):
+        er, ec = expected()
+        assert m.rowCount() == er, f'{tag}: rowCount {m.rowCount()} != {er}'
+        assert m.columnCount() == ec, f'{tag}: columnCount {m.columnCount()} != {ec}'
+
+    check('초기(empty)')
+    m.set_diff_data([[('same', 'a', 'a'), ('same', 'b', 'b')],
+                     [('modified', 'c', 'd'), ('same', 'e', 'e')]],
+                    [(0, 0), (1, 1)], {}, set(), set())
+    check('set_diff_data')
+    m.set_preview_data([['x', 'y', 'z'], ['1', '2', '3']])
+    check('set_preview_data')
+    m.clear()
+    check('clear')
+    m.set_diff_data([[('same', 'a', 'a')]], [(0, 0)], {}, set(), set())
+    check('다시 diff')
+    # 유효한 부모(자식 없음)에는 0
+    idx = m.index(0, 0)
+    assert m.rowCount(idx) == 0 and m.columnCount(idx) == 0
+
+
+def test_table_has_no_drag_drop_so_default_flags_are_safe(qapp):
+    """flags() 오버라이드를 지웠다(핫패스에서 20만 회 파이썬 진입 제거).
+
+    Qt 기본 flags 는 ItemIsDropEnabled 를 포함하는데, 이 뷰는 드래그앤드롭이 꺼져 있어
+    무해하다. 나중에 드롭을 켜게 되면 이 전제가 깨지므로 여기서 잠근다.
+    """
+    from PyQt5.QtWidgets import QAbstractItemView
+    from excelmerge.widgets import ExcelTableView
+
+    t = ExcelTableView('a')
+    assert not t.acceptDrops(), '테이블이 드롭을 받게 됐다 — flags 기본값 재검토 필요'
+    assert not t.viewport().acceptDrops()
+    assert t.dragDropMode() == QAbstractItemView.NoDragDrop
+    assert not t.dragEnabled()
+    t.deleteLater()
+
+
 def test_cell_kind():
     dm, meta, staged, merged, excluded = make_state()
     m = DiffTableModel("a")

@@ -12,7 +12,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import excelmerge.folder_compare as fc
 from excelmerge.folder_compare import (
-    compare_folders, scan_folder, files_equal, summarize,
+    compare_folders, scan_folder, files_equal, summarize, refine_modified,
     SAME, MODIFIED, ONLY_A, ONLY_B,
 )
 
@@ -178,3 +178,42 @@ def test_async_scan_view(tmp_path):
 if __name__ == "__main__":
     import pytest
     pytest.main([__file__, "-q"])
+
+
+# ── 2단계 비교(목록 먼저 + 정밀 판정 나중) ──────────────────────────────────
+def test_shallow_then_refine_equals_deep(tmp_path):
+    """deep=False + refine_modified 의 최종 결과가 deep=True 와 완전히 같아야 한다.
+
+    폴더 목록을 먼저 띄우려고 1단계는 바이트 비교까지만 한다(353쌍 7.5초 → 0.2초).
+    바이트만 다르고 값은 같은 '재저장 오탐'은 2단계가 MODIFIED → SAME 으로 정정한다.
+    """
+    a, b = _setup(str(tmp_path))
+    fc._pair_equal_cache.clear()
+    deep = {e.rel_path: e.status for e in compare_folders(a, b)}
+
+    fc._pair_equal_cache.clear()
+    entries = compare_folders(a, b, deep=False)
+    for i in refine_modified(entries):
+        entries[i].status = SAME
+    shallow = {e.rel_path: e.status for e in entries}
+    assert shallow == deep, (shallow, deep)
+
+
+def test_shallow_never_reports_same_for_differing_bytes(tmp_path):
+    """1단계는 바이트가 다르면 반드시 MODIFIED — 정정은 좁히는 방향(MODIFIED→SAME)뿐이라
+    정정 전 목록으로 작업해도 '같다고 잘못 표시된' 항목은 없다."""
+    a, b = _setup(str(tmp_path))
+    fc._pair_equal_cache.clear()
+    for e in compare_folders(a, b, deep=False):
+        if e.path_a and e.path_b and not files_equal(e.path_a, e.path_b):
+            assert e.status == MODIFIED, e.rel_path
+
+
+def test_refine_returns_indices_only_for_modified(tmp_path):
+    """refine_modified 는 MODIFIED 항목만 재검사하고, SAME/only_* 는 건드리지 않는다."""
+    a, b = _setup(str(tmp_path))
+    fc._pair_equal_cache.clear()
+    entries = compare_folders(a, b, deep=False)
+    for i in refine_modified(entries):
+        assert entries[i].status == MODIFIED, entries[i].rel_path
+        assert entries[i].path_a and entries[i].path_b

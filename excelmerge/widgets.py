@@ -1,5 +1,6 @@
 """테이블/스크롤/입력 위젯 (excel_diff_merge.py에서 분리)."""
 import os
+import re
 
 from PyQt5.QtWidgets import (
     QApplication, QTableView, QAbstractItemView, QLineEdit, QPlainTextEdit,
@@ -26,6 +27,13 @@ from .theme import (
     MINIMAP_MARKER_COLOR, ui_font, key_header_icon, exclude_header_icon,
     reset_header_icon, force_active_highlight,
 )
+
+
+
+# 셀 표시 문자열의 '줄바꿈' 감지. QStyledItemDelegate.initStyleOption 은 DisplayRole 의
+# '\n' 을 U+2028(LineSeparator)로 바꿔 넣으므로, opt.text 에는 '\n' 이 **없다**.
+# '\n' 만 검사하면 멀티라인 셀까지 단일 라인 경로로 새어 들어가 한 줄로 뭉개진다.
+_LINEBREAK_RE = re.compile("[\n\r\u2028\u2029]")
 
 
 def draw_diagonal_hatch(painter, rect, color=HATCH_COLOR, step=6, width=1):
@@ -184,6 +192,10 @@ class DiffHighlightDelegate(QStyledItemDelegate):
         style.drawControl(QStyle.CE_ItemViewItem, opt, painter, widget)
 
         text_rect = style.subElementRect(QStyle.SE_ItemViewItemText, opt, widget)
+        fg = self._text_color(opt, index)
+        if not _LINEBREAK_RE.search(text):
+            self._paint_inline(painter, opt, text_rect, text, ranges, fg)
+            return
 
         # 2) QTextDocument로 텍스트 구성 — '\n'은 줄바꿈, 소프트랩 없음(뷰와 동일).
         doc = QTextDocument()
@@ -197,11 +209,6 @@ class DiffHighlightDelegate(QStyledItemDelegate):
         # 기본 전경색 (선택 시 흰색, 그 외 ForegroundRole/기본).
         # ForegroundRole은 수식 결과 셀에 파랑을 돌려준다. 선택 셀은 흰색 우선(파란 선택 배경
         # 위 가독), 변경 구간(빨강)은 아래에서 덮어쓴다.
-        if opt.state & QStyle.State_Selected:
-            fg = opt.palette.color(QPalette.Active, QPalette.HighlightedText)
-        else:
-            fg = index.data(Qt.ForegroundRole) or opt.palette.color(
-                QPalette.Active, QPalette.Text)
         base_fmt = QTextCharFormat()
         base_fmt.setForeground(fg)
         cur = QTextCursor(doc)
@@ -232,6 +239,64 @@ class DiffHighlightDelegate(QStyledItemDelegate):
         y = text_rect.top() + max(0, (text_rect.height() - doc_h) / 2)
         painter.translate(text_rect.left(), y)
         doc.drawContents(painter)
+        painter.restore()
+
+
+    @staticmethod
+    def _text_color(opt, index):
+        """셀 기본 전경색 — 선택 시 흰색, 그 외 ForegroundRole(수식=파랑)/기본색.
+        변경 구간의 빨강은 호출부가 이 위에 덮어쓴다."""
+        if opt.state & QStyle.State_Selected:
+            return opt.palette.color(QPalette.Active, QPalette.HighlightedText)
+        return index.data(Qt.ForegroundRole) or opt.palette.color(
+            QPalette.Active, QPalette.Text)
+
+    @staticmethod
+    def _paint_inline(painter, opt, text_rect, text, ranges, fg):
+        """단일 라인 강조 렌더 — QTextDocument 없이 QPainter 로 직접 그린다.
+
+        ★ 강조 구간을 부분 문자열로 그리면 커닝/자간이 달라져 글자가 미세하게 밀린다.
+          그래서 **전체 문자열을 두 번** 그린다: 기본색으로 한 번, 그 다음 강조 구간
+          rect 로 clip 한 상태에서 빨강으로 한 번. 두 번 모두 같은 시작 x/baseline 을
+          쓰므로 글리프 위치가 픽셀 단위로 동일하고, 강조 경계만 색이 갈린다.
+
+        수직 정렬은 기본 델리게이트(drawItemText)와 같은 규칙(AlignVCenter)으로 맞춘다.
+        긴 텍스트는 기존 QTextDocument 경로와 동일하게 **자르지 않고 clip** 한다 —
+        문자 인덱스(ranges)가 생략기호(...) 없는 원문 기준이라 그래야 강조가 안 밀린다."""
+        fm = opt.fontMetrics
+        left = text_rect.left()
+        # 강조 배경은 '셀 전체 높이'가 아니라 **글자 줄 높이**만 덮는다 —
+        # QTextDocument 경로(문자 배경 = 줄 높이)와 픽셀 단위로 같게 맞추기 위함.
+        line_h = fm.height()
+        line_top = text_rect.top() + (text_rect.height() - line_h) // 2
+        baseline = line_top + fm.ascent()
+        n = len(text)
+
+        spans = []
+        for start, end in ranges:
+            start = max(0, start)
+            end = min(n, end)
+            if start >= end:
+                continue
+            x1 = left + fm.horizontalAdvance(text, start)
+            x2 = left + fm.horizontalAdvance(text, end)
+            if x2 > x1:
+                spans.append(QRect(x1, line_top, x2 - x1, line_h))
+
+        painter.save()
+        painter.setClipRect(text_rect)
+        painter.setFont(opt.font)
+        for rect in spans:                      # 1) 강조 배경(핑크)
+            painter.fillRect(rect, CELL_DIFF_HL)
+        painter.setPen(fg)                      # 2) 전체 텍스트 기본색
+        painter.drawText(left, baseline, text)
+        if spans:                               # 3) 강조 구간만 빨강으로 덮어 그리기
+            painter.setPen(CELL_DIFF_FG)
+            for rect in spans:
+                painter.save()
+                painter.setClipRect(rect, Qt.IntersectClip)
+                painter.drawText(left, baseline, text)
+                painter.restore()
         painter.restore()
 
 

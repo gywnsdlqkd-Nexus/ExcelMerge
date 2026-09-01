@@ -404,7 +404,9 @@ class FolderCompareView(QWidget):
         self.status.begin_busy()
         w = FolderScanWorker(self._root_a, self._root_b)
         w.done.connect(lambda es, t=token, cb=after: self._on_scan_done(es, t, cb))
+        w.refined.connect(lambda ix, t=token: self._on_scan_refined(ix, t))
         w.progress.connect(self._on_scan_progress)
+        w.refine_progress.connect(self._on_refine_progress)
         w.error.connect(self._on_scan_error)
         w.finished.connect(w.deleteLater)
         self._scan_worker = w
@@ -412,6 +414,11 @@ class FolderCompareView(QWidget):
 
     def _on_scan_progress(self, done: int, total: int):
         self.status.showMessage(f"폴더 비교 중… {done:,}/{total:,}")
+        self.status.set_progress(done, total)
+
+    def _on_refine_progress(self, done: int, total: int):
+        """2단계(내용 비교) 진행 — 목록은 이미 보이므로 상태바만 갱신한다."""
+        self.status.showMessage(f"변경 항목 정밀 확인 중… {done:,}/{total:,}")
         self.status.set_progress(done, total)
 
     def _on_scan_error(self, msg: str):
@@ -426,14 +433,33 @@ class FolderCompareView(QWidget):
         self._entries = entries
         self._set_nav_enabled(bool(self._entries))
         self._populate_trees()
-        c = summarize(self._entries)
-        self.status.showMessage(
-            f"폴더 비교 — 동일 {c[SAME]} · 변경 {c[MODIFIED]} · "
-            f"A만 {c[ONLY_A]} · B만 {c[ONLY_B]}  (총 {len(self._entries)}개 파일)"
-        )
+        self.status.showMessage(self._scan_summary_message())
         self.title_changed.emit()
         if after:
             after()
+
+    def _scan_summary_message(self) -> str:
+        c = summarize(self._entries)
+        return (f"폴더 비교 — 동일 {c[SAME]} · 변경 {c[MODIFIED]} · "
+                f"A만 {c[ONLY_A]} · B만 {c[ONLY_B]}  (총 {len(self._entries)}개 파일)")
+
+    def _on_scan_refined(self, indices, token):
+        """2단계 결과 반영 — 바이트만 다르고 값은 같은 항목을 MODIFIED → SAME 으로 정정.
+
+        정정 방향이 한쪽(좁히는 방향)뿐이라 1단계 목록으로 먼저 작업해도 안전하다.
+        정정이 없으면 트리를 다시 만들지 않는다(대형 폴더에서 헛일 방지)."""
+        if token != self._scan_token:
+            return   # 더 새 스캔이 시작됨 — 낡은 결과 폐기
+        self.status.end_progress()
+        fixed = 0
+        for i in indices or ():
+            if 0 <= i < len(self._entries) and self._entries[i].status == MODIFIED:
+                self._entries[i].status = SAME
+                fixed += 1
+        if fixed:
+            self._populate_trees()
+            self.title_changed.emit()
+        self.status.showMessage(self._scan_summary_message())
 
     def _populate_trees(self):
         self.tree_a.clear()
