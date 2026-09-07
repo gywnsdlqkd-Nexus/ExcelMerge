@@ -7,7 +7,10 @@ import time
 from PyQt5.QtCore import QThread, pyqtSignal
 
 from .loaders import load_values_any, load_formula_flags_any
-from .diff_engine import compute_diff, count_changed, count_dropped_key_rows
+from .diff_engine import (
+    compute_diff, count_changed_masked, count_dropped_key_rows, keep_mask,
+    row_change_masks,
+)
 from .folder_compare import compare_folders, refine_modified
 from .xlsx_writer import _promote_empty_cols_to_delete, _write_patches_to_file
 from .merge_build import build_side_patches
@@ -119,9 +122,9 @@ class DiffWorker(QThread):
     백그라운드에서 수행한다 — 과거엔 _on_loaded/_recompute_diff가 이를 UI 스레드에서 동기
     실행해 대형 데이터에서 로드 직후 프리즈가 생겼다.
     token/mode를 그대로 echo해 UI가 낡은 결과를 버리고(빠른 연속 키 변경 등) 상황별 후처리를
-    하도록 한다. matrix/row_meta는 동일 프로세스라 시그널로 참조 전달(복사 없음)."""
-    # (token, matrix, row_meta, changed_count, dropped_count, mode)
-    done = pyqtSignal(int, object, object, int, int, str)
+    하도록 한다. matrix/row_meta/row_masks는 동일 프로세스라 시그널로 참조 전달(복사 없음)."""
+    # (token, matrix, row_meta, row_masks, changed_count, dropped_count, mode)
+    done = pyqtSignal(int, object, object, object, int, int, str)
     error = pyqtSignal(str)
 
     def __init__(self, a_data, b_data, key_col, key_row, excluded_cols,
@@ -140,11 +143,17 @@ class DiffWorker(QThread):
         try:
             matrix, row_meta = compute_diff(
                 self.a_data, self.b_data, self.key_col, self.key_row)
-            changed = count_changed(matrix, self.excluded_cols)
+            # 행별 변경열 비트마스크 — 필터/미니맵/변경점 이동/변경 셀 수가 공유하는
+            # 파생 상태. 변경 셀 수도 이 마스크에서 뽑아 O(R x C) 스캔을 두 번 돌지 않는다.
+            row_masks = row_change_masks(matrix)
+            cols = len(matrix[0]) if matrix else 0
+            changed = count_changed_masked(
+                row_masks, keep_mask(cols, self.excluded_cols))
             dropped = (count_dropped_key_rows(
                 self.a_data, self.b_data, self.key_col, self.key_row)
                 if self.want_dropped else 0)
-            self.done.emit(self.token, matrix, row_meta, changed, dropped, self.mode)
+            self.done.emit(self.token, matrix, row_meta, row_masks,
+                           changed, dropped, self.mode)
         except Exception as e:
             self.error.emit(str(e))
 

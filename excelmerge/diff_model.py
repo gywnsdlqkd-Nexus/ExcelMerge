@@ -164,12 +164,29 @@ class DiffTableModel(QAbstractTableModel):
                 self.index(r, min(cs)), self.index(r, max(cs)), roles)
 
     def notify_columns(self, cols):
-        """열 전체 갱신 (제외 토글 등) + 가로 헤더 갱신."""
-        last_row = max(0, self._data_rows - 1)
+        """열 전체 갱신 (제외 토글 등) + 가로 헤더 갱신.
+
+        dataChanged 는 **연속 열 구간마다 한 번**만 방출한다 — notify_cells 가 대량
+        변경을 단일 bounding rect 로 접는 것과 같은 취지다.
+        실측 기여는 작다(6,328행 x 71열, 열 3개 제외 ON+OFF 46.5ms -> 43.3ms, 약 7%).
+        cProfile 은 emit 비용을 훨씬 크게 보여줬지만 프로파일러 오버헤드였다.
+        제외 열이 늘수록 이득이 커지고 손해는 없어 유지한다.
+        헤더 갱신은 열 수만큼이라 저렴해 접지 않는다(아이콘/색 갱신 누락 방지)."""
         roles = [Qt.DisplayRole, Qt.BackgroundRole]
+        last_row = max(0, self._data_rows - 1)
+        start = prev = None
+        for c in sorted(c for c in cols if 0 <= c < self._data_cols):
+            if prev is not None and c == prev + 1:
+                prev = c
+                continue
+            if start is not None:
+                self.dataChanged.emit(
+                    self.index(0, start), self.index(last_row, prev), roles)
+            start = prev = c
+        if start is not None:
+            self.dataChanged.emit(
+                self.index(0, start), self.index(last_row, prev), roles)
         for c in cols:
-            if 0 <= c < self._data_cols:
-                self.dataChanged.emit(self.index(0, c), self.index(last_row, c), roles)
             if 0 <= c < self.columnCount():
                 self.headerDataChanged.emit(Qt.Horizontal, c, c)
 

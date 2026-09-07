@@ -20,7 +20,7 @@ from PyQt5.QtCore import Qt, pyqtSignal, QThread
 from PyQt5.QtGui import QIcon, QKeySequence
 from openpyxl.utils import get_column_letter
 
-from .diff_engine import count_changed
+from .diff_engine import count_changed_masked, keep_mask, row_change_masks
 from .loaders import _EXCEL_EXTS, list_sheet_names, clear_values_cache
 from .panels import FilePanel
 from .prefs import load_key_prefs, save_key_prefs, load_last_sheet, save_last_sheet
@@ -60,12 +60,32 @@ class DiffView(QWidget):
         self._formula_flags: dict = {"a": set(), "b": set()}   # 수식 셀 좌표 {(row0,col0)}
         self._saving_side: str = "a"
         self._diff_matrix: list[list] = []
+        # 행별 '변경된 열' 비트마스크 — _diff_matrix 의 파생 상태(diff_engine.row_change_masks).
+        # 필터/미니맵/변경점 이동/변경 셀 수가 공유한다. DiffWorker 가 만들어 보내고,
+        # 이후 매트릭스를 바꾸는 곳은 _set_matrix_cell() 하나뿐이다 — 그 밖에서
+        # _diff_matrix 를 건드리면 마스크와 갈라진다.
+        self._row_masks: list = []
         self._diff_row_meta: list = []   # [(orig_a_row, orig_b_row), ...]
+        # 병합 완료(저장 확정) 셀. _staged 와 똑같이 populate 에서 두 모델에 **참조로**
+        # 넘어가므로(set_diff_data) 리셋은 항상 .clear() — 새 객체로 갈아치우면 다음
+        # populate 까지 뷰와 모델이 서로 다른 set 을 본다.
         self._merged_cells: set = set()
-        self._staged: dict = {}          # {(r, c): 'a_to_b' | 'b_to_a'}
+        # {(r, c): 'a_to_b' | 'b_to_a'}
+        # 이 dict 는 populate 에서 두 모델에 **참조로** 넘어간다(set_diff_data).
+        # 따라서 리셋은 항상 .clear() 로 — 새 객체로 갈아치우면 다음 populate 까지
+        # 모델이 옛 dict 를 들고 있어 뷰와 갈라진다(_recompute_diff 는 비동기
+        # 워커를 띄우므로 그 창이 실제로 열리고, 찾기와 표시 텍스트가 서로 다른
+        # staged 를 보게 된다).
+        self._staged: dict = {}
         self._preview_data: dict = {"a": [], "b": []}   # 미리보기 raw data
         self._diff_only: bool = False
-        self._undo_stack: list = []   # [("stage", cells, direction)] — 병합 준비 되돌리기용
+        # 병합 준비/취소 되돌리기(Ctrl+Z).
+        #   ("stage",   [cell, ...], direction)
+        #   ("unstage", [(cell, direction), ...])
+        # ★ 항목은 **현재 매트릭스의 좌표**를 가리킨다. 새 비교/키 변경으로 매트릭스가
+        #   재계산되면 같은 (r, c) 가 다른 셀을 뜻하므로 그 경로들에서 반드시 함께 비운다
+        #   (그러지 않으면 사용자가 건드린 적 없는 셀의 준비가 조용히 풀린다).
+        self._undo_stack: list = []
         self._raw_data: dict = {"a": [], "b": []}   # 키 열/행 변경 시 재계산용 캐시
         # 키 헤더 앵커 = (키 행, 키 열). 전역 저장값을 기본으로 로드(없으면 A1 = 0,0).
         self._key_row, self._key_col = load_key_prefs()
@@ -311,9 +331,11 @@ class DiffView(QWidget):
     def _reset_compare_state(self):
         """비교 결과를 초기화하고 버튼 상태를 되돌린다."""
         self._diff_matrix = []
+        self._row_masks = []
         self._diff_row_meta = []
-        self._merged_cells = set()
-        self._staged = {}
+        self._merged_cells.clear()   # 제자리 비우기 — 선언부 주석 참조
+        self._staged.clear()         # 〃
+        self._undo_stack.clear()     # 매트릭스가 사라지면 좌표가 무의미
         self._preview_data = {"a": [], "b": []}
         self._clear_row_filter()   # diff 모드의 숨김 행이 미리보기에 남지 않도록 해제
         self._clear_freeze()       # 틀 고정 오버레이도 숨김(미리보기/빈 상태)
@@ -570,9 +592,11 @@ class DiffView(QWidget):
         self._set_buttons_enabled(False)
         self._formula_flags_requested = False   # 새 비교 — 수식 플래그 지연 로드 재무장
         self._formula_flags = {"a": set(), "b": set()}
-        self._merged_cells = set()
-        self._staged = {}
+        self._merged_cells.clear()   # 제자리 비우기 — 선언부 주석 참조
+        self._staged.clear()         # 〃
+        self._undo_stack.clear()     # 새 비교 — 옛 좌표 항목은 무효
         self._diff_matrix = []
+        self._row_masks = []
         self._diff_row_meta = []   # 미리보기 잠금 해제
         self._excluded_cols.clear()
         self.panel_a.table.set_excluded_cols(self._excluded_cols)
@@ -634,12 +658,14 @@ class DiffView(QWidget):
         self._diff_worker = w
         w.start()
 
-    def _on_diff_ready(self, token, matrix, row_meta, changed, dropped, mode):
+    def _on_diff_ready(self, token, matrix, row_meta, row_masks, changed, dropped,
+                       mode):
         # 낡은 결과(빠른 연속 키 변경/새 비교로 토큰이 밀림) 폐기.
         if token != self._diff_token:
             return
         self.status.end_progress()
         self._diff_matrix = matrix
+        self._row_masks = row_masks   # 매트릭스와 같은 시점의 파생 상태 — 항상 함께 갱신
         self._diff_row_meta = row_meta
         self.panel_a._row_meta = row_meta
         self.panel_b._row_meta = row_meta
@@ -694,8 +720,10 @@ class DiffView(QWidget):
             self._recompute_diff()
 
     def _recompute_diff(self):
-        self._merged_cells = set()
-        self._staged = {}
+        self._merged_cells.clear()   # 제자리 비우기 — 선언부 주석 참조
+        self._staged.clear()         # 〃
+        # 키가 바뀌면 같은 (r, c) 가 다른 셀을 뜻한다 — 취소 스택도 무효.
+        self._undo_stack.clear()
         # 키 열이 바뀌면 동일 인덱스가 다른 의미가 될 수 있으므로 제외 상태도 리셋.
         self._excluded_cols.clear()
         self.panel_a.table.set_excluded_cols(self._excluded_cols)
@@ -733,21 +761,27 @@ class DiffView(QWidget):
             # 저장 직후 행이 사라져 병합 결과를 확인할 수 없던 문제 방지.
             # (새 비교/새로고침으로 _merged_cells가 리셋되면 일반 규칙으로 복귀)
             merged_rows = {r for (r, c) in self._merged_cells if c not in excl}
-            for r, row in enumerate(self._diff_matrix):
+            # 행별 변경열 마스크로 판정 — 행마다 O(C) 튜플 언패킹을 돌던 것을
+            # 정수 AND 하나로 줄인다(6328행 x 71열: 66ms -> 0.5ms).
+            masks = self._row_masks_checked()
+            keep = self._keep_mask()
+            for r in range(len(self._diff_matrix)):
                 if r <= self._key_row:   # 고정 행 — 이미 desired에 포함(본체 숨김)
                     continue
                 if r in merged_rows:
                     continue
-                is_changed = any(
-                    status != STATUS_SAME
-                    for c, (status, *_) in enumerate(row)
-                    if c not in excl
-                )
-                if not is_changed:
+                if not (masks[r] & keep):
                     desired.add(r)
-        # setRowHidden은 sectionResized(_, _, 0)을 emit해 _user_row_heights를
-        # 오염시킨다. _applying_sizes 플래그로 _on_section_v_resized 기록을 차단.
-        for tbl in (self.panel_a.table, self.panel_b.table):
+        # 실제로 숨김이 뒤집힌 행만 틀 고정 오버레이에 미러하도록 side 별로 모은다 —
+        # 열 제외처럼 행 가시성이 그대로인 갱신에서 오버레이 미러 비용이 0 이 된다.
+        # 루프가 행을 오름차순으로 돌므로 append 만으로 정렬된 리스트가 된다
+        # (set 으로 모으면 해싱 비용이 들고, 미러가 뒤죽박죽 순서로 돌아 더 느려진다).
+        flipped: dict[str, list] = {}
+        for side, tbl in (("a", self.panel_a.table), ("b", self.panel_b.table)):
+            changed: list[int] = []
+            flipped[side] = changed
+            # setRowHidden은 sectionResized(_, _, 0)을 emit해 _user_row_heights를
+            # 오염시킨다. _applying_sizes 플래그로 _on_section_v_resized 기록을 차단.
             tbl._applying_sizes = True
             prev_upd = tbl.updatesEnabled()
             tbl.setUpdatesEnabled(False)   # 대량 setRowHidden 중 재도색 방지(40k행 성능)
@@ -762,17 +796,25 @@ class DiffView(QWidget):
                     want = r in desired   # 여분(EXTRA) 행은 desired에 없으므로 항상 표시
                     if tbl.isRowHidden(r) != want:
                         tbl.setRowHidden(r, want)
+                        changed.append(r)
             finally:
                 tbl.setVerticalScrollMode(prev_vmode)
                 tbl._applying_sizes = False
                 tbl.setUpdatesEnabled(prev_upd)
         self._update_minimap()
-        self._refresh_freeze()
+        self._refresh_freeze(flipped)
 
-    def _refresh_freeze(self):
-        """양 패널 틀 고정 오버레이 갱신(앵커·크기·숨김행·스크롤·지오메트리 재적용)."""
-        for fc in getattr(self, "_freeze", {}).values():
-            fc.refresh()
+    def _refresh_freeze(self, changed_rows: dict | None = None):
+        """양 패널 틀 고정 오버레이 갱신(앵커·크기·숨김행·스크롤·지오메트리 재적용).
+
+        changed_rows: {side: 이번에 숨김이 뒤집힌 행 집합}. 주면 좌측 오버레이의 행
+        미러를 그 행들로 한정한다. None 이면 전 행 스캔(구조가 바뀐 경로).
+        오버레이가 본체와 동기라는 보장이 없을 때는 FreezeController 쪽에서 델타를
+        무시하고 전 행을 훑으므로, 여기서는 힌트만 넘기면 된다.
+        """
+        for side, fc in getattr(self, "_freeze", {}).items():
+            fc.refresh(None if changed_rows is None
+                       else changed_rows.get(side, ()))
 
     def _clear_freeze(self):
         for fc in getattr(self, "_freeze", {}).values():
@@ -807,15 +849,20 @@ class DiffView(QWidget):
         """변경된 (r, c) 셀을 행 우선 순서로 yield. 숨겨진 행/제외 열은 제외."""
         if not self._diff_matrix:
             return
-        excl = self._excluded_cols
-        for r, row in enumerate(self._diff_matrix):
-            if self.panel_a.table.isRowHidden(r):
+        # 마스크로 '변경 없는 행'을 통째로 건너뛴 뒤, 켜진 비트만 훑는다.
+        masks = self._row_masks_checked()
+        keep = self._keep_mask()
+        is_hidden = self.panel_a.table.isRowHidden
+        for r in range(len(self._diff_matrix)):
+            m = masks[r] & keep
+            if not m or is_hidden(r):
                 continue
-            for c, cell in enumerate(row):
-                if c in excl:
-                    continue
-                if cell[0] != STATUS_SAME:
+            c = 0
+            while m:
+                if m & 1:
                     yield (r, c)
+                m >>= 1
+                c += 1
 
     def _current_anchor(self):
         """현재 선택 셀(우선순위: panel_a → panel_b).
@@ -881,25 +928,55 @@ class DiffView(QWidget):
     def _iter_find_matches(self, match):
         """검색어와 일치하는 (r, c) 셀을 행 우선 순서로 yield.
         diff 모드: 숨겨진 행/제외 열 제외, A/B 표시 텍스트 중 한쪽이라도 일치하면 매치.
-        미리보기 모드(파일 1개만 로드)에서도 로드된 패널의 데이터를 검색한다."""
-        tbl_a = self.panel_a.table
-        models = (tbl_a.model(), self.panel_b.table.model())
+        미리보기 모드(파일 1개만 로드)에서도 로드된 패널의 데이터를 검색한다.
+
+        diff 모드는 _diff_matrix 튜플을 직접 읽는다(_iter_find_matches_diff) —
+        셀당 모델 display_text() 를 양쪽에 호출하면 449K셀 표에서 파이썬 메서드
+        호출이 90만 회가 되어 F3 한 번에 640ms 가 들었다(직접 읽기 93ms, 6.8배).
+        """
+        if self._diff_matrix:
+            yield from self._iter_find_matches_diff(match)
+            return
+        # 미리보기 모드 — _diff_matrix 가 없어 모델 표시 텍스트로 검색한다.
+        models = (self.panel_a.table.model(), self.panel_b.table.model())
         rows = max(m.data_rows for m in models)
         cols = max(m.data_cols for m in models)
-        if rows == 0:
-            return
-        diff_mode = bool(self._diff_matrix)
-        excl = self._excluded_cols if diff_mode else set()
         for r in range(rows):
-            if diff_mode and tbl_a.isRowHidden(r):
-                continue
             for c in range(cols):
-                if c in excl:
-                    continue
                 for model in models:
                     if match(model.display_text(r, c)):
                         yield (r, c)
                         break
+
+    def _iter_find_matches_diff(self, match):
+        """diff 모드 찾기 스캔 — _diff_matrix 를 직접 읽는 빠른 경로.
+
+        판정 대상은 **화면에 보이는 텍스트**여야 한다. 병합 준비된 셀은 display_text 가
+        양쪽 패널에 staged 방향의 값 하나만 주므로, 그 셀만 해당 값으로 판정한다.
+        이 우회를 빼고 (a_val, b_val) 를 늘 둘 다 보면, 화면에 없는 쪽 값에 일치해
+        '보이지 않는 글자를 찾는' 오동작이 된다.
+        """
+        dm = self._diff_matrix
+        excl = self._excluded_cols
+        staged = self._staged
+        is_hidden = self.panel_a.table.isRowHidden
+        cols = len(dm[0])
+        for r in range(len(dm)):
+            if is_hidden(r):
+                continue
+            row = dm[r]
+            for c in range(cols):
+                if c in excl:
+                    continue
+                cell = row[c]
+                if staged:   # 보통 비어 있음 — 빈 경우 셀당 falsy 검사 1회로 끝난다
+                    direction = staged.get((r, c))
+                    if direction is not None:
+                        if match(cell[1] if direction == DIR_A2B else cell[2]):
+                            yield (r, c)
+                        continue
+                if match(cell[1]) or match(cell[2]):
+                    yield (r, c)
 
     def _goto_find(self, direction: int):
         """direction=+1: 다음 찾기, -1: 이전 찾기. 끝에 도달하면 반대편에서 순환.
@@ -946,42 +1023,35 @@ class DiffView(QWidget):
         row_ratios = []
         col_ratios = []
         if self._diff_matrix:
-            excl = self._excluded_cols
-            visible_rows = [
-                r for r in range(len(self._diff_matrix))
-                if not self.panel_a.table.isRowHidden(r)
-            ]
-
-            def _row_has_changed(r):
-                return any(
-                    st != STATUS_SAME
-                    for c, (st, *_) in enumerate(self._diff_matrix[r])
-                    if c not in excl
-                )
-
+            # 행 마스크 한 번 훑어 세로 비율과 '변경 열 합집합'을 동시에 모은다 —
+            # 예전엔 행마다 O(C), 열마다 O(R) 을 따로 돌아 O(R x C) 를 두 번 갔다
+            # (6328행 x 71열: 122ms -> 1.3ms).
+            masks = self._row_masks_checked()
+            keep = self._keep_mask()
+            is_hidden = self.panel_a.table.isRowHidden
+            visible_rows = [r for r in range(len(self._diff_matrix))
+                            if not is_hidden(r)]
             n = len(visible_rows)
-            if n == 1:
-                r = visible_rows[0]
-                if _row_has_changed(r):
-                    row_ratios.append(0.0)
-            elif n > 1:
-                denom = n - 1
-                for vi, r in enumerate(visible_rows):
-                    if _row_has_changed(r):
-                        row_ratios.append(vi / denom)
+            denom = n - 1
+            colmask = 0
+            for vi, r in enumerate(visible_rows):
+                m = masks[r] & keep
+                if m:
+                    colmask |= m
+                    row_ratios.append(0.0 if n == 1 else vi / denom)
 
-            cols_total = len(self._diff_matrix[0]) if self._diff_matrix else 0
-            if cols_total > 0 and visible_rows:
-                if cols_total == 1:
-                    if 0 not in excl and any(self._diff_matrix[r][0][0] != STATUS_SAME for r in visible_rows):
-                        col_ratios.append(0.0)
-                else:
-                    denom_c = cols_total - 1
-                    for c in range(cols_total):
-                        if c in excl:
-                            continue
-                        if any(self._diff_matrix[r][c][0] != STATUS_SAME for r in visible_rows):
-                            col_ratios.append(c / denom_c)
+            cols_total = len(self._diff_matrix[0])
+            if cols_total == 1:
+                if colmask & 1:
+                    col_ratios.append(0.0)
+            elif cols_total > 1:
+                denom_c = cols_total - 1
+                c = 0
+                while colmask:
+                    if colmask & 1:
+                        col_ratios.append(c / denom_c)
+                    colmask >>= 1
+                    c += 1
         for tbl in (self.panel_a.table, self.panel_b.table):
             v = tbl.verticalScrollBar()
             if isinstance(v, MinimapScrollBar):
@@ -1051,6 +1121,11 @@ class DiffView(QWidget):
         if not removed:
             QMessageBox.information(self, "알림", "선택한 셀 중 병합 준비된 셀이 없습니다.")
             return
+        # 취소도 Ctrl+Z 로 되살릴 수 있어야 한다 — 예전엔 stage 만 스택에 쌓여
+        # '준비 → 취소 → Ctrl+Z' 가 취소를 되돌리지 않고 그 이전 준비를 지웠다.
+        # 방향은 셀마다 다를 수 있으므로 (셀, 방향) 쌍으로 기록한다.
+        self._undo_stack.append(
+            ("unstage", [(cell, self._staged[cell]) for cell in removed]))
         for cell in removed:
             del self._staged[cell]
             self.panel_a._staged_display.pop(cell, None)
@@ -1154,13 +1229,16 @@ class DiffView(QWidget):
                     b_val = a_val
                 else:
                     a_val = b_val
-                self._diff_matrix[r][c] = (STATUS_SAME, a_val, b_val)
+                self._set_matrix_cell(r, c, (STATUS_SAME, a_val, b_val))
 
         # 저장한 side의 staged 제거 (나머지 side는 유지)
         for k in list(self._staged.keys()):
             if self._staged[k] == relevant_direction:
                 del self._staged[k]
         self._merged_cells |= staged_cells
+        # 확정 저장은 되돌릴 수 없다. 남겨 두면 Ctrl+Z 가 이미 사라진 staged 를
+        # 지우려 들며 아무 반응 없이 항목만 소모한다.
+        self._undo_stack.clear()
 
         # 저장으로 status가 modified→same이 되어 행 가시성·미니맵이 바뀔 수 있어 refilter 필요.
         self._notify_cells(staged_cells, refilter=True)
@@ -1176,23 +1254,43 @@ class DiffView(QWidget):
         QMessageBox.critical(self, "오류", f"작업 실패:\n{msg}")
 
     def _undo(self):
-        """Ctrl+Z — 병합 준비(stage) 동작을 단계별로 되돌린다.
-        (셀 직접 편집 기능이 제거되어 undo 대상은 stage 항목뿐)"""
+        """Ctrl+Z — 병합 준비/준비 취소를 한 단계씩 되돌린다.
+
+        스택 항목은 현재 매트릭스의 좌표를 가리키므로, 매트릭스를 재계산하는 경로와
+        저장 확정에서 스택을 비운다(선언부 주석 참조). 그 정리가 없으면 옛 좌표로
+        지금 화면의 엉뚱한 셀을 건드린다.
+        """
         if not self._undo_stack:
+            self.status.showMessage("되돌릴 병합 준비 동작이 없습니다.")
             return
         entry = self._undo_stack.pop()
-        if entry[0] != "stage":
+        kind = entry[0]
+        if kind == "stage":
+            _, cells, _direction = entry
+            for cell in cells:
+                self._staged.pop(cell, None)
+                self.panel_a._staged_display.pop(cell, None)
+                self.panel_b._staged_display.pop(cell, None)
+            msg = f"되돌리기 — 병합 준비 {len(cells)}개 취소"
+        elif kind == "unstage":
+            _, pairs = entry
+            cells = [cell for cell, _d in pairs]
+            for (r, c), direction in pairs:
+                self._staged[r, c] = direction
+                # 셀값란 표시값은 stage 경로와 같은 규칙으로 다시 만든다.
+                display = staging.staged_display_value(
+                    self._diff_matrix, r, c, direction)
+                self.panel_a._staged_display[r, c] = display
+                self.panel_b._staged_display[r, c] = display
+            msg = f"되돌리기 — 병합 준비 {len(cells)}개 복원"
+        else:
             return
-        _, cells, _ = entry
-        for cell in cells:
-            self._staged.pop(cell, None)
-            self.panel_a._staged_display.pop(cell, None)
-            self.panel_b._staged_display.pop(cell, None)
         self._silent_clear_selection()
         self.panel_a._selected_cell = None
         self.panel_b._selected_cell = None
         self._notify_cells(cells)
         self._set_save_btn_state()
+        self.status.showMessage(f"{msg}  | 대기 중인 셀: {len(self._staged)}개")
 
     # ── 유틸 ──────────────────────────────────────────────────────────────────
 
@@ -1313,8 +1411,39 @@ class DiffView(QWidget):
         finally:
             self._syncing_selection = False
 
+    def _keep_mask(self) -> int:
+        """제외 열을 뺀 '검사 대상 열' 마스크 — 행 마스크와 AND 해 변경 여부를 본다."""
+        cols = len(self._diff_matrix[0]) if self._diff_matrix else 0
+        return keep_mask(cols, self._excluded_cols)
+
+    def _row_masks_checked(self) -> list:
+        """행 마스크 — 매트릭스와 길이가 어긋나면(있어서는 안 되는 상태) 재구축한다.
+
+        정상 경로에선 len 비교 한 번으로 끝난다. 마스크는 매트릭스의 파생 상태라
+        갈라지면 '변경점만 보기'가 잘못된 행을 숨길 수 있어, 느리더라도 맞는 답을
+        내도록 복구한다(같은 길이로 갈라진 경우는 못 잡는다 — 그래서 변형은
+        _set_matrix_cell 한 곳으로 묶는다).
+        """
+        if len(self._row_masks) != len(self._diff_matrix):
+            self._row_masks = row_change_masks(self._diff_matrix)
+        return self._row_masks
+
+    def _set_matrix_cell(self, r: int, c: int, cell: tuple) -> None:
+        """_diff_matrix 의 **유일한** 변형 경로 — 행 마스크를 함께 갱신한다.
+
+        여기를 우회해 _diff_matrix[r][c] 에 직접 대입하면 마스크가 낡아 '변경점만
+        보기'가 잘못된 행을 숨기거나 상태바 변경 셀 수가 어긋난다.
+        """
+        masks = self._row_masks_checked()
+        self._diff_matrix[r][c] = cell
+        bit = 1 << c
+        if cell[0] != STATUS_SAME:
+            masks[r] |= bit
+        else:
+            masks[r] &= ~bit
+
     def _count_changed(self) -> int:
-        return count_changed(self._diff_matrix, self._excluded_cols)
+        return count_changed_masked(self._row_masks_checked(), self._keep_mask())
 
     def _set_save_btn_state(self, enabled: bool = True):
         # b_to_a staged → A 파일에 쓸 내용 / a_to_b staged → B 파일에 쓸 내용

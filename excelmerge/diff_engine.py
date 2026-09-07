@@ -4,8 +4,13 @@ from .constants import STATUS_SAME, STATUS_ADDED, STATUS_MODIFIED
 
 def count_changed(diff_matrix: list, excluded_cols=None) -> int:
     """diff 매트릭스에서 'same'이 아니고 제외 열이 아닌 셀 수를 센다(O(R×C)).
-    diff_view._count_changed와 DiffWorker가 공유하는 순수 함수 — 무거운 스캔을
-    UI 스레드 밖(워커)에서도 돌릴 수 있게 분리했다."""
+
+    ★ 실행 경로에서는 더 이상 쓰지 않는다 — 세는 일은 count_changed_masked 가
+      비트마스크로 처리한다(6328행 x 71열: 47ms -> 0.5ms). 이 함수는 '변경 셀'의
+      **정의를 그대로 적어 둔 정본**으로 남겨 마스크 경로를 대조하는 데 쓴다
+      (tests/test_row_change_masks.py). 정의를 바꿀 일이 생기면 여기와
+      row_change_masks 를 함께 고쳐야 한다.
+    """
     excl = excluded_cols or set()
     return sum(
         1
@@ -13,6 +18,44 @@ def count_changed(diff_matrix: list, excluded_cols=None) -> int:
         for c, (st, *_) in enumerate(row)
         if st != STATUS_SAME and c not in excl
     )
+
+
+def row_change_masks(diff_matrix: list) -> list:
+    """행별 '변경된 열' 비트마스크 — 비트 c 가 1이면 그 행 c 열이 same 이 아니다.
+
+    변경 행 판정(변경점만 보기 필터 / 미니맵 / 변경점 이동 / 변경 셀 수)이 모두 행마다
+    `any(st != SAME for c, (st, *_) in enumerate(row) if c not in excl)` 로 O(C) 튜플
+    언패킹을 되풀이했다. 마스크를 한 번 만들어 두면 제외 열을 반영한 판정이
+    `masks[r] & keep_mask(...)` 정수 연산 하나로 끝난다 — 실측 94~126배
+    (6328행 x 71열: 미니맵 122ms→1.3ms, 필터 스캔 66ms→0.5ms).
+
+    O(R x C) 스캔이므로 DiffWorker(백그라운드)가 매트릭스와 함께 만든다(6328x71 에서 32ms).
+
+    ★ 매트릭스의 파생 상태다 — status 를 바꾸는 쪽은 마스크도 함께 갱신해야 한다.
+      diff_view 는 그 갱신을 _set_matrix_cell() 한 곳에 묶어 둔다.
+    """
+    masks = []
+    for row in diff_matrix:
+        m = 0
+        for c, cell in enumerate(row):
+            if cell[0] != STATUS_SAME:
+                m |= 1 << c
+        masks.append(m)
+    return masks
+
+
+def keep_mask(cols: int, excluded_cols=None) -> int:
+    """제외 열을 뺀 '검사 대상 열' 비트마스크 — row_change_masks 결과와 AND 해서 쓴다."""
+    m = (1 << cols) - 1
+    for c in (excluded_cols or ()):
+        if 0 <= c < cols:
+            m &= ~(1 << c)
+    return m
+
+
+def count_changed_masked(masks: list, keep: int) -> int:
+    """마스크 기반 변경 셀 수 — count_changed 와 결과가 같아야 한다(테스트로 고정)."""
+    return sum((m & keep).bit_count() for m in masks)
 
 
 def count_dropped_key_rows(a_data: list, b_data: list, key_col: int,

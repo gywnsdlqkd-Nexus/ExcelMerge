@@ -108,12 +108,58 @@ class MinimapScrollBar(QScrollBar):
     def __init__(self, orientation, parent=None):
         super().__init__(orientation, parent)
         self._ratios: list = []   # 0.0~1.0 사이 변경 위치 목록
+        # 비율 -> [(픽셀 오프셋, 겹친 개수)] 캐시. denom(트랙 길이)별로 다르다.
+        self._px_denom: int = -1
+        self._px_offsets: list | None = None
+        self._stack_colors: dict = {}   # 겹친 개수 -> 합성색
 
     def set_change_ratios(self, ratios):
         # 변경된 경우에만 repaint (불필요한 페인트 방지)
         if list(ratios) != self._ratios:
             self._ratios = list(ratios)
+            self._px_offsets = None   # 픽셀 오프셋 캐시 무효화
             self.update()
+
+    def _pixel_offsets(self, denom: int) -> list:
+        """비율 목록을 [(픽셀 오프셋, 겹친 개수)] 로 접는다.
+
+        변경 행이 많으면 마커 수가 트랙 픽셀 수를 크게 넘는다(실측: 2,479개가
+        고유 615px 에 4배 중복) — 같은 자리에 같은 사각형을 몇 번씩 그렸다.
+        접어서 자리마다 한 번만 그리면 fillRect 호출이 그만큼 줄어든다.
+
+        겹친 개수를 함께 들고 다니는 이유: 마커 색에 알파가 있어(220/255) 겹쳐
+        그리면 점점 진해진다 — 그냥 중복만 버리면 변경이 밀집한 구간이 눈에 띄게
+        연해진다. _stacked_color 가 그 누적을 한 번의 합성으로 재현한다.
+
+        denom(트랙 길이)이 바뀌면 해상도가 달라지므로 다시 계산한다 — 창 크기나
+        스플리터를 바꾼 뒤에도 마커 밀도가 유지된다(미리 접어 두면 트랙이 길어졌을 때
+        마커가 실제보다 듬성해진다).
+        """
+        if self._px_offsets is None or self._px_denom != denom:
+            counts: dict = {}
+            for ratio in self._ratios:
+                off = int(ratio * denom)
+                counts[off] = counts.get(off, 0) + 1
+            self._px_denom = denom
+            self._px_offsets = list(counts.items())   # dict 는 삽입 순서 보존
+        return self._px_offsets
+
+    def _stacked_color(self, k: int) -> QColor:
+        """같은 자리에 k 번 겹쳐 그렸을 때와 같은 색을 1회 합성으로 낸다.
+
+        source-over 를 k 번 적용하면 배경 계수가 (1-a)^k 이므로
+        alpha_eff = 1 - (1-a)^k 짜리 색으로 한 번 그리면 같은 결과가 된다.
+        (8비트 반올림 때문에 채널당 최대 1 정도의 오차는 남는다.)
+        """
+        hit = self._stack_colors.get(k)
+        if hit is None:
+            base = self._MARKER_COLOR
+            a = base.alpha() / 255.0
+            eff = 1.0 - (1.0 - a) ** k
+            hit = QColor(base.red(), base.green(), base.blue(),
+                         max(0, min(255, round(eff * 255))))
+            self._stack_colors[k] = hit
+        return hit
 
     def paintEvent(self, e):
         super().paintEvent(e)
@@ -132,22 +178,16 @@ class MinimapScrollBar(QScrollBar):
         painter.setBrush(self._MARKER_COLOR)
         if self.orientation() == Qt.Vertical:
             track_top = groove.top()
-            track_h = groove.height()
             x = groove.left() + 2
             w = max(1, groove.width() - 4)
-            denom = max(0, track_h - 2)
-            for ratio in self._ratios:
-                y = track_top + int(ratio * denom)
-                painter.fillRect(x, y, w, 2, self._MARKER_COLOR)
+            for off, k in self._pixel_offsets(max(0, groove.height() - 2)):
+                painter.fillRect(x, track_top + off, w, 2, self._stacked_color(k))
         else:
             track_left = groove.left()
-            track_w = groove.width()
             y = groove.top() + 2
             h = max(1, groove.height() - 4)
-            denom = max(0, track_w - 2)
-            for ratio in self._ratios:
-                x = track_left + int(ratio * denom)
-                painter.fillRect(x, y, 2, h, self._MARKER_COLOR)
+            for off, k in self._pixel_offsets(max(0, groove.width() - 2)):
+                painter.fillRect(track_left + off, y, 2, h, self._stacked_color(k))
         painter.end()
 
 
@@ -525,6 +565,9 @@ class FreezeController(QObject):
         self._fw = 0              # 고정 열 폭합(refresh에서 캡처 — 본체 숨김과 무관하게 안정)
         self._fh = 0              # 고정 행 높이합
         self._active = False
+        # left 오버레이의 행 숨김이 본체와 일치하는지. False 면 다음 미러를 전 행으로
+        # 돌린다(델타 미러의 전제 조건). 모델 리셋/freeze 해제로 무너진다.
+        self._rows_synced = False
         self.corner = self._make_view(headers=True)
         self.top = self._make_view(headers=False)
         self.left = self._make_view(headers=False)
@@ -542,6 +585,10 @@ class FreezeController(QObject):
         host.verticalScrollBar().valueChanged.connect(self._on_v_scroll)
         host.horizontalHeader().sectionResized.connect(self._on_col_resized)
         host.verticalHeader().sectionResized.connect(self._on_row_resized)
+        # 모델 리셋(populate)은 뷰의 행 숨김을 초기화할 수 있고 그 동작이 플랫폼마다
+        # 다르다 — 본체와 left 가 서로 다른 상태에서 출발할 수 있으므로 델타 미러를
+        # 금지하고 다음 1회를 전 행 스캔으로 돌린다. (모델 객체는 교체되지 않는다.)
+        host.model().modelReset.connect(self._on_model_reset)
         # corner(고정 눈금) 헤더 우클릭 → 키 열/행 설정·해제 메뉴.
         # ★ 반드시 popup()(비모달)로 띄운다. 자식 오버레이 헤더 이벤트 처리 중 모달 메뉴(exec_ 중첩
         #   이벤트루프)를 쓰면 Qt 상태가 깨져 access violation(Windows fatal exception)이 난다.
@@ -718,11 +765,17 @@ class FreezeController(QObject):
         v.hide()
         return v
 
+    def _on_model_reset(self):
+        self._rows_synced = False
+
     def _alive(self) -> bool:
-        """teardown 중(헬퍼 C++ 객체 삭제됨) 시그널이 도착해도 크래시하지 않도록 가드."""
-        if sip.isdeleted(self) or sip.isdeleted(self.host):
+        """teardown 중(헬퍼 C++ 객체 삭제됨) 시그널이 도착해도 크래시하지 않도록 가드.
+        스크롤·리사이즈 핸들러가 매번 부르는 핫패스라 제너레이터 없이 펼쳐 쓴다."""
+        isdeleted = sip.isdeleted
+        if isdeleted(self) or isdeleted(self.host):
             return False
-        return not any(sip.isdeleted(v) for v in self._views)
+        corner, top, left = self._views
+        return not (isdeleted(corner) or isdeleted(top) or isdeleted(left))
 
     @property
     def active(self) -> bool:
@@ -746,6 +799,7 @@ class FreezeController(QObject):
         if not self._alive():
             return
         self._active = False
+        self._rows_synced = False   # 본체 행 숨김이 left 없이 바뀔 수 있다(_clear_row_filter)
         for v in self._views:
             v.hide()
         host = self.host
@@ -754,7 +808,9 @@ class FreezeController(QObject):
                 host.setColumnHidden(c, False)
         host.updateGeometries()   # super()가 기본 여백 복원
 
-    def refresh(self):
+    def refresh(self, changed_rows=None):
+        """오버레이 재적용. changed_rows 를 주면 좌측 오버레이의 행 미러를 그 행들로
+        한정한다(호출부가 실제로 뒤집힌 행을 이미 알고 있을 때). None 이면 전 행 스캔."""
         if not self._alive():
             return
         host = self.host
@@ -799,7 +855,7 @@ class FreezeController(QObject):
                 for v in self._views:
                     if v.rowHeight(r) != h:
                         v.setRowHeight(r, h)
-            self._mirror_hidden_rows()
+            self._mirror_hidden_rows(changed_rows)
         finally:
             host._applying_sizes = prev_flag
             host.setUpdatesEnabled(prev_host)
@@ -837,20 +893,49 @@ class FreezeController(QObject):
                 if v.rowHeight(r) != h:
                     v.setRowHeight(r, h)
 
-    def _mirror_hidden_rows(self):
-        # left만 스크롤 행 정렬 필요(본체와 동일 숨김). top/corner는 고정 행만 노출(높이 클립).
+    def _mirror_hidden_rows(self, rows=None):
+        """left 오버레이의 행 숨김을 본체와 맞춘다.
+        (top/corner 는 고정 행만 노출하므로 높이 클립으로 충분 — left 만 정렬이 필요하다.)
+
+        rows: 본체에서 **실제로 숨김이 뒤집힌 행**. 주면 그 행만 훑는다 — 열 제외처럼
+        행 가시성이 그대로인 갱신에서 미러 비용이 0 이 된다(실측 6,328행 x 71열,
+        A/B 4회: 열 제외 ON+OFF 46.5ms -> 32.1ms). 반대로 '변경점만 보기' 토글은
+        대부분의 행이 실제로 뒤집혀 델타가 곧 전 행이라 이득이 없다(측정 노이즈 안).
+        단, left 가 본체와 동기라는 보장이 없으면(_rows_synced False) 델타를 무시하고
+        전 행을 훑는다.
+        """
         host = self.host
         left = self.left
+        full = rows is None or not self._rows_synced
+        self._rows_synced = True
+        if full:
+            targets = range(host.model().rowCount())
+        elif rows:
+            # ★ 반드시 오름차순으로 훑는다 — 행 인덱스가 뒤죽박죽이면 Qt 의 행 숨김
+            #   갱신이 순차 접근일 때보다 눈에 띄게 느리다(실측: 정렬 없이 set 을 그대로
+            #   돌리면 토글이 기준선보다 20% 느렸다). 호출부는 이미 오름차순 리스트를
+            #   주므로 이 sorted() 는 사실상 공짜이고, 안전망으로만 남긴다.
+            targets = sorted(rows)
+        else:
+            return
         # 대량 행 숨김을 ScrollPerItem에서 하면 per-item 재계산으로 ~O(R²) → 루프 동안
         # ScrollPerPixel로 전환 후 복원(본체 필터 루프와 동일 취지).
         prev_vmode = left.verticalScrollMode()
         left.setVerticalScrollMode(QAbstractItemView.ScrollPerPixel)
+        # setRowHidden 하나하나가 sectionResized 를 쏘고, 그 슬롯(_on_row_resized)은
+        # _applying_sizes 가드로 어차피 아무 일도 하지 않는다 — 시그널 자체를 막아
+        # 행마다 나던 슬롯 디스패치(토글 1회당 ~12,700회)를 없앤다.
+        # ※ cProfile 로는 이 디스패치가 커 보였지만 프로파일러 오버헤드였다 — 실제
+        #   A/B 로는 유의미한 차이가 없었다. 헛일을 줄이는 정리로만 남긴다.
+        vh = left.verticalHeader()
+        prev_blocked = vh.blockSignals(True)
         try:
-            for r in range(host.model().rowCount()):
+            for r in targets:
                 hidden = host.isRowHidden(r)
                 if left.isRowHidden(r) != hidden:
                     left.setRowHidden(r, hidden)
         finally:
+            vh.blockSignals(prev_blocked)
             left.setVerticalScrollMode(prev_vmode)
 
     def _sync_scroll(self):
@@ -1146,12 +1231,34 @@ class ExcelTableView(QTableView):
         idx = self.currentIndex()
         return (idx.row(), idx.column()) if idx.isValid() else (-1, -1)
 
+    def _scroll_hidden_cursor_into_view(self, r: int, c: int):
+        """고정 밴드 열 위에 놓인 커서를 따라 **세로** 스크롤을 맞춘다.
+
+        QTableView.scrollTo 는 isIndexHidden 인 인덱스를 통째로 무시한다. 틀 고정이
+        켜지면 키 밴드 열은 본체에서 숨김이므로, 밴드 안에서 ↑/↓ 로 행을 옮겨도
+        뷰포트가 따라오지 않아 커서가 화면 밖으로 걸어나간다. 같은 행의 '본체에 보이는'
+        열로 대신 스크롤해 세로만 맞추고, 가로 위치는 원래대로 되돌린다.
+        """
+        if AX_ROW.hidden(self, r) or not AX_COL.hidden(self, c):
+            return   # 고정 밴드 '행'은 오버레이에 늘 보이고, 보이는 열은 Qt 가 처리한다
+        helper = self.columnAt(0)
+        if helper < 0 or self.isColumnHidden(helper):
+            helper = next((k for k in range(self.columnCount())
+                           if not self.isColumnHidden(k)), -1)
+        if helper < 0:
+            return
+        hbar = self.horizontalScrollBar()
+        hv = hbar.value()
+        self.scrollTo(self._model.index(r, helper))
+        hbar.setValue(hv)
+
     def _set_current_cell(self, r: int, c: int):
         """QTableWidget.setCurrentCell() 대응.
         setCurrentIndex()는 호출 시점의 키보드 수정자에 따라 선택을 확장/클리어하는
         기존 setCurrentCell과 완전히 같은 경로(selectionCommand)를 탄다."""
         if 0 <= r < self.rowCount() and 0 <= c < self.columnCount():
             self.setCurrentIndex(self._model.index(r, c))
+            self._scroll_hidden_cursor_into_view(r, c)
 
     def _set_current_cell_no_update(self, r: int, c: int):
         """선택을 건드리지 않고 currentIndex만 이동.
@@ -1161,6 +1268,7 @@ class ExcelTableView(QTableView):
         sm = self.selectionModel()
         if sm is not None and 0 <= r < self.rowCount() and 0 <= c < self.columnCount():
             sm.setCurrentIndex(self._model.index(r, c), QItemSelectionModel.NoUpdate)
+            self._scroll_hidden_cursor_into_view(r, c)
 
     def _move_current_cell(self, r: int, c: int):
         """현재 셀을 단일 선택으로 이동 — Excel의 Ctrl+점프처럼 기존 선택을 비운다.
@@ -1170,6 +1278,7 @@ class ExcelTableView(QTableView):
         if sm is not None and 0 <= r < self.rowCount() and 0 <= c < self.columnCount():
             sm.setCurrentIndex(self._model.index(r, c),
                                QItemSelectionModel.ClearAndSelect)
+            self._scroll_hidden_cursor_into_view(r, c)
 
     # ── 본체→왼쪽 고정 열 밴드로 넘어가는 드래그 선택 ─────────────────────────
     # 본체에서 시작한 드래그가 왼쪽 고정 열(키 열 및 그 좌측)로 넘어가면, 본체엔 고정 열이
@@ -2019,6 +2128,23 @@ class ExcelTableView(QTableView):
         sel = QItemSelection(m.index(rs, cs), m.index(re_, ce_))
         sm.select(sel, QItemSelectionModel.ClearAndSelect)
 
+    def _shift_anchor(self, cur_r: int, cur_c: int) -> tuple:
+        """Shift+방향키 확장의 앵커 — 현재 선택 사각형에서 현재 셀의 **반대 모서리**.
+
+        Qt 내부 앵커는 노출되지 않으므로 선택 범위로 추정한다. 그래야 Shift+← 를 연속으로
+        눌렀을 때 확장이 누적되고, 한 번 누를 때마다 두 칸짜리 선택으로 붕괴하지 않는다.
+        선택이 없으면 현재 셀이 곧 앵커다."""
+        sm = self.selectionModel()
+        sel = sm.selection() if sm is not None else None
+        if not sel:
+            return cur_r, cur_c
+        top = min(r.top() for r in sel)
+        bot = max(r.bottom() for r in sel)
+        left = min(r.left() for r in sel)
+        right = max(r.right() for r in sel)
+        return (bot if cur_r == top else top,
+                right if cur_c == left else left)
+
     def _has_changed_selection(self) -> bool:
         # any()가 첫 changed 셀에서 조기 종료 — 변경이 있는 선택(일반)에선 빠르다.
         m = self._model
@@ -2091,18 +2217,81 @@ class ExcelTableView(QTableView):
         sel = QItemSelection(model.index(0, cs), model.index(rows - 1, ce_))
         sm.select(sel, QItemSelectionModel.ClearAndSelect)
 
-    def _next_visible_row(self, start: int, delta: int) -> int:
-        """start에서 delta(+1/-1) 방향으로 '변경 행만 보기'로 숨겨진 행을 건너뛴 첫 '보이는'
-        행 인덱스. 경계까지 못 찾으면 start(제자리). 헤더 Shift+↑/↓ 확장이 필터로 숨은 행을
-        지나 실제로 보이는 다음 행에 착지하도록 한다(고정 키 행은 본체에서 숨김이 아니라 스킵
-        대상이 아님 — 상단 밴드에 보이므로)."""
-        last = self.rowCount() - 1
+    # ── 커서가 갈 수 있는 칸(navigable) 판정 ─────────────────────────────────
+    # 틀 고정이 켜지면 본체는 키 밴드를 **실제로 숨긴다**(_apply_col_hidden / 필터의
+    # 0..key_row 숨김). 오버레이가 그 자리를 그리므로 사용자에겐 보이지만, Qt 기본
+    # moveCursor 와 '숨김 = 못 감' 규칙은 그 칸을 갈 수 없는 곳으로 취급한다.
+    # → 밴드는 '보이는 것'으로 쳐서 키보드가 들어갈 수 있게 한다.
+    #   (이미 _prune_filtered_rows 가 키 프레임 행을 선택에서 안 걷어내고, 드래그 선택도
+    #    밴드를 따로 처리한다 — 키보드 이동에만 이 개념이 빠져 있었다.)
+    # 반면 '변경점만 보기'로 숨은 행은 여전히 갈 수 없다(정말로 볼 수 없으므로).
+    # 열/행 한쪽만 고쳐지는 일이 없도록 축(_Axis)을 받아 처리한다.
+
+    def _frozen_count(self, ax: _Axis) -> int:
+        fc = getattr(self, "_freeze", None)
+        return ax.frozen_count(fc) if (fc is not None and fc.active) else 0
+
+    def _navigable(self, ax: _Axis, i: int) -> bool:
+        return (not ax.hidden(self, i)) or i < self._frozen_count(ax)
+
+    def _host_visible_cell(self, r: int, c: int) -> bool:
+        """본체(host)가 이 칸을 실제로 그리는가 — 행·열 **모두** 숨김이 아니어야 한다.
+
+        Qt 는 출발/도착 어느 한쪽이라도 숨김이면 moveCursor 가 무효 인덱스를 돌려주고
+        scrollTo 도 무시한다. 즉 이 판정이 False 인 칸이 끼면 Qt 에 맡길 수 없다.
+        """
+        return not (AX_ROW.hidden(self, r) or AX_COL.hidden(self, c))
+
+    def _page_rows(self) -> int:
+        """PageUp/PageDown 한 걸음 = 화면에 실제로 그려진 행 수 - 1(한 행 겹침).
+
+        Qt 는 이 걸음을 뷰포트 픽셀로 잰다. 그런데 커서가 고정 밴드 열에 있으면 scrollTo
+        가 숨긴 인덱스를 무시해 뷰포트가 커서 기준으로 정렬되지 않는다 — 그래서 Qt 는
+        '커서에서 한 페이지'가 아니라 '지금 화면에서 한 페이지'를 재고, 같은 칸에서
+        눌러도 스크롤 상태에 따라 다른 행에 착지한다.
+        (실측, 커서 1087행 고정 + 스크롤값만 10/15/20 으로 통제:
+         밴드 A열 → 1120 / 1317 / 1841, 일반 E열 → 1841 / 1841 / 1841.)
+        화면 행을 직접 세면 열·스크롤과 무관하게 같은 걸음이 된다.
+        '변경점만 보기'로 숨은 행은 볼 수 없으므로 걸음에서 빠진다.
+        """
+        top = self.rowAt(0)
+        if top < 0:
+            top = 0
+        bot = self.rowAt(self.viewport().height() - 1)
+        if bot < 0:
+            bot = self.rowCount() - 1
+        on = sum(1 for r in range(top, bot + 1) if not AX_ROW.hidden(self, r))
+        return max(1, on - 1)
+
+    def _page_target_row(self, cur_r: int, delta: int) -> int:
+        """cur_r 에서 delta 방향으로 한 페이지 — 갈 수 있는 행만 세어 옮긴다."""
+        r = cur_r
+        for _ in range(self._page_rows()):
+            nxt = self._next_navigable(AX_ROW, r, delta)
+            if nxt == r:
+                break      # 격자 끝
+            r = nxt
+        return r
+
+    def _next_navigable(self, ax: _Axis, start: int, delta: int) -> int:
+        """start 에서 delta(+1/-1) 방향의 첫 '갈 수 있는' 칸. 없으면 start(제자리)."""
+        last = ax.count(self) - 1
         n = start + delta
         while 0 <= n <= last:
-            if not self.isRowHidden(n):
+            if self._navigable(ax, n):
                 return n
             n += delta
         return start
+
+    def _next_visible_row(self, start: int, delta: int) -> int:
+        """start 에서 delta(+1/-1) 방향의 첫 '갈 수 있는' 행. 없으면 start(제자리).
+
+        '변경점만 보기'로 숨은 행은 건너뛰고, **틀 고정 키 행은 건너뛰지 않는다** —
+        본체에선 숨겨져 있지만 상단 고정 밴드에 보이기 때문이다. (예전 주석은 키 행이
+        본체에서 숨김이 아니라고 적혀 있었지만 사실이 아니었고, 그래서 Ctrl+↑ 와 헤더
+        Shift+↑ 가 키 행에 도달하지 못했다.)
+        """
+        return self._next_navigable(AX_ROW, start, delta)
 
     def _select_row_range(self, r1: int, r2: int):
         sm = self.selectionModel()
@@ -2238,6 +2427,75 @@ class ExcelTableView(QTableView):
             self._select_col(cur_c)
             event.accept(); return
 
+        # ── 방향키/Home/End/PageUp/PageDown: 밴드가 얽히거나 Shift 확장일 때 ──
+        # (1) 커서 이동 — 틀 고정은 본체에서 키 밴드를 실제로 숨기고 오버레이가 그 자리를
+        # 그린다. 그런데 QTableView.moveCursor 는 맨 끝에서 결과 칸이 숨김이면 **무효
+        # 인덱스**를 돌려준다 (Qt 소스의 `if (!isRowHidden(..) && !isColumnHidden(..) &&
+        # isIndexEnabled(..)) return result;  return QModelIndex();` 가드). 세로 이동은
+        # 열이 그대로라 출발이 밴드면 결과도 밴드다 — 그래서 밴드가 얽힌 이동은 Qt 에
+        # 맡길 수 없다. 밴드로 **들어가는** 것도(E 에서 ←), 밴드 **안에서** 위아래로
+        # 움직이는 것도(A~D 에서 ↑/↓) 모두 제자리가 된다.
+        # PageUp/PageDown 은 이 가드 앞에서 일찍 return 하므로 제자리가 되진 않지만,
+        # 걸음을 뷰포트 픽셀로 재는 탓에 밴드 열에서 다른 칸에 착지한다(→ _page_rows).
+        # 그래서 페이지 이동은 Shift 유무와 무관하게 우리가 센다.
+        #
+        # (2) Shift 확장 — 이쪽은 밴드와 무관하게 **항상** 우리가 처리해야 한다.
+        # Qt 의 Shift+방향키 앵커는 QAbstractItemViewPrivate::pressedPosition, 즉
+        # **뷰포트 픽셀 좌표**다. 확장은 `setSelection(QRect(pressedPosition - offset,
+        # visualRect(new).center()), ...)` 로 그 픽셀 사각형을 indexAt 으로 되짚어
+        # 만들어진다. 이 좌표는 마우스 press 만 갱신하므로,
+        #   · 오버레이 드래그·헤더 선택·찾기 이동·Ctrl+점프처럼 우리가 _select_range 로
+        #     만든 선택 뒤에는 값이 낡아 있고, 무효로 판정되면 Qt 는 조용히 **직전 커서
+        #     칸으로 재앵커**해 선택을 무너뜨린다(A1:G1 에서 Shift+↓ 두 번 → 14~31행 ×
+        #     G열만 남았다).
+        #   · 픽셀→인덱스라서 폭 0 으로 숨긴 밴드 열(A~D)은 애초에 표현할 수 없다.
+        #     앵커가 맞아도 밴드는 선택에서 빠진다.
+        # 픽셀 앵커는 private 이라 손댈 수 없으니, Shift 확장은 선택 사각형에서 앵커를
+        # 되찾는 _shift_anchor(이 앱의 헤더/밴드 확장이 이미 쓰는 모델)로 직접 만든다.
+        #
+        # Shift 가 없고 밴드도 안 걸리는 평범한 이동만 super() 에 넘긴다 — Qt 기본
+        # 처리(스크롤·내부 앵커 갱신)를 필요 이상으로 뺏지 않는다.
+        if (not ctrl and not alt and cur_r >= 0 and cur_c >= 0
+                and key in (Qt.Key_Left, Qt.Key_Right, Qt.Key_Up, Qt.Key_Down,
+                            Qt.Key_Home, Qt.Key_End,
+                            Qt.Key_PageUp, Qt.Key_PageDown)):
+            if key == Qt.Key_Home:
+                tr, tc = cur_r, 0
+            elif key == Qt.Key_End:
+                tc = self.columnCount() - 1
+                if tc >= 0 and not self._navigable(AX_COL, tc):
+                    tc = self._next_navigable(AX_COL, tc, -1)
+                tr, tc = cur_r, max(0, tc)
+            elif key in (Qt.Key_PageUp, Qt.Key_PageDown):
+                tr, tc = self._page_target_row(
+                    cur_r, -1 if key == Qt.Key_PageUp else 1), cur_c
+            elif key in (Qt.Key_Left, Qt.Key_Right):
+                tr, tc = cur_r, self._next_navigable(
+                    AX_COL, cur_c, -1 if key == Qt.Key_Left else 1)
+            else:
+                tr, tc = self._next_navigable(
+                    AX_ROW, cur_r, -1 if key == Qt.Key_Up else 1), cur_c
+            # Qt 에 넘겨도 되는 이동인가 —
+            #  · Shift 확장은 앵커가 픽셀이라 절대 못 넘긴다(위 (2)).
+            #  · PageUp/PageDown 은 걸음을 픽셀로 재 밴드 열에서 다른 칸에 착지하므로
+            #    (→ _page_rows) Shift 유무와 관계없이 우리가 세어 밴드 안팎을 같게 만든다.
+            #  · 나머지는 출발·도착이 **모두** 본체에 그려질 때만 넘긴다.
+            delegate = (not shift
+                        and key not in (Qt.Key_PageUp, Qt.Key_PageDown)
+                        and self._host_visible_cell(cur_r, cur_c)
+                        and self._host_visible_cell(tr, tc))
+            if not delegate:
+                if (tr, tc) != (cur_r, cur_c):
+                    if shift:
+                        ar, ac = self._shift_anchor(cur_r, cur_c)
+                        self._select_range(ar, ac, tr, tc)
+                        self._set_current_cell_no_update(tr, tc)
+                    else:
+                        self._move_current_cell(tr, tc)
+                # 갈 곳이 없어도(격자 끝) 이벤트는 삼킨다 — super() 로 넘기면 Qt 가
+                # 숨은 열을 피해 엉뚱한 칸으로 튄다(A 에서 Home → 첫 데이터 열).
+                event.accept(); return
+
         # ── Ctrl(+Shift)+방향키: 데이터 경계 점프 (Excel 시맨틱) ──
         if ctrl and not alt and key in (Qt.Key_Left, Qt.Key_Right, Qt.Key_Up, Qt.Key_Down):
             if cur_r < 0 or cur_c < 0:
@@ -2246,10 +2504,9 @@ class ExcelTableView(QTableView):
             dc = -1 if key == Qt.Key_Left else (1 if key == Qt.Key_Right else 0)
             tr, tc = self._jump_target(cur_r, cur_c, dr, dc)
             if shift:
-                # anchor = 현재 selection의 처음 시작점 추정 (currentIndex 기준)
-                anchor = self.currentIndex()
-                ar = anchor.row() if anchor.isValid() else cur_r
-                ac = anchor.column() if anchor.isValid() else cur_c
+                # 앵커는 currentIndex(= 지금 커서)가 아니라 선택 사각형의 반대 모서리다.
+                # currentIndex 를 쓰면 Ctrl+Shift+↓ 가 기존 확장을 커서 칸으로 붕괴시킨다.
+                ar, ac = self._shift_anchor(cur_r, cur_c)
                 self._select_range(ar, ac, tr, tc)
                 self._set_current_cell_no_update(tr, tc)
             else:
@@ -2260,7 +2517,8 @@ class ExcelTableView(QTableView):
         if ctrl and not alt and key == Qt.Key_Home:
             tr, tc = 0, 0
             if shift and cur_r >= 0 and cur_c >= 0:
-                self._select_range(cur_r, cur_c, tr, tc)
+                ar, ac = self._shift_anchor(cur_r, cur_c)
+                self._select_range(ar, ac, tr, tc)
                 self._set_current_cell_no_update(tr, tc)
             else:
                 self._move_current_cell(tr, tc)
@@ -2268,7 +2526,8 @@ class ExcelTableView(QTableView):
         if ctrl and not alt and key == Qt.Key_End:
             tr, tc = max(0, self.rowCount() - 1), max(0, self.columnCount() - 1)
             if shift and cur_r >= 0 and cur_c >= 0:
-                self._select_range(cur_r, cur_c, tr, tc)
+                ar, ac = self._shift_anchor(cur_r, cur_c)
+                self._select_range(ar, ac, tr, tc)
                 self._set_current_cell_no_update(tr, tc)
             else:
                 self._move_current_cell(tr, tc)
