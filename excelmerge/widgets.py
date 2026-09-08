@@ -2414,9 +2414,15 @@ class ExcelTableView(QTableView):
                 event.accept(); return
 
         # ── Enter/Return: 엑셀처럼 아래 칸으로 이동 ──
+        # '한 행 아래'가 아니라 **갈 수 있는** 다음 행으로 옮긴다 — '변경점만 보기'로
+        # 숨은 행에 커서를 놓으면 커서가 화면에서 사라지고, 보이지도 않는 행에 Alt+→ 로
+        # 병합 준비가 걸린다. (실측: 필터 ON, 80행에서 Enter 6번 → 81~86 전부 숨은 행.
+        # 같은 자리의 ↓ 는 102·123·180… 으로 제대로 건너뛴다.)
         if key in (Qt.Key_Return, Qt.Key_Enter) and not ctrl and not alt:
-            if cur_r >= 0 and cur_c >= 0 and cur_r + 1 < self.rowCount():
-                self._set_current_cell(cur_r + 1, cur_c)
+            if cur_r >= 0 and cur_c >= 0:
+                tr = self._next_navigable(AX_ROW, cur_r, 1)
+                if tr != cur_r:
+                    self._set_current_cell(tr, cur_c)
             event.accept(); return
 
         # ── Shift+Space: 행 전체, Ctrl+Space: 열 전체 ──

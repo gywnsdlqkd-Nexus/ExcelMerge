@@ -459,6 +459,68 @@ def test_end_from_band_reaches_last_column(dv):
     assert _move(dv, r, 0, Qt.Key_End) == (r, dv.panel_a.table.columnCount() - 1)
 
 
+# ── Enter/Return: 아래 칸으로 ─────────────────────────────────────────────────
+# Enter 는 '한 행 아래'(cur_r + 1)로 옮기고 있었다. '변경점만 보기'가 켜진 기본 상태에선
+# 그 칸이 대개 숨은 행이라 커서가 화면에서 사라지고, 그 자리에서 Alt+→ 를 누르면 보이지도
+# 않는 행이 병합 준비된다. ↓ 와 같은 걸음(다음 '갈 수 있는' 행)이어야 한다.
+# (실파일 실측, 필터 ON: 80행에서 Enter 6번 → 81~86 전부 숨은 행. ↓ 는 102·123·180….)
+
+def _enter_walk(dv, start, col, key=Qt.Key_Return, mods=Qt.NoModifier, n=6):
+    """start@col 에서 key 를 n 번 눌러 착지 칸을 순서대로 모은다."""
+    tbl = dv.panel_a.table
+    tbl._move_current_cell(start, col)
+    QApplication.instance().processEvents()
+    out = []
+    for _ in range(n):
+        _press(tbl, key, mods)
+        out.append(tbl._current_cell())
+    return out
+
+
+@pytest.mark.parametrize("col", [0, KEY_COL, KEY_COL + 2])
+def test_enter_never_lands_on_filtered_row(dv, col):
+    """밴드 열이든 일반 열이든 Enter 는 볼 수 없는 행에 착지하지 않는다."""
+    tbl = dv.panel_a.table
+    assert [r for r in range(1, len(dv._diff_matrix)) if tbl.isRowHidden(r)],         "전제: 필터로 숨은 본문 행이 있어야 의미 있는 테스트"
+    for r, c in _enter_walk(dv, _body_row(dv), col):
+        assert c == col, "세로 이동인데 열이 바뀌었다"
+        assert not tbl.isRowHidden(r), f"볼 수 없는 행 {r} 에 착지했다"
+
+
+@pytest.mark.parametrize("col", [0, KEY_COL + 2])
+def test_enter_walks_exactly_like_down_arrow(dv, col):
+    """Enter 의 걸음은 ↓ 와 같다 — 두 경로가 갈라지면 그게 곧 버그였다."""
+    assert (_enter_walk(dv, _body_row(dv), col)
+            == _enter_walk(dv, _body_row(dv), col, Qt.Key_Down))
+
+
+def test_shift_enter_also_skips_filtered_rows(dv):
+    """Shift+Enter 도 같은 경로를 탄다(방향은 예전처럼 아래)."""
+    tbl = dv.panel_a.table
+    for r, _c in _enter_walk(dv, _body_row(dv), KEY_COL + 2, mods=Qt.ShiftModifier):
+        assert not tbl.isRowHidden(r), f"볼 수 없는 행 {r} 에 착지했다"
+
+
+def test_enter_from_key_row_reaches_first_body_row(dv):
+    """고정 키 행(0)에서 Enter → 첫 보이는 본문 행."""
+    assert _enter_walk(dv, 0, KEY_COL + 2, n=1) == [(_body_row(dv), KEY_COL + 2)]
+
+
+def test_enter_stops_at_the_last_row(dv):
+    """격자 마지막 행에서 Enter 는 제자리 — 갈 칸이 없다."""
+    last = dv.panel_a.table.rowCount() - 1
+    assert _enter_walk(dv, last, KEY_COL + 2, n=3) == [(last, KEY_COL + 2)] * 3
+
+
+def test_enter_moves_one_row_without_the_filter(dv):
+    """필터를 끄면 예전처럼 정확히 한 행 아래 — 걸음의 정의만 바뀌었을 뿐이다."""
+    dv.diff_only_btn.setChecked(False)
+    QApplication.instance().processEvents()
+    r = _body_row(dv, 2)
+    c = KEY_COL + 2
+    assert _enter_walk(dv, r, c, n=3) == [(r + 1, c), (r + 2, c), (r + 3, c)]
+
+
 # ── 밴드에서 나오기 — 원래 되던 동작 비회귀 ───────────────────────────────────
 
 def test_right_leaves_band(dv):
