@@ -102,8 +102,17 @@ MAX_AUTO_COL_WIDTH_PX = 150
 class MinimapScrollBar(QScrollBar):
     """수직 또는 수평 스크롤바 위에 변경된 셀(행/열)의 위치를 색상 마커로 오버레이.
     paintEvent에서 super 호출 후, orientation에 맞춰 트랙(groove) 영역에
-    비율 위치(0.0~1.0)별로 가는 막대를 그린다."""
+    비율 위치(0.0~1.0)별로 가는 막대를 그린다.
+
+    마커는 **바깥쪽 가장자리의 얇은 띠**에만 그리고(세로바=오른쪽, 가로바=아래쪽),
+    **핸들과 겹치는 구간은 건너뛴다**. 예전에는 트랙 폭의 대부분(14px 중 10px)을
+    핸들 위에 덮어 그려서, 변경이 많은 파일에서는 스크롤바가 주황 벽이 되고 핸들이
+    어디 있는지 보이지 않았다. 클릭·드래그 영역은 예전과 같다(칠하는 자리만 바뀐다).
+    핸들 구간을 비워도 정보 손실이 적다 — 그 구간은 지금 화면에 떠 있는 부분이라
+    변경 위치를 표에서 직접 볼 수 있다.
+    """
     _MARKER_COLOR = MINIMAP_MARKER_COLOR
+    _GUTTER_PX = 4      # 마커 띠 폭
 
     def __init__(self, orientation, parent=None):
         super().__init__(orientation, parent)
@@ -161,33 +170,58 @@ class MinimapScrollBar(QScrollBar):
             self._stack_colors[k] = hit
         return hit
 
+    def _marker_band(self, groove) -> tuple:
+        """마커 띠의 (시작 좌표, 두께) — 스크롤바 바깥쪽 가장자리에 1px 띄워 붙인다.
+
+        세로바는 오른쪽, 가로바는 아래쪽 = 표에서 먼 쪽. 좁은 트랙에서도 최소 1px 은
+        남기고, 띠가 트랙보다 두꺼워지지 않게 자른다.
+        """
+        g = max(1, min(self._GUTTER_PX, (groove.width() if self.orientation() == Qt.Vertical
+                                         else groove.height()) - 1))
+        edge = groove.right() if self.orientation() == Qt.Vertical else groove.bottom()
+        return edge - g, g
+
+    @staticmethod
+    def _hits_slider(pos: int, slider, vertical: bool) -> bool:
+        """두께 2px 짜리 마커가 핸들 구간과 겹치는가 — 겹치면 그리지 않는다."""
+        lo, hi = ((slider.top(), slider.bottom()) if vertical
+                  else (slider.left(), slider.right()))
+        return pos + 1 >= lo and pos <= hi
+
     def paintEvent(self, e):
         super().paintEvent(e)
         if not self._ratios:
             return
-        # QStyle을 통해 정확한 trough(groove) 영역을 얻는다
+        # QStyle을 통해 정확한 trough(groove)·핸들(slider) 영역을 얻는다
         opt = QStyleOptionSlider()
         self.initStyleOption(opt)
-        groove = self.style().subControlRect(
+        st = self.style()
+        groove = st.subControlRect(
             QStyle.CC_ScrollBar, opt, QStyle.SC_ScrollBarGroove, self)
         if groove.width() <= 0 or groove.height() <= 0:
             return
+        slider = st.subControlRect(
+            QStyle.CC_ScrollBar, opt, QStyle.SC_ScrollBarSlider, self)
+        band, thick = self._marker_band(groove)
+        vertical = self.orientation() == Qt.Vertical
         painter = QPainter(self)
         painter.setRenderHint(QPainter.Antialiasing, False)
         painter.setPen(Qt.NoPen)
         painter.setBrush(self._MARKER_COLOR)
-        if self.orientation() == Qt.Vertical:
+        if vertical:
             track_top = groove.top()
-            x = groove.left() + 2
-            w = max(1, groove.width() - 4)
             for off, k in self._pixel_offsets(max(0, groove.height() - 2)):
-                painter.fillRect(x, track_top + off, w, 2, self._stacked_color(k))
+                y = track_top + off
+                if self._hits_slider(y, slider, True):
+                    continue
+                painter.fillRect(band, y, thick, 2, self._stacked_color(k))
         else:
             track_left = groove.left()
-            y = groove.top() + 2
-            h = max(1, groove.height() - 4)
             for off, k in self._pixel_offsets(max(0, groove.width() - 2)):
-                painter.fillRect(track_left + off, y, 2, h, self._stacked_color(k))
+                x = track_left + off
+                if self._hits_slider(x, slider, False):
+                    continue
+                painter.fillRect(x, band, 2, thick, self._stacked_color(k))
         painter.end()
 
 
@@ -2431,6 +2465,23 @@ class ExcelTableView(QTableView):
             event.accept(); return
         if key == Qt.Key_Space and ctrl and not shift and not alt and cur_c >= 0:
             self._select_col(cur_c)
+            event.accept(); return
+
+        # ── 아직 셀을 고르지 않았을 때의 PageUp/PageDown — 화면만 한 페이지 굴린다 ──
+        # '고르지 않았다' = 선택이 비어 있다. 현재 셀(커서)만 있는 경우도 여기 든다:
+        # 표가 키보드 포커스를 받으면 Qt 가 선택과 무관하게 커서를 첫 칸에 꽂아 두기
+        # 때문이다. 그 커서를 기준으로 페이지를 옮기면 **사용자가 고른 적 없는 셀이
+        # 선택돼 버린다**(보고받은 증상). 고른 게 없으면 선택·커서를 건드리지 않고
+        # 스크롤만 옮긴다 — B 패널은 스크롤 동기화로 따라온다.
+        # (Qt 기본에 넘기면 '커서 없음'을 격자 맨 앞으로 쳐서 PageDown 인데도 화면이
+        #  위로 튄다: 실측 스크롤 1 → 0.)
+        sm_pick = self.selectionModel()
+        if (key in (Qt.Key_PageUp, Qt.Key_PageDown) and not ctrl and not alt
+                and (cur_r < 0 or cur_c < 0
+                     or sm_pick is None or not sm_pick.hasSelection())):
+            bar = self.verticalScrollBar()
+            step = bar.pageStep() or 1
+            bar.setValue(bar.value() + (-step if key == Qt.Key_PageUp else step))
             event.accept(); return
 
         # ── 방향키/Home/End/PageUp/PageDown: 밴드가 얽히거나 Shift 확장일 때 ──

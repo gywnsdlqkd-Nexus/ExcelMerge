@@ -84,7 +84,11 @@ def test_stacked_color_alpha_grows_with_overlap(qapp):
 
 
 class _NaiveBar:
-    """접기 도입 전 paintEvent — 비율마다 fillRect(중복 포함). 렌더 오라클."""
+    """접기 도입 전 paintEvent — 비율마다 fillRect(중복 포함). 렌더 오라클.
+
+    자리(띠 위치·핸들 건너뛰기)는 본 구현의 헬퍼를 그대로 쓴다. 이 오라클이 검증하는
+    건 **알파 누적을 한 번의 합성으로 재현했는가**이지 마커를 어디에 그리는가가 아니다.
+    """
 
     @staticmethod
     def make(cls):
@@ -95,24 +99,32 @@ class _NaiveBar:
                     return
                 opt = QStyleOptionSlider()
                 self.initStyleOption(opt)
-                groove = self.style().subControlRect(
+                st = self.style()
+                groove = st.subControlRect(
                     QStyle.CC_ScrollBar, opt, QStyle.SC_ScrollBarGroove, self)
                 if groove.width() <= 0 or groove.height() <= 0:
                     return
+                slider = st.subControlRect(
+                    QStyle.CC_ScrollBar, opt, QStyle.SC_ScrollBarSlider, self)
+                band, thick = self._marker_band(groove)
                 p = QPainter(self)
                 p.setRenderHint(QPainter.Antialiasing, False)
                 p.setPen(Qt.NoPen)
                 p.setBrush(self._MARKER_COLOR)
                 if self.orientation() == Qt.Vertical:
-                    top, x = groove.top(), groove.left() + 2
-                    w, denom = max(1, groove.width() - 4), max(0, groove.height() - 2)
+                    top, denom = groove.top(), max(0, groove.height() - 2)
                     for r in self._ratios:
-                        p.fillRect(x, top + int(r * denom), w, 2, self._MARKER_COLOR)
+                        y = top + int(r * denom)
+                        if self._hits_slider(y, slider, True):
+                            continue
+                        p.fillRect(band, y, thick, 2, self._MARKER_COLOR)
                 else:
-                    left, y = groove.left(), groove.top() + 2
-                    h, denom = max(1, groove.height() - 4), max(0, groove.width() - 2)
+                    left, denom = groove.left(), max(0, groove.width() - 2)
                     for r in self._ratios:
-                        p.fillRect(left + int(r * denom), y, 2, h, self._MARKER_COLOR)
+                        x = left + int(r * denom)
+                        if self._hits_slider(x, slider, False):
+                            continue
+                        p.fillRect(x, band, 2, thick, self._MARKER_COLOR)
                 p.end()
         return Naive
 
@@ -147,3 +159,97 @@ def test_render_matches_naive_within_rounding(qapp, n, orient, w, h):
     assert worst <= 1, f"마커 외형이 달라졌다 — 최대 채널 오차 {worst}"
     new.deleteLater()
     old.deleteLater()
+
+
+# ── 마커 자리: 바깥쪽 4px 띠 + 핸들 비우기 ──────────────────────────────────
+# 예전에는 트랙 폭 14px 중 10px 을 핸들 위에 덮어 그려, 변경이 많은 파일에서 스크롤바가
+# 주황 벽이 되고 핸들이 어디 있는지 보이지 않았다.
+
+def _marker_pixels(bar):
+    """마커 색이 칠해진 픽셀 좌표 목록 — 주황 계열만 추린다."""
+    img = bar.grab().toImage()
+    mc = MINIMAP_MARKER_COLOR
+    out = []
+    for y in range(img.height()):
+        for x in range(img.width()):
+            c = img.pixelColor(x, y)
+            # 알파 합성 후라 정확히 같지는 않다 — '빨강이 크고 파랑이 작은' 주황만 본다.
+            if c.red() > 180 and c.green() > 80 and c.blue() < 90 and abs(c.red() - mc.red()) < 80:
+                out.append((x, y))
+    return out
+
+
+def _sub_rects(bar):
+    opt = QStyleOptionSlider()
+    bar.initStyleOption(opt)
+    st = bar.style()
+    return (st.subControlRect(QStyle.CC_ScrollBar, opt, QStyle.SC_ScrollBarGroove, bar),
+            st.subControlRect(QStyle.CC_ScrollBar, opt, QStyle.SC_ScrollBarSlider, bar))
+
+
+def _scrollable_bar(qapp, orientation, ratios, w, h):
+    """핸들이 트랙보다 확실히 짧도록 range/pageStep 을 준 스크롤바."""
+    from excelmerge.widgets import MinimapScrollBar
+    b = MinimapScrollBar(orientation)
+    b.setRange(0, 1000)
+    b.setPageStep(40)
+    b.setValue(400)
+    b.resize(w, h)
+    b.set_change_ratios(ratios)
+    b.show()
+    qapp.processEvents()
+    return b
+
+
+def test_vertical_markers_live_in_the_right_gutter(qapp):
+    ratios = [i / 200 for i in range(200)]
+    b = _scrollable_bar(qapp, Qt.Vertical, ratios, 14, 400)
+    groove, _slider = _sub_rects(b)
+    px = _marker_pixels(b)
+    assert px, "마커가 하나도 안 그려졌다"
+    xs = {x for x, _y in px}
+    band_lo = groove.right() - b._GUTTER_PX
+    assert min(xs) >= band_lo, f"띠 왼쪽으로 새어 나갔다: x {min(xs)} < {band_lo}"
+    assert max(xs) <= groove.right(), "트랙 밖으로 나갔다"
+    assert len(xs) <= b._GUTTER_PX, f"띠보다 두껍다: {sorted(xs)}"
+    b.deleteLater()
+
+
+def test_vertical_markers_never_cover_the_handle(qapp):
+    ratios = [i / 400 for i in range(400)]
+    b = _scrollable_bar(qapp, Qt.Vertical, ratios, 14, 400)
+    _groove, slider = _sub_rects(b)
+    assert slider.height() < 300, "전제: 핸들이 트랙보다 짧아야 의미 있는 테스트"
+    bad = [(x, y) for x, y in _marker_pixels(b) if slider.top() <= y <= slider.bottom()]
+    assert not bad, f"핸들 위에 마커가 그려졌다: {bad[:5]}"
+    b.deleteLater()
+
+
+def test_horizontal_markers_live_in_the_bottom_gutter(qapp):
+    ratios = [i / 200 for i in range(200)]
+    b = _scrollable_bar(qapp, Qt.Horizontal, ratios, 400, 14)
+    groove, slider = _sub_rects(b)
+    px = _marker_pixels(b)
+    assert px
+    ys = {y for _x, y in px}
+    assert min(ys) >= groove.bottom() - b._GUTTER_PX, f"띠 위로 새어 나갔다: {sorted(ys)}"
+    assert not [1 for x, _y in px if slider.left() <= x <= slider.right()], \
+        "핸들 위에 마커가 그려졌다"
+    b.deleteLater()
+
+
+def test_markers_still_mark_every_change_outside_the_handle(qapp):
+    """자리만 옮겼을 뿐, 핸들 밖 변경 위치는 하나도 빠지지 않아야 한다."""
+    from excelmerge.widgets import MinimapScrollBar
+    ratios = [0.02, 0.10, 0.30, 0.55, 0.80, 0.95]
+    b = _scrollable_bar(qapp, Qt.Vertical, ratios, 14, 400)
+    groove, slider = _sub_rects(b)
+    rows = {y for _x, y in _marker_pixels(b)}
+    expect = 0
+    for r in ratios:
+        y = groove.top() + int(r * max(0, groove.height() - 2))
+        if not MinimapScrollBar._hits_slider(y, slider, True):
+            expect += 1
+            assert y in rows or (y + 1) in rows, f"{r} 위치 마커가 없다 (y={y})"
+    assert expect >= 4, "전제: 핸들 밖 마커가 여러 개 있어야 한다"
+    b.deleteLater()

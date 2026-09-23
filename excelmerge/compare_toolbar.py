@@ -56,6 +56,9 @@ def build_find_box(owner, placeholder: str, on_goto, edit_tooltip: str,
         b.setCheckable(checkable)
         b.setEnabled(False)
         b.setToolTip(tip)
+        # 툴바 버튼은 키보드 포커스를 가져가지 않는다 — 한 번 누르면 포커스가 버튼에
+        # 눌러앉아 PageUp/PageDown·방향키가 표에 닿지 않는다(보고된 버그).
+        b.setFocusPolicy(Qt.NoFocus)
         box.addWidget(b)
         return b
 

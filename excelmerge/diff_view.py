@@ -12,7 +12,7 @@ import os
 import re
 
 from PyQt5.QtWidgets import (
-    QWidget, QVBoxLayout, QHBoxLayout,
+    QApplication, QWidget, QVBoxLayout, QHBoxLayout,
     QPushButton, QSplitter, QMessageBox,
     QShortcut, QAbstractItemView,
 )
@@ -138,6 +138,10 @@ class DiffView(QWidget):
         self.diff_only_btn.setObjectName("toggle_btn")
         self.diff_only_btn.setEnabled(False)
         self.diff_only_btn.setToolTip("변경된 행만 표시 / 전체 표시 전환 (Ctrl+D)")
+        # 툴바 버튼은 키보드 포커스를 가져가지 않는다 — 한 번 누르면 포커스가 버튼에
+        # 눌러앉아 PageUp/PageDown·방향키가 표에 닿지 않는다(보고된 버그). 같은 동작이
+        # 단축키(Ctrl+D·F5·Alt+↑↓)로도 있으므로 Tab 도달성을 잃어도 손해가 없다.
+        self.diff_only_btn.setFocusPolicy(Qt.NoFocus)
         self.diff_only_btn.toggled.connect(self._on_diff_only_toggled)
         toolbar.addWidget(self.diff_only_btn)
 
@@ -146,6 +150,7 @@ class DiffView(QWidget):
         self.refresh_btn.setFont(ui_font(10))
         self.refresh_btn.setToolTip("지정된 경로의 파일을 다시 불러와 비교합니다 (F5)")
         self.refresh_btn.setEnabled(False)
+        self.refresh_btn.setFocusPolicy(Qt.NoFocus)
         self.refresh_btn.clicked.connect(self._run_refresh)
         toolbar.addWidget(self.refresh_btn)
 
@@ -155,6 +160,7 @@ class DiffView(QWidget):
         self.prev_diff_btn.setFont(ui_font(10))
         self.prev_diff_btn.setEnabled(False)
         self.prev_diff_btn.setToolTip("이전 변경 셀로 이동 (Alt+↑)")
+        self.prev_diff_btn.setFocusPolicy(Qt.NoFocus)
         self.prev_diff_btn.clicked.connect(lambda: self._goto_changed(-1))
         toolbar.addWidget(self.prev_diff_btn)
 
@@ -163,6 +169,7 @@ class DiffView(QWidget):
         self.next_diff_btn.setFont(ui_font(10))
         self.next_diff_btn.setEnabled(False)
         self.next_diff_btn.setToolTip("다음 변경 셀로 이동 (Alt+↓)")
+        self.next_diff_btn.setFocusPolicy(Qt.NoFocus)
         self.next_diff_btn.clicked.connect(lambda: self._goto_changed(+1))
         toolbar.addWidget(self.next_diff_btn)
 
@@ -264,6 +271,7 @@ class DiffView(QWidget):
                 lambda p, s=side: self._on_file_loaded(s, p))
             panel.folder_loaded.connect(
                 lambda p, s=side: self.folder_requested.emit(s, p))
+            panel.status_message.connect(self.status.showMessage)
             # 첫 셀 선택 시 수식 플래그 지연 로드(파랑 폰트 표시용) 트리거.
             panel.table.selectionModel().selectionChanged.connect(
                 lambda *_: self._maybe_load_formula_flags())
@@ -685,6 +693,7 @@ class DiffView(QWidget):
                 f"비교 완료 — {rows}행 × {cols}열 | 변경된 셀: {changed}개{warn}  "
                 "| 셀 선택 후 우클릭 → 병합 준비 → 선택 병합 저장"
             )
+            self._focus_grid()
         else:
             if self._key_col >= 0:
                 anchor = f"{self._key_row + 1}행 {get_column_letter(self._key_col + 1)}열"
@@ -902,6 +911,23 @@ class DiffView(QWidget):
             if tbl.model().is_data_cell(r, c):
                 tbl.scrollTo(tbl.model().index(r, c), QAbstractItemView.PositionAtCenter)
         # 이동 후 테이블에 키보드 포커스를 줘 방향키로 이어서 탐색 가능하게 한다
+        self.panel_a.table.setFocus()
+
+    def _focus_grid(self):
+        """비교가 끝나면 키보드 포커스를 A 표로 넘긴다.
+
+        비교는 대개 경로칸에서 Enter 를 눌러 시작하므로, 끝난 뒤에도 포커스가 경로칸에
+        남는다. 그러면 PageUp/PageDown·방향키가 표에 닿지 않아 **셀을 한 번 클릭하기
+        전에는 스크롤조차 되지 않는다**(실측: 비교 직후 포커스=경로칸, PageDown 을 눌러도
+        스크롤값 0 그대로).
+        단, 사용자가 방금 글자를 치거나 고르고 있을 수 있는 칸(찾기 입력란·셀값란)에서는
+        포커스를 뺏지 않는다 — 비교는 비동기라 그 사이 사용자가 옮겨 갔을 수 있다.
+        """
+        fw = QApplication.focusWidget()
+        if fw is not None:
+            protected = (self.find_edit, self.panel_a.cell_edit, self.panel_b.cell_edit)
+            if any(w is fw or w.isAncestorOf(fw) for w in protected):
+                return
         self.panel_a.table.setFocus()
 
     # ── 찾기 ──
