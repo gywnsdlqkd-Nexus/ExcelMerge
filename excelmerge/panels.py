@@ -10,13 +10,25 @@ from PyQt5.QtGui import QKeySequence
 
 from .theme import CELL_DIFF_HL, DROP_HIGHLIGHT_QSS, ui_font
 from .widgets import (
-    CellEditWidget, DropLineEdit, ExcelTableView,
+    AX_COL, AX_ROW, CellEditWidget, DropLineEdit, ExcelTableView,
     _extract_supported_path, _extract_folder_path,
 )
 
 
+def _tsv_cell(text: str) -> str:
+    """엑셀이 읽는 TSV 한 칸 — 탭·줄바꿈·따옴표가 들어 있으면 큰따옴표로 감싼다.
+
+    감싸지 않으면 값 안의 탭이 칸을, 줄바꿈이 행을 갈라 붙여넣기가 통째로 어긋난다
+    (이 도구가 다루는 텍스트 테이블에는 줄바꿈이 든 셀이 흔하다).
+    """
+    if any(ch in text for ch in ("\t", "\r", "\n", '"')):
+        return '"' + text.replace('"', '""') + '"'
+    return text
+
+
 class FilePanel(QWidget):
     file_loaded = pyqtSignal(str)
+    status_message = pyqtSignal(str)   # 복사 결과 등 → 상위(DiffView) 상태바
     folder_loaded = pyqtSignal(str)   # 폴더가 드롭/선택됨 → 상위(탭)가 폴더 모드로 전환
 
     def __init__(self, label: str, side: str, parent=None):
@@ -51,6 +63,7 @@ class FilePanel(QWidget):
         browse_btn.setFixedSize(32, 32)
         browse_btn.setIconSize(QSize(18, 18))
         browse_btn.setToolTip("찾아보기")
+        browse_btn.setFocusPolicy(Qt.NoFocus)   # 눌러도 키보드 포커스는 표에 남긴다
         browse_btn.clicked.connect(self._browse)
 
         self.save_btn = QPushButton()
@@ -60,6 +73,7 @@ class FilePanel(QWidget):
         self.save_btn.setToolTip("파일 저장")
         self.save_btn.setEnabled(False)
         self.save_btn.setObjectName("save_btn")
+        self.save_btn.setFocusPolicy(Qt.NoFocus)
 
         file_row.addWidget(self.path_edit)
         file_row.addWidget(browse_btn)
@@ -91,7 +105,11 @@ class FilePanel(QWidget):
         self.v_split.setSizes([self.cell_edit.sizeHint().height(), 100000])
         layout.addWidget(self.v_split)
 
+        # 컨텍스트를 반드시 위젯 범위로 — 기본값(WindowShortcut)이면 A/B 두 패널이
+        # 같은 창에 똑같은 Ctrl+C 를 등록한 꼴이라 Qt 가 '모호함'으로 보고
+        # activated 를 아예 쏘지 않는다(= 복사가 통째로 죽는다. 실측으로 확인).
         copy_sc = QShortcut(QKeySequence("Ctrl+C"), self)
+        copy_sc.setContext(Qt.WidgetWithChildrenShortcut)
         copy_sc.activated.connect(self._on_copy_shortcut)
 
     def _on_table_selection_changed(self):
@@ -177,39 +195,54 @@ class FilePanel(QWidget):
             QApplication.clipboard().setText(path)
 
     def _on_copy_shortcut(self):
-        """Ctrl+C — 테이블에 포커스 시 선택 영역 TSV 복사, 그 외엔 경로 복사."""
+        """Ctrl+C — 표에 포커스면 선택 영역을 TSV로, 그 밖에선 경로를 복사.
+
+        틀 고정 오버레이(_FrozenView)는 본체 표의 자식이라 부모를 타고 올라가면
+        여기서 '표 포커스'로 잡힌다 — 밴드 안에서 눌러도 같은 선택이 복사된다.
+
+        경로칸·셀값란은 여기까지 오지 않는다: 편집 위젯은 자기가 처리하는 키에
+        ShortcutOverride 를 돌려줘 앱 단축키를 끄고 **자기 기본 복사**(고른 글자만)를
+        한다. 그게 윈도우 표준 동작이라 그대로 둔다.
+        """
         focused = QApplication.focusWidget()
-        is_table_focus = False
         w = focused
         while w is not None:
             if w is self.table:
-                is_table_focus = True
+                self._copy_selection_as_tsv()
+                return
+            if w is self:
                 break
             w = w.parentWidget()
-        if is_table_focus:
-            self._copy_selection_as_tsv()
-        else:
-            self._copy_path()
+        self._copy_path()
 
     def _copy_selection_as_tsv(self):
-        """선택 셀들을 bounding box 기준 TSV로 클립보드에 복사."""
-        model = self.table.model()
-        sm = self.table.selectionModel()
+        """선택 영역을 엑셀이 그대로 붙여넣을 수 있는 TSV 로 클립보드에 복사한다.
+
+        - **화면에서 볼 수 없는 행/열은 뺀다.** '변경점만 보기'로 숨은 행이 그렇다
+          (Ctrl+A 는 숨은 행까지 잡는다 — 엑셀도 필터가 걸리면 보이는 행만 복사한다).
+          틀 고정 밴드는 본체에서 숨김이지만 오버레이에 보이므로 포함한다(_navigable).
+        - 선택이 닿은 행·열만 추려 붙인다. 사각형 선택이면 그대로고, 떨어진 두 열을
+          고른 경우엔 그 둘이 나란히 나온다(엑셀은 이 경우 복사를 거부한다).
+        - 사각형 안에서 고르지 않은 칸은 빈칸으로 둔다.
+        """
+        tbl = self.table
+        model = tbl.model()
+        sm = tbl.selectionModel()
         indexes = sm.selectedIndexes() if sm is not None else []
         if not indexes:
+            self.status_message.emit("복사할 선택 영역이 없습니다.")
             return
-        rows = [idx.row() for idx in indexes]
-        cols = [idx.column() for idx in indexes]
-        r1, r2 = min(rows), max(rows)
-        c1, c2 = min(cols), max(cols)
-        sel_set = {(idx.row(), idx.column()) for idx in indexes}
-        lines = []
-        for r in range(r1, r2 + 1):
-            cells = []
-            for c in range(c1, c2 + 1):
-                cells.append(model.display_text(r, c) if (r, c) in sel_set else "")
-            lines.append("\t".join(cells))
+        picked = {(idx.row(), idx.column()) for idx in indexes}
+        rows = sorted({r for r, _c in picked if tbl._navigable(AX_ROW, r)})
+        cols = sorted({c for _r, c in picked if tbl._navigable(AX_COL, c)})
+        if not rows or not cols:
+            self.status_message.emit("선택한 행/열이 화면에 없어 복사하지 않았습니다.")
+            return
+        lines = ["\t".join(_tsv_cell(model.display_text(r, c)) if (r, c) in picked else ""
+                           for c in cols)
+                 for r in rows]
         QApplication.clipboard().setText("\r\n".join(lines))
+        self.status_message.emit(f"{len(rows)}행 × {len(cols)}열 복사됨")
 
     # 폴더 선택용 센티넬 파일명 — 네이티브 파일 대화상자에서 이 이름으로 '열기'하면
     # 해당 폴더를 폴더 비교로 처리한다(Windows엔 파일+폴더 동시 선택 대화상자가 없어 우회).
