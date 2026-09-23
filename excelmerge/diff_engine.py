@@ -129,6 +129,9 @@ def compute_diff(
     위치 기준 1:1로 상단에 그대로 방출하고, 행 key_row+1 이후만 key_col 값으로 매칭한다.
     key_row 가 데이터 범위를 벗어나면 본문 없이 전 행이 1:1이 된다(안전 처리).
 
+    행 순서: A 의 순서를 뼈대로 하고, B 에만 있는 키(신규 행)는 B 에서의 자리에 끼운다
+    (자세한 규칙은 아래 본문 주석 참고). B 끝에 추가된 신규 행만 표 맨 아래로 간다.
+
     반환값:
       diff_matrix : list of rows, 각 row = [(status, a_val, b_val), ...]
       row_meta    : [(orig_a_row, orig_b_row), ...]  — None 은 해당 파일에 없는 행.
@@ -178,21 +181,40 @@ def compute_diff(
         if key not in b_map:
             b_map[key] = (i + n_head, row)
 
-    # 표시 순서: A의 순서를 기준으로, A에 없고 B에만 있는 키는 뒤에 추가
+    # 표시 순서: A 의 순서가 뼈대. B 에만 있는 키(= 신규 행)는 **B 에서의 제자리**에 끼운다.
+    #
+    # 끼우는 자리는 'B 에서 그 행 다음에 나오는, 양쪽에 다 있는 키' 바로 앞이다(고전적
+    # diff 정렬과 같은 규칙). 그래서 B 중간에 새로 넣은 행이 표에서도 그 이웃 사이에 보이고,
+    # 예전처럼 맨 아래로 밀려 원래 위치를 잃지 않는다.
+    #  · A 에만 있는 행(삭제)과 자리가 겹치면 삭제 → 신규 순서로 놓인다.
+    #  · B 끝에 붙은 신규 행은 뒤에 공통 키가 없으므로 예전과 같이 표 맨 아래로 간다.
+    #  · 공통 키의 순서가 A/B 에서 다르면 A 순서를 따른다(뼈대가 A 이므로).
+    inserts: dict[str, list[str]] = {}   # 공통 키 → 그 앞에 끼워 넣을 B 전용 키들
+    pending: list[str] = []
+    seen_b: set[str] = set()
+    for row in b_body:
+        k = get_key(row)
+        if k == "" or k in seen_b:
+            continue
+        seen_b.add(k)
+        if k in a_map:
+            if pending:
+                inserts.setdefault(k, []).extend(pending)
+                pending = []
+        else:
+            pending.append(k)
+    tail = pending   # 뒤에 공통 키가 없는 신규 행 = B 의 맨 끝에 추가된 행
+
     all_keys: list[str] = []
     seen: set[str] = set()
     for row in a_body:
         k = get_key(row)
         if k == "" or k in seen:
             continue
-        all_keys.append(k)
         seen.add(k)
-    for row in b_body:
-        k = get_key(row)
-        if k == "" or k in seen:
-            continue
+        all_keys.extend(inserts.get(k, ()))
         all_keys.append(k)
-        seen.add(k)
+    all_keys.extend(tail)
 
     diff_matrix: list[list] = []
     row_meta: list[tuple] = []
