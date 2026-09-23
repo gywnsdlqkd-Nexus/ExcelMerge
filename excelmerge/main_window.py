@@ -10,7 +10,7 @@
 import os
 
 from PyQt5.QtWidgets import (
-    QMainWindow, QWidget, QHBoxLayout, QPushButton, QTabWidget,
+    QMainWindow, QWidget, QHBoxLayout, QMessageBox, QPushButton, QTabWidget,
     QTabBar, QToolButton, QShortcut,
 )
 from PyQt5.QtGui import QKeySequence, QIcon
@@ -26,6 +26,7 @@ _TAB_CLOSE_QSS = (
 
 from . import __version__
 from .diff_view import DiffView
+from .logutil import log
 from .statusbar import StatusBar
 from .theme import APP_QSS, load_app_icon, ui_font
 
@@ -58,9 +59,21 @@ class MainWindow(QMainWindow):
         corner_lay = QHBoxLayout(corner)
         corner_lay.setContentsMargins(4, 2, 4, 2)
         corner_lay.setSpacing(4)
+        # 업데이트는 **이 버튼을 눌렀을 때만** 확인·설치한다. 예전에는 시작할 때 자동으로
+        # 확인해 확인 창 없이 교체했는데, 그 강제 업데이트가 불편하다는 피드백을 받았다.
+        self.update_btn = QPushButton("업데이트 확인")
+        self.update_btn.setFont(ui_font(9))
+        self.update_btn.setToolTip(
+            f"최신 버전이 있는지 확인합니다 (현재 v{__version__}).\n"
+            "새 버전이 있으면 받을지 물어본 뒤 설치하고 다시 시작합니다.")
+        self.update_btn.setFocusPolicy(Qt.NoFocus)   # 눌러도 키보드 포커스는 표에 남긴다
+        self.update_btn.clicked.connect(self._check_updates)
+        corner_lay.addWidget(self.update_btn)
+
         new_btn = QPushButton("＋ 새 비교")
         new_btn.setFont(ui_font(9))
         new_btn.setToolTip("새 비교 탭 열기 — 파일을 넣으면 셀 비교, 폴더를 넣으면 파일 목록 비교")
+        new_btn.setFocusPolicy(Qt.NoFocus)
         new_btn.clicked.connect(self._new_tab)
         corner_lay.addWidget(new_btn)
         self.tabs.setCornerWidget(corner, Qt.TopRightCorner)
@@ -138,6 +151,20 @@ class MainWindow(QMainWindow):
         idx = self.tabs.indexOf(view)
         if idx >= 0:
             self._close_tab(idx)
+
+    def _check_updates(self):
+        """'업데이트 확인' — 눌렀을 때만 조회한다.
+
+        silent=False 라 결과를 항상 알려 준다(최신이면 '이미 최신 버전입니다', 조회
+        실패면 경고). 새 버전이 있으면 받을지 물어본 뒤 설치·재시작한다.
+        """
+        self.status.showMessage("업데이트 확인 중...")
+        try:
+            from .updater import check_for_updates
+            check_for_updates(self, silent=False)
+        except Exception:
+            log.debug("업데이트 확인 실패", exc_info=True)
+            QMessageBox.warning(self, "업데이트", "업데이트를 확인하지 못했습니다.")
 
     def _new_tab(self) -> DiffView:
         """빈 비교 탭을 열고 활성화한다(그리드 UI로 시작; 폴더 드롭 시 목록으로 전환)."""

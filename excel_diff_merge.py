@@ -77,12 +77,8 @@ def main():
 
     win.show()
 
-    # 시작 후 백그라운드로 새 버전 확인(비차단). 서버 미설정/네트워크 문제면 조용히 넘어감.
-    try:
-        from excelmerge.updater import check_for_updates
-        check_for_updates(win)
-    except Exception:
-        pass
+    # 시작할 때는 업데이트를 확인하지 않는다 — 우상단 '업데이트 확인' 버튼을 눌렀을 때만
+    # 조회·설치한다(강제 업데이트가 불편하다는 피드백).
 
     sys.exit(app.exec_())
 

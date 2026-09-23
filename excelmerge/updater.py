@@ -345,8 +345,9 @@ def _on_manifest(win, manifest, silent: bool):
             QMessageBox.warning(win, "업데이트", "새 버전은 있으나 다운로드 링크가 없습니다.")
         return
 
-    # 새 버전이 있으면 확인 없이 무조건 업데이트한다(다운로드 후 자동 재시작).
-    # 정책: 최신 버전으로만 이용 가능 → '지금 업데이트하시겠습니까?' 확인 창을 두지 않는다.
+    # 업데이트는 사용자가 '업데이트 확인'을 눌렀을 때만 일어난다 — 받을지 여부도 묻는다.
+    # (예전에는 시작할 때 자동으로 확인해 확인 창 없이 교체했고, 그 강제 업데이트가
+    #  불편하다는 피드백을 받았다.)
     if not getattr(sys, "frozen", False):
         # 개발(비패키지) 실행은 자기 교체 불가 — 수동 확인일 때만 안내(자동 시작 시 조용히 무시).
         if not silent:
@@ -354,6 +355,16 @@ def _on_manifest(win, manifest, silent: bool):
                 win, "업데이트",
                 "개발(비패키지) 실행 상태에서는 자동 교체를 할 수 없습니다.\n"
                 f"수동으로 v{manifest['version']}을 받으세요:\n{manifest['url']}")
+        return
+
+    notes = (manifest.get("notes") or "").strip()
+    head = "\n\n" + "\n".join(notes.splitlines()[:6]) if notes else ""
+    if QMessageBox.question(
+            win, "업데이트",
+            f"새 버전 v{manifest['version']} 이 있습니다 (현재 v{__version__}).\n"
+            f"지금 받아서 다시 시작할까요?{head}",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.Yes) != QMessageBox.Yes:
         return
 
     _download_and_apply(win, manifest)
@@ -393,17 +404,16 @@ def _download_and_apply(win, manifest):
         else:
             QMessageBox.warning(win, "업데이트 실패", "교체 프로세스를 시작하지 못했습니다.")
 
-    def _cancel_and_quit():
-        # 정책: 최신 버전으로만 이용 가능 → 업데이트 취소 시 앱을 종료한다
-        # (구 버전으로 계속 사용하지 못하게 함). 다시 실행하면 재다운로드된다.
+    def _cancel():
+        # 취소하면 받던 것만 버리고 **앱은 그대로 쓴다**. 예전에는 '최신 버전으로만 이용'
+        # 정책이라 취소 시 앱을 종료했는데, 업데이트가 사용자 선택이 된 지금은 강제 종료가
+        # 맞지 않는다(쓰던 비교 결과까지 날아간다).
         st["canceling"] = True
         dl.cancel()
-        from PyQt5.QtWidgets import QApplication
-        QApplication.quit()
 
     dl.progress.connect(_prog)
     dl.error.connect(_err)
     dl.done.connect(_ok)
     dl.finished.connect(dl.deleteLater)
-    dlg.canceled.connect(_cancel_and_quit)
+    dlg.canceled.connect(_cancel)
     dl.start()
