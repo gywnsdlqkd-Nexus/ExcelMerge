@@ -90,6 +90,14 @@ APP_QSS = """
             QPushButton#save_btn:hover   { background: #a06000; }
             QPushButton#save_btn:pressed { background: #7d4a00; }
             QPushButton#save_btn:disabled { background: #b0b0b0; color: #e0e0e0; }
+            /* 업데이트 확인 — 받을 게 있으면 초록으로 강조, 없거나 모르면 흐리게.
+               옆의 '＋ 새 비교'(파랑)와 구분되도록 강조색은 파랑이 아닌 초록을 쓴다. */
+            QPushButton#update_btn { background: #7a7a7a; color: #f0f0f0; }
+            QPushButton#update_btn:hover   { background: #5f5f5f; }
+            QPushButton#update_btn:pressed { background: #4a4a4a; }
+            QPushButton#update_btn[hasUpdate="true"] { background: #1a8f3c; color: white; }
+            QPushButton#update_btn[hasUpdate="true"]:hover   { background: #14722f; }
+            QPushButton#update_btn[hasUpdate="true"]:pressed { background: #0f5a25; }
             QPushButton#toggle_btn { background: #555; }
             QPushButton#toggle_btn:checked { background: #0078d4; }
             QPushButton#toggle_btn:hover   { background: #333; }

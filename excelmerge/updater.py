@@ -310,11 +310,40 @@ def apply_update(new_exe: str) -> bool:
 
 
 # ── 오케스트레이션 ────────────────────────────────────────────────────────────
-def check_for_updates(win, silent: bool = True):
-    """win(메인 윈도우) 기준 자동/수동 업데이트 확인.
-    silent=True(자동): 최신이거나 실패면 조용히. silent=False(수동): 결과를 메시지로 안내."""
+def probe_latest(win, on_result):
+    """조용한 버전 조회 — 창도 띄우지 않고 결과만 콜백으로 돌려준다.
+
+    '업데이트 확인' 버튼을 강조할지(받을 게 있음) 흐리게 둘지(없음/모름) 정하는 데만
+    쓴다. **다운로드·설치·대화상자는 절대 하지 않는다** — 강제 업데이트를 없앤 v198
+    정책을 그대로 지킨다. 조회에 실패하면 None 을 준다(= 흐림, 조용히).
+
+    on_result(manifest | None): 새 버전이 있을 때만 manifest, 그 외엔 None.
+    """
     src = _source()
     if not src:
+        on_result(None)
+        return
+    kind, url = src
+    worker = UpdateCheckWorker(url, kind)
+    win._update_probe_worker = worker   # GC 방지 — 워커가 살아 있어야 done 이 온다
+    worker.done.connect(
+        lambda m: on_result(m if (m and is_newer(m.get("version", ""), __version__))
+                            else None))
+    worker.finished.connect(worker.deleteLater)
+    worker.start()
+
+
+def check_for_updates(win, silent: bool = True, on_state=None):
+    """win(메인 윈도우) 기준 업데이트 확인.
+
+    silent=True: 최신이거나 실패면 조용히. silent=False(버튼): 결과를 메시지로 안내.
+    on_state(bool|None): 조회 결과를 '받을 게 있나'로 요약해 알려 준다(버튼 강조용).
+    True=새 버전 있음 / False=최신 / None=모름(소스 미설정·조회 실패).
+    """
+    src = _source()
+    if not src:
+        if on_state:
+            on_state(None)
         if not silent:
             QMessageBox.information(
                 win, "업데이트",
@@ -326,12 +355,16 @@ def check_for_updates(win, silent: bool = True):
     worker = UpdateCheckWorker(url, kind)
     # win에 참조를 보관해 GC/조기 파괴 방지.
     win._update_check_worker = worker
-    worker.done.connect(lambda m: _on_manifest(win, m, silent))
+    worker.done.connect(lambda m: _on_manifest(win, m, silent, on_state))
     worker.finished.connect(worker.deleteLater)
     worker.start()
 
 
-def _on_manifest(win, manifest, silent: bool):
+def _on_manifest(win, manifest, silent: bool, on_state=None):
+    if on_state:
+        # 버튼 표시용 요약 — 못 가져왔으면 '모름'(None), 가져왔으면 새 버전 유무.
+        on_state(None if not manifest
+                 else is_newer(manifest.get("version", ""), __version__))
     if not manifest:
         if not silent:
             QMessageBox.warning(win, "업데이트", "업데이트 정보를 가져오지 못했습니다(네트워크/URL 확인).")

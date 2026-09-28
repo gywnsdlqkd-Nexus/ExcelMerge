@@ -61,14 +61,15 @@ class MainWindow(QMainWindow):
         corner_lay.setSpacing(4)
         # 업데이트는 **이 버튼을 눌렀을 때만** 확인·설치한다. 예전에는 시작할 때 자동으로
         # 확인해 확인 창 없이 교체했는데, 그 강제 업데이트가 불편하다는 피드백을 받았다.
+        self._update_manifest = None     # 마지막 조회에서 알아낸 새 버전 정보
+        self._update_available = None    # True=받을 게 있음 / False=최신 / None=모름
         self.update_btn = QPushButton("업데이트 확인")
+        self.update_btn.setObjectName("update_btn")
         self.update_btn.setFont(ui_font(9))
-        self.update_btn.setToolTip(
-            f"최신 버전이 있는지 확인합니다 (현재 v{__version__}).\n"
-            "새 버전이 있으면 받을지 물어본 뒤 설치하고 다시 시작합니다.")
         self.update_btn.setFocusPolicy(Qt.NoFocus)   # 눌러도 키보드 포커스는 표에 남긴다
         self.update_btn.clicked.connect(self._check_updates)
         corner_lay.addWidget(self.update_btn)
+        self._set_update_state(None)                 # 모를 땐 흐리게 시작
 
         new_btn = QPushButton("＋ 새 비교")
         new_btn.setFont(ui_font(9))
@@ -152,16 +153,65 @@ class MainWindow(QMainWindow):
         if idx >= 0:
             self._close_tab(idx)
 
+    def _set_update_state(self, available):
+        """'업데이트 확인' 버튼의 강조/흐림 — True=받을 게 있음, False=최신, None=모름.
+
+        **글자는 늘 '업데이트 확인'으로 고정한다** — 상태에 따라 라벨이 바뀌면 버튼 폭이
+        들썩여 옆의 '＋ 새 비교'까지 밀린다. 대신 색으로 강조/흐림을 주고, 색을 구분하기
+        어려운 경우를 위해 툴팁에 상태(새 버전 번호 / 최신)를 적는다.
+
+        상태는 동적 속성으로 두고 QSS 가 그리게 한다(스타일 규칙을 theme.py 한곳에 모아
+        두기 위해) — Qt 는 속성이 바뀌어도 스스로 다시 칠하지 않으므로 unpolish/polish
+        로 강제한다.
+        """
+        self._update_available = available
+        self.update_btn.setText("업데이트 확인")
+        if available:
+            ver = (self._update_manifest or {}).get("version", "")
+            self.update_btn.setToolTip(
+                (f"새 버전 v{ver} 이 있습니다 (현재 v{__version__})."
+                 if ver else f"새 버전이 있습니다 (현재 v{__version__}).") + "\n"
+                "눌러서 변경점을 확인하고 받을 수 있습니다.")
+        else:
+            self.update_btn.setToolTip(
+                f"이미 최신 버전입니다 (v{__version__})." if available is False else
+                f"최신 버전이 있는지 확인합니다 (현재 v{__version__}).\n"
+                "새 버전이 있으면 받을지 물어본 뒤 설치하고 다시 시작합니다.")
+        self.update_btn.setProperty("hasUpdate", "true" if available else "false")
+        self.update_btn.style().unpolish(self.update_btn)
+        self.update_btn.style().polish(self.update_btn)
+
+    def _on_update_state(self, available, manifest=None):
+        # 버튼을 누른 조회는 manifest 를 넘기지 않는다 — 이미 알아 둔 버전 번호가 있으면
+        # 그대로 살려서 'v199 받기' 라벨을 유지한다.
+        if manifest is not None or not available:
+            self._update_manifest = manifest
+        self._set_update_state(available)
+
+    def _probe_updates(self):
+        """시작 직후 조용한 조회 — 버튼 표시만 정한다.
+
+        창도 띄우지 않고 설치도 하지 않는다. 받을지 말지는 여전히 사용자가 버튼을
+        눌러 정한다(v198 에서 없앤 강제 업데이트를 되살리지 않는다).
+        """
+        try:
+            from .updater import probe_latest
+            probe_latest(self, lambda m: self._on_update_state(bool(m), m))
+        except Exception:
+            log.debug("업데이트 표시 조회 실패", exc_info=True)
+
     def _check_updates(self):
         """'업데이트 확인' — 눌렀을 때만 조회한다.
 
         silent=False 라 결과를 항상 알려 준다(최신이면 '이미 최신 버전입니다', 조회
         실패면 경고). 새 버전이 있으면 받을지 물어본 뒤 설치·재시작한다.
+        조회 결과로 버튼 강조도 갱신한다 — 눌러서 '최신'을 확인하면 흐려진다.
         """
         self.status.showMessage("업데이트 확인 중...")
         try:
             from .updater import check_for_updates
-            check_for_updates(self, silent=False)
+            check_for_updates(self, silent=False,
+                              on_state=lambda av: self._on_update_state(av, None))
         except Exception:
             log.debug("업데이트 확인 실패", exc_info=True)
             QMessageBox.warning(self, "업데이트", "업데이트를 확인하지 못했습니다.")
