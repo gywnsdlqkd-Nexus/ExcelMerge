@@ -390,12 +390,12 @@ def _on_manifest(win, manifest, silent: bool, on_state=None):
                 f"수동으로 v{manifest['version']}을 받으세요:\n{manifest['url']}")
         return
 
-    notes = (manifest.get("notes") or "").strip()
-    head = "\n\n" + "\n".join(notes.splitlines()[:6]) if notes else ""
+    # 두 줄로 끝낸다. 예전엔 릴리스 노트 앞 6줄을 그대로 붙였는데, GitHub 본문이
+    # 마크다운이라 '## 제목'·'**굵게**' 기호가 그대로 노출돼 창만 장황해졌다.
     if QMessageBox.question(
             win, "업데이트",
-            f"새 버전 v{manifest['version']} 이 있습니다 (현재 v{__version__}).\n"
-            f"지금 받아서 다시 시작할까요?{head}",
+            f"최신 업데이트 버전(v{manifest['version']})이 있습니다.\n"
+            "업데이트하시겠습니까?",
             QMessageBox.Yes | QMessageBox.No,
             QMessageBox.Yes) != QMessageBox.Yes:
         return

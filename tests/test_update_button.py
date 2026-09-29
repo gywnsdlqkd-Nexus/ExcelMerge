@@ -302,3 +302,25 @@ def test_label_never_changes_between_states(win, qapp):
         assert win.update_btn.text() == "업데이트 확인"
         widths.append(win.update_btn.sizeHint().width())
     assert len(set(widths)) == 1, f"상태에 따라 버튼 폭이 변한다: {widths}"
+
+
+def test_update_prompt_is_two_short_lines(win, monkeypatch):
+    """확인 창은 두 줄로 끝낸다 — 릴리스 노트를 그대로 붙이지 않는다.
+
+    예전엔 노트 앞 6줄을 붙였는데, GitHub 본문이 마크다운이라 '## 제목'·'**굵게**'
+    기호가 그대로 보여 창만 장황해졌다.
+    """
+    seen = []
+    monkeypatch.setattr(
+        QMessageBox, "question",
+        staticmethod(lambda _w, _t, msg, *a, **k: seen.append(msg) or QMessageBox.No))
+    monkeypatch.setattr(upd.sys, "frozen", True, raising=False)
+    # 버전은 현재 버전보다 확실히 높은 값으로 — 같은 값이면 '이미 최신' 분기로 빠져
+    # 이 테스트가 확인하려는 질문 창이 아예 뜨지 않는다.
+    upd._on_manifest(win, {"version": "999", "url": "u", "sha256": "",
+                           "notes": "## 제목\n- **굵게** 항목\n셋째 줄\n넷째 줄"},
+                     silent=False)
+    assert seen, "확인 창이 뜨지 않았다"
+    msg = seen[0]
+    assert msg == "최신 업데이트 버전(v999)이 있습니다.\n업데이트하시겠습니까?", repr(msg)
+    assert "##" not in msg and "**" not in msg, "릴리스 노트가 창에 새어 나왔다"
