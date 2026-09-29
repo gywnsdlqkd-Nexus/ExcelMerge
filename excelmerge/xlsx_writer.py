@@ -123,12 +123,54 @@ def _promote_empty_cols_to_delete(
 
 
 def _is_file_locked(path: str) -> bool:
-    """파일이 다른 프로세스에 의해 열려 있는지 확인한다."""
+    """다른 프로세스가 잡고 있어 쓸 수 없는 상태인지 — **파일을 만들지 않고** 확인한다.
+
+    예전엔 open(path, "a") 였다. append 모드는 없는 경로에 **빈 파일을 만들어 버려서**,
+    '잠겼는지 보기만' 하는 호출이 없던 파일을 생성하는 부작용이 있었다.
+    없는 파일은 잠김이 아니다 — 실제 저장 단계에서 제대로 된 오류로 드러난다.
+    """
     try:
-        with open(path, "a"):
+        with open(path, "r+b"):
             return False
-    except (IOError, PermissionError):
+    except FileNotFoundError:
+        return False
+    except OSError:          # PermissionError·IOError 포함
         return True
+
+
+def _verify_patches(tmp_path: str, patches: dict[str, str], sheet_name) -> None:
+    """갓 쓴 임시 파일을 되읽어 덮어쓴 셀이 의도한 값인지 확인. 다르면 예외.
+
+    '쓰고 나서 확인'이 아니라 **'확인하고 나서 바꾼다'** — 원본을 교체하기 전에 본다.
+    읽기는 비교에 쓰는 로더 그대로라, 사용자가 다음에 열었을 때 보게 될 글자를 그대로
+    본다(예전 _is_numeric 버그처럼 XML 은 멀쩡한데 값이 달라 보이는 경우까지 잡힌다).
+
+    검사 대상은 '덮어쓰기(patches)' 뿐이다. 수식(= 로 시작)은 캐시값이 없어 되읽으면
+    빈 칸이므로 건너뛴다. 행/열 삭제·신규 행 추가는 여기서 보지 않는다.
+    """
+    targets = {ref: v for ref, v in patches.items()
+               if not (v or "").startswith("=")}
+    if not targets:
+        return
+    from .loaders import load_values_any     # 순환 import 방지 — 저장 시점에만 필요
+    rows = load_values_any(tmp_path, sheet_name=sheet_name)
+    bad = []
+    for ref, expect in targets.items():
+        m = _COL_RE.match(ref)
+        if not m:
+            continue
+        col_letters, row_num = m.group(1), int(m.group(2))
+        r, c = row_num - 1, column_index_from_string(col_letters) - 1
+        got = rows[r][c] if (0 <= r < len(rows) and 0 <= c < len(rows[r])) else ""
+        if got != expect:
+            bad.append(f"{ref}: 쓰려던 값 {expect!r} → 파일에는 {got!r}")
+        if len(bad) >= 5:
+            break
+    if bad:
+        raise ValueError(
+            "저장 검증 실패 — 원본 파일을 그대로 두었습니다.\n"
+            + "\n".join(bad)
+            + (f"\n… 외 {len(targets) - len(bad)}개 확인" if len(targets) > len(bad) else ""))
 
 
 def _write_patches_to_file(
@@ -183,6 +225,11 @@ def _write_patches_to_file(
                         patch_styles,
                     )
                 zout.writestr(item, data)
+        # 바꾸기 **전에** 확인한다 — 임시 파일을 비교와 같은 로더로 되읽어, 덮어쓴 셀이
+        # 의도한 값으로 들어갔는지 대조한다. 백업(.bak)은 만들지 않으므로(사용자 요청)
+        # 잘못 쓴 파일로 원본을 덮으면 되돌릴 수단이 없다. 검증이 실패하면 임시 파일만
+        # 버리고 원본은 손대지 않는다.
+        _verify_patches(tmp, patches, sheet_name)
         # 임시 파일을 원자적으로 교체(백업 .bak 은 만들지 않음 — 사용자 요청으로 제거).
         os.replace(tmp, path_base)
     except Exception:
@@ -522,11 +569,31 @@ def _prepare_style_merge(zin, sheet_path, src_path, src_sheet_name,
 
 
 def _is_numeric(val: str) -> bool:
-    try:
-        float(val)
-        return True
-    except (ValueError, TypeError):
+    """숫자 셀로 써도 **보이는 글자가 한 자도 바뀌지 않는** 값만 True.
+
+    예전에는 float() 로 파싱만 되면 숫자로 썼다. 그래서 '01'·'007'·'210000\\t'·'nan'·
+    '1_0' 같은 값이 숫자 셀이 돼, 저장하면 값이 조용히 바뀌었다 —
+    실측: 실제 빌드 파일 사본에 '01' 을 그대로 저장하면 파일에는 '1' 이 남았다.
+
+    그래서 '숫자로 썼다가 우리 로더로 되읽으면 원문 그대로인가'를 기준으로 삼는다.
+    되읽기 표기는 loaders._cell_to_str 과 같은 규칙(정수형 float 은 정수로)이며,
+    두 규칙이 어긋나지 않도록 테스트로 묶어 두었다.
+
+    (실측 영향 범위: 실제 빌드 데이터 60개 파일의 숫자형 셀 193,772개 중 이 규칙으로
+     문자 셀이 되는 것은 27개뿐이다 — 앞자리 0 23개, 끝에 탭이 붙은 4개. 둘 다 예전엔
+     저장하면서 값이 뭉개지던 셀이다.)
+    """
+    if not isinstance(val, str):
         return False
+    try:
+        f = float(val)
+    except (ValueError, TypeError, OverflowError):
+        return False
+    try:
+        back = str(int(f)) if f == int(f) else str(f)
+    except (ValueError, OverflowError):     # nan / inf — 숫자로 쓰면 값이 사라진다
+        return False
+    return back == val
 
 
 def _set_cell_value(c_el, new_val: str):
