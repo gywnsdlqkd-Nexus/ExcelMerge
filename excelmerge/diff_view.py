@@ -79,6 +79,8 @@ class DiffView(QWidget):
         self._staged: dict = {}
         self._preview_data: dict = {"a": [], "b": []}   # 미리보기 raw data
         self._diff_only: bool = False
+        # 찾기 결과 캐시 — (열쇠, 매트릭스 ref, 셀 목록). _find_cells 참고.
+        self._find_cache = None
         # 병합 준비/취소 되돌리기(Ctrl+Z).
         #   ("stage",   [cell, ...], direction)
         #   ("unstage", [(cell, direction), ...])
@@ -753,6 +755,8 @@ class DiffView(QWidget):
         self._apply_diff_filter()
 
     def _apply_diff_filter(self):
+        # 숨김 행이 바뀌면 찾기 결과 목록도 달라진다 — 캐시를 버린다.
+        self._invalidate_find_cache()
         if not self._diff_matrix:
             self._update_minimap()
             self._refresh_freeze()
@@ -1004,6 +1008,36 @@ class DiffView(QWidget):
                 if match(cell[1]) or match(cell[2]):
                     yield (r, c)
 
+    def _invalidate_find_cache(self):
+        """찾기 결과 캐시 버리기 — 표가 다시 만들어지거나 행 가시성이 바뀔 때."""
+        self._find_cache = None
+
+    def _find_cells(self, term: str) -> list:
+        """검색어에 맞는 셀 목록 — 같은 조건으로 다시 물으면 스캔을 건너뛴다.
+
+        F3 는 누를 때마다 표 전체를 다시 훑었다(실측: 449,288셀 · '변경점만 보기' OFF
+        에서 한 번에 113~299 ms, 중앙값 138 ms. 필터 ON 은 숨은 행을 건너뛰어 0.6 ms).
+        결과는 **검색어·검색 옵션·표·필터 상태·제외 열·병합 준비 상태**가 그대로면 바뀌지
+        않으므로, 그 조합을 열쇠로 캐시한다. 표 자체는 identity 로 대조하고(새 비교·시트
+        전환이면 다른 객체), 행 가시성이 바뀌는 경로는 _invalidate_find_cache 로 버린다.
+
+        미리보기(파일 1개) 모드는 캐시하지 않는다 — 스캔이 _diff_matrix 가 아니라 모델
+        표시 텍스트를 읽어, 무엇이 바뀌면 결과가 달라지는지 열쇠로 표현할 수 없다.
+        """
+        matcher = self._make_find_matcher(term)
+        if not self._diff_matrix:
+            return list(self._iter_find_matches(matcher))
+        key = (term, self.find_case_btn.isChecked(), self.find_word_btn.isChecked(),
+               self._diff_only, tuple(sorted(self._excluded_cols)),
+               len(self._staged),
+               hash(frozenset(self._staged.items())) if self._staged else 0)
+        hit = self._find_cache
+        if hit is not None and hit[0] == key and hit[1] is self._diff_matrix:
+            return hit[2]
+        cells = list(self._iter_find_matches(matcher))
+        self._find_cache = (key, self._diff_matrix, cells)
+        return cells
+
     def _goto_find(self, direction: int):
         """direction=+1: 다음 찾기, -1: 이전 찾기. 끝에 도달하면 반대편에서 순환.
         diff 모드뿐 아니라 미리보기(파일 1개) 상태에서도 동작한다."""
@@ -1012,7 +1046,7 @@ class DiffView(QWidget):
                     or self.panel_b.table.model().data_rows)
         if not term or not has_data:
             return
-        cells = list(self._iter_find_matches(self._make_find_matcher(term)))
+        cells = self._find_cells(term)
         if not cells:
             self.status.showMessage(f'"{term}" — 일치 항목이 없습니다.')
             return
@@ -1323,6 +1357,7 @@ class DiffView(QWidget):
     def _refresh_tables(self):
         """전체 리셋 경로 — 매트릭스 자체가 재계산됐을 때만 사용.
         stage/unstage/편집/저장확정/undo는 _notify_cells()로 부분 갱신한다."""
+        self._invalidate_find_cache()
         self.panel_a.populate(self._diff_matrix, self._merged_cells, self._staged,
                               self._diff_row_meta, self._excluded_cols)
         self.panel_b.populate(self._diff_matrix, self._merged_cells, self._staged,
