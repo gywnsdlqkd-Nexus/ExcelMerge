@@ -20,10 +20,13 @@ from PyQt5.QtCore import Qt, pyqtSignal, QThread
 from PyQt5.QtGui import QIcon, QKeySequence
 from openpyxl.utils import get_column_letter
 
-from .diff_engine import count_changed_masked, keep_mask, row_change_masks
+from .diff_engine import (count_changed_masked, dropped_key_rows, keep_mask,
+                          row_change_masks, unique_key_candidates)
 from .loaders import _EXCEL_EXTS, list_sheet_names, clear_values_cache
+from .dropped_rows_dialog import DroppedRowsDialog
 from .panels import FilePanel
-from .prefs import load_key_prefs, save_key_prefs, load_last_sheet, save_last_sheet
+from .prefs import (load_key_prefs, save_key_prefs, load_last_key, save_last_key,
+                    load_last_sheet, save_last_sheet)
 from .theme import APP_QSS, DIFF_COLORS, ui_font, ext_tab_icon
 from . import staging
 from .constants import STATUS_SAME, DIR_A2B, DIR_B2A
@@ -47,6 +50,7 @@ class DiffView(QWidget):
         # MainWindow가 소유한 공유 상태바. _build_ui 이전에 세팅해야
         # 빌드 중 showMessage 호출이 안전하다.
         self.status = status_bar
+        self.status.warning_clicked.connect(self._on_status_warning_clicked)
         self._load_worker:          LoadWorker | None         = None
         self._preview_workers: dict[str, PreviewWorker | None] = {"a": None, "b": None}
         self._staged_merge_worker: StagedMergeWorker | None = None
@@ -81,6 +85,7 @@ class DiffView(QWidget):
         self._diff_only: bool = False
         # 찾기 결과 캐시 — (열쇠, 매트릭스 ref, 셀 목록). _find_cells 참고.
         self._find_cache = None
+        self._dropped_count = 0          # 마지막 비교에서 빠진 행 수(진단 창용)
         # 병합 준비/취소 되돌리기(Ctrl+Z).
         #   ("stage",   [cell, ...], direction)
         #   ("unstage", [(cell, direction), ...])
@@ -277,6 +282,17 @@ class DiffView(QWidget):
             # 첫 셀 선택 시 수식 플래그 지연 로드(파랑 폰트 표시용) 트리거.
             panel.table.selectionModel().selectionChanged.connect(
                 lambda *_: self._maybe_load_formula_flags())
+
+    def showEvent(self, e):
+        """탭이 앞으로 나오면 상태바 경고를 이 탭의 상태로 되돌린다.
+        상태바는 모든 탭이 공유해서, 놔두면 다른 탭의 경고가 남는다."""
+        super().showEvent(e)
+        self._show_dropped_warning(self._dropped_count)
+
+    def _on_status_warning_clicked(self):
+        """공유 상태바의 경고 클릭 — 지금 화면에 있는 탭만 반응한다."""
+        if self.isVisible():
+            self._open_dropped_dialog()
 
     def _apply_style(self):
         self.setStyleSheet(APP_QSS)
@@ -629,6 +645,9 @@ class DiffView(QWidget):
             return
         self._raw_data["a"] = a_data
         self._raw_data["b"] = b_data
+        # 이 파일에 기억해 둔 키가 있으면 먼저 적용한다 — 전역 키 하나로 모든 파일을
+        # 비교하다 중복 키로 수천 행이 조용히 빠지던 문제를 막는다.
+        self._apply_remembered_key()
         # 키 열이 현재 데이터 폭을 벗어나면(예: 넓은 시트→좁은 시트) 기본(A열)으로 리셋 —
         # 그대로 두면 전 행이 빈 키로 드롭돼 '차이 없음'처럼 보이는 착시가 생긴다.
         # (자동 리셋은 전역 저장하지 않는다 — 사용자 조작만 저장.)
@@ -660,7 +679,9 @@ class DiffView(QWidget):
         w = DiffWorker(
             self._raw_data["a"], self._raw_data["b"],
             self._key_col, self._key_row, set(self._excluded_cols),
-            token, mode, want_dropped=(mode == "load"),
+            # 키를 바꿔 재비교할 때도 다시 센다 — 안 그러면 키를 고쳤는데도 옛 경고가
+            # 남는다. 비용은 O(행)으로 실측 8 ms(11,289행).
+            token, mode, want_dropped=True,
         )
         w.done.connect(self._on_diff_ready)
         w.error.connect(self._on_error)
@@ -691,6 +712,8 @@ class DiffView(QWidget):
             else:
                 self.diff_only_btn.setChecked(True)
             warn = f"  | ⚠ {dropped}개 행이 키 중복/공백으로 비교에서 제외됨" if dropped else ""
+            self._dropped_count = dropped
+            self._show_dropped_warning(dropped)
             self.status.showMessage(
                 f"비교 완료 — {rows}행 × {cols}열 | 변경된 셀: {changed}개{warn}  "
                 "| 셀 선택 후 우클릭 → 병합 준비 → 선택 병합 저장"
@@ -701,14 +724,76 @@ class DiffView(QWidget):
                 anchor = f"{self._key_row + 1}행 {get_column_letter(self._key_col + 1)}열"
             else:
                 anchor = "ROW 순서(키 없음)"
+            self._dropped_count = dropped
+            self._show_dropped_warning(dropped)
+            warn = f"  |  ⚠ {dropped}행 제외됨" if dropped else ""
             self.status.showMessage(
-                f"키 헤더: {anchor}  |  {rows}행 × {cols}열  |  변경된 셀: {changed}개  "
+                f"키 헤더: {anchor}  |  {rows}행 × {cols}열  |  변경된 셀: {changed}개{warn}  "
                 "| 셀 선택 후 우클릭 → 병합 준비 → 선택 병합 저장"
             )
         # 첫 결과가 화면에 떴으니 미뤄둔 시트 탭 색칠을 이제 시작(임계 경로 밖).
         self._flush_sheet_diff()
 
+    # ── 비교에서 빠진 행 진단 ────────────────────────────────────────────────
+
+    def _show_dropped_warning(self, dropped: int):
+        """빠진 행이 있으면 상태바 우측에 누를 수 있는 경고를 띄운다."""
+        if dropped:
+            self.status.show_warning(
+                f"⚠ {dropped:,}행 제외됨 — 자세히",
+                "키 중복·빈 키로 비교에서 빠진 행이 있습니다. "
+                "눌러서 원인과 쓸 수 있는 키 열을 확인하세요.")
+        else:
+            self.status.clear_warning()
+
+    def _open_dropped_dialog(self):
+        """진단 창 — 원인 집계 · 상위 중복 키 · 키 후보 · 빠진 행 목록.
+
+        키 후보 탐색은 O(행×열)이라 비교할 때가 아니라 **이 창을 열 때만** 계산한다
+        (실측: 11,289행 × 29열에서 43 ms).
+        """
+        a, b = self._raw_data["a"], self._raw_data["b"]
+        if not (a or b) or self._key_col < 0:
+            return
+        info = dropped_key_rows(a, b, self._key_col, self._key_row)
+        cands = [(c, h) for c, h in unique_key_candidates(a, b, self._key_row)
+                 if c != self._key_col]
+        DroppedRowsDialog(self, self._key_col, info, cands,
+                          self._dropped_count, self._on_key_col_changed).exec_()
+
     # ── 키 열 변경 ────────────────────────────────────────────────────────────
+
+    def _remember_key(self):
+        """지금 키 위치를 **파일별로** 기억한다(A/B 각각).
+
+        키는 오래도록 전역 하나였다 — 한 파일에서 B열을 키로 잡으면 그 뒤 모든 파일이
+        B열로 비교돼, B가 키가 아닌 파일에서 중복 키로 수천 행이 조용히 빠졌다.
+        사용자가 직접 바꾼 경우에만 기록한다(범위 초과 자동 리셋은 기록하지 않는다).
+        """
+        for panel in (self.panel_a, self.panel_b):
+            path = panel.get_path()
+            if path:
+                save_last_key(path, self._key_row, self._key_col)
+
+    def _apply_remembered_key(self) -> bool:
+        """이 파일에 기억된 키가 있으면 적용한다. 적용했으면 True.
+
+        A/B 중 먼저 기억이 있는 쪽을 따른다 — 같은 이름의 두 빌드를 비교하는 것이
+        보통이라 둘의 기억은 대개 같다.
+        """
+        for panel in (self.panel_a, self.panel_b):
+            remembered = load_last_key(panel.get_path())
+            if remembered is None:
+                continue
+            row, col = remembered
+            if (row, col) == (self._key_row, self._key_col):
+                return False
+            self._key_row, self._key_col = row, col
+            for p in (self.panel_a, self.panel_b):
+                p.table.set_key_row(row)
+                p.table.set_key_col(col)
+            return True
+        return False
 
     def _on_key_col_changed(self, col: int):
         if col == self._key_col:
@@ -716,7 +801,8 @@ class DiffView(QWidget):
         self._key_col = col
         self.panel_a.table.set_key_col(col)
         self.panel_b.table.set_key_col(col)
-        save_key_prefs(self._key_row, self._key_col)   # 사용자 조작 → 전역 저장
+        save_key_prefs(self._key_row, self._key_col)   # 사용자 조작 → 전역 기본값
+        self._remember_key()                           # 이 파일엔 이 키를 기억
         if self._raw_data["a"] or self._raw_data["b"]:
             self._recompute_diff()
 
@@ -726,7 +812,8 @@ class DiffView(QWidget):
         self._key_row = row
         self.panel_a.table.set_key_row(row)
         self.panel_b.table.set_key_row(row)
-        save_key_prefs(self._key_row, self._key_col)   # 사용자 조작 → 전역 저장
+        save_key_prefs(self._key_row, self._key_col)   # 사용자 조작 → 전역 기본값
+        self._remember_key()                           # 이 파일엔 이 키를 기억
         if self._raw_data["a"] or self._raw_data["b"]:
             self._recompute_diff()
 

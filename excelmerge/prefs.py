@@ -66,6 +66,44 @@ def save_key_prefs(key_row: int, key_col: int) -> None:
     _write_prefs(c)
 
 
+def load_last_key(path: str):
+    """그 파일에서 사용자가 마지막으로 고른 (key_row, key_col). 없으면 None.
+
+    키는 오랫동안 **전역 하나**였다. 그래서 한 파일에서 B열을 키로 잡으면 그 뒤로 여는
+    모든 파일이 B열로 비교됐고, B가 키가 아닌 파일에서는 중복 키로 수천 행이 조용히
+    비교에서 빠졌다(실측: Data_SkillModule_CS.xlsx 14,659행). 파일별로 기억해 두면
+    한 번 제대로 잡은 파일은 다음부터 틀리지 않는다. 기억이 없으면 전역 기본을 쓴다.
+    """
+    if not path:
+        return None
+    m = _read_prefs().get("last_keys")
+    if isinstance(m, dict):
+        v = m.get(os.path.abspath(path))
+        if (isinstance(v, list) and len(v) == 2
+                and all(isinstance(x, int) for x in v)
+                and v[0] >= 0 and v[1] >= -1):
+            return (v[0], v[1])
+    return None
+
+
+def save_last_key(path: str, key_row: int, key_col: int) -> None:
+    """파일별 키 위치를 기록(간단 LRU). 실패는 조용히 무시."""
+    if not path:
+        return
+    c = _read_prefs()
+    m = c.get("last_keys")
+    if not isinstance(m, dict):
+        m = {}
+    key = os.path.abspath(path)
+    m.pop(key, None)                      # 재삽입으로 최근 항목을 뒤로
+    m[key] = [int(key_row), int(key_col)]
+    if len(m) > _LAST_SHEETS_MAX:
+        for k in list(m.keys())[: len(m) - _LAST_SHEETS_MAX]:
+            del m[k]
+    c["last_keys"] = m
+    _write_prefs(c)
+
+
 def load_last_sheet(path: str):
     """해당 파일에서 사용자가 마지막으로 선택한 시트 이름. 없으면 None."""
     if not path:
