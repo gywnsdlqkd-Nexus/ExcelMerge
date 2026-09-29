@@ -177,3 +177,57 @@ def test_lock_check_does_not_create_a_missing_file(tmp_path):
 def test_lock_check_reports_a_writable_file_as_free(tmp_path):
     p = _make_xlsx(tmp_path / "a.xlsx", [["ID"], ["k1"]])
     assert _is_file_locked(p) is False
+
+
+# ── 행 삭제가 섞인 저장 — 자리가 밀려도 검증이 오작동하면 안 된다 ────────────
+# 실사용 신고: 병합 저장을 누르니 "저장 검증 실패" 로 막혔다. 원인은 저장 자체가 아니라
+# 검증이었다 — _renumber_after_delete 가 VBA .Delete 처럼 삭제 행 아래를 위로 당기는데,
+# 검증이 저장 전 좌표를 그대로 보고 한 칸 아래 값과 비교했다.
+
+def test_patch_below_a_deleted_row_is_verified_at_its_new_place(tmp_path):
+    p = _make_xlsx(tmp_path / "a.xlsx",
+                   [[f"k{i}", f"v{i}", f"n{i}"] for i in range(1, 7)])
+    _write_patches_to_file(p, {"B4": "새값"}, delete_row_nums={2})
+    rows = _values(p)
+    assert len(rows) == 5, "행이 하나 지워져야 한다"
+    assert rows[2] == ["k4", "새값", "n4"], f"패치가 엉뚱한 자리에 갔다: {rows}"
+
+
+def test_many_deleted_rows_shift_correctly(tmp_path):
+    p = _make_xlsx(tmp_path / "a.xlsx",
+                   [[f"k{i}", f"v{i}"] for i in range(1, 9)])
+    _write_patches_to_file(p, {"B7": "일곱", "B8": "여덟"}, delete_row_nums={2, 5})
+    rows = _values(p)
+    assert [r[0] for r in rows] == ["k1", "k3", "k4", "k6", "k7", "k8"]
+    assert rows[4] == ["k7", "일곱"] and rows[5] == ["k8", "여덟"]
+
+
+def test_patch_on_a_deleted_row_is_not_flagged(tmp_path):
+    """지워진 행에 남은 패치는 확인할 자리가 없다 — 거짓 실패를 내면 안 된다."""
+    p = _make_xlsx(tmp_path / "a.xlsx", [[f"k{i}", f"v{i}"] for i in range(1, 5)])
+    _write_patches_to_file(p, {"B2": "사라질값"}, delete_row_nums={2})
+    rows = _values(p)
+    assert [r[0] for r in rows] == ["k1", "k3", "k4"]
+
+
+def test_verification_still_catches_a_bad_write_with_deletes(tmp_path, monkeypatch):
+    """자리 보정을 넣어도 진짜 오기록은 여전히 잡아야 한다."""
+    import excelmerge.xlsx_writer as xw
+    p = _make_xlsx(tmp_path / "a.xlsx", [[f"k{i}", f"v{i}"] for i in range(1, 6)])
+    before = open(p, "rb").read()
+    real = xw._patch_sheet_xml
+    monkeypatch.setattr(
+        xw, "_patch_sheet_xml",
+        lambda data, patches, *a, **k: real(data, {r: "엉뚱" for r in patches}, *a, **k))
+    with pytest.raises(ValueError, match="저장 검증 실패"):
+        _write_patches_to_file(p, {"B4": "새값"}, delete_row_nums={2})
+    assert open(p, "rb").read() == before, "검증 실패인데 원본이 바뀌었다"
+
+
+def test_deleted_column_does_not_shift_verification(tmp_path):
+    """열 삭제는 <c> 만 지우고 열 문자는 그대로라 좌표가 밀리지 않는다."""
+    p = _make_xlsx(tmp_path / "a.xlsx", [["k1", "v1", "n1"], ["k2", "v2", "n2"]])
+    _write_patches_to_file(p, {"C2": "끝값"}, delete_col_letters={"B"})
+    rows = _values(p)
+    assert rows[1][0] == "k2" and rows[1][2] == "끝값"
+    assert rows[1][1] == "", "지운 열 자리는 비어야 한다"

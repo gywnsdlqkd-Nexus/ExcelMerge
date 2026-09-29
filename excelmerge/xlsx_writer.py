@@ -138,20 +138,28 @@ def _is_file_locked(path: str) -> bool:
         return True
 
 
-def _verify_patches(tmp_path: str, patches: dict[str, str], sheet_name) -> None:
+def _verify_patches(tmp_path: str, patches: dict[str, str], sheet_name,
+                    delete_row_nums=None) -> None:
     """갓 쓴 임시 파일을 되읽어 덮어쓴 셀이 의도한 값인지 확인. 다르면 예외.
 
     '쓰고 나서 확인'이 아니라 **'확인하고 나서 바꾼다'** — 원본을 교체하기 전에 본다.
     읽기는 비교에 쓰는 로더 그대로라, 사용자가 다음에 열었을 때 보게 될 글자를 그대로
     본다(예전 _is_numeric 버그처럼 XML 은 멀쩡한데 값이 달라 보이는 경우까지 잡힌다).
 
+    ★ 행을 지우는 저장에서는 **자리가 밀린다**. _renumber_after_delete 가 VBA .Delete
+    처럼 삭제된 행 아래를 위로 당기므로, 패치 좌표(저장 전 기준)를 그대로 보면 한 칸
+    아래 행의 값과 비교하게 된다 — 멀쩡한 저장이 '검증 실패'로 막혔다(실사용 신고).
+    그래서 삭제된 행 수만큼 행 번호를 당겨서 본다. 지워진 행 자체의 패치는 건너뛴다.
+
     검사 대상은 '덮어쓰기(patches)' 뿐이다. 수식(= 로 시작)은 캐시값이 없어 되읽으면
-    빈 칸이므로 건너뛴다. 행/열 삭제·신규 행 추가는 여기서 보지 않는다.
+    빈 칸이므로 건너뛴다. 신규 행은 파일 끝에 붙어 기존 좌표를 밀지 않는다.
+    열 삭제는 <c> 만 지우고 열 문자는 그대로라 좌표가 밀리지 않는다.
     """
     targets = {ref: v for ref, v in patches.items()
                if not (v or "").startswith("=")}
     if not targets:
         return
+    deleted = sorted(delete_row_nums or ())
     from .loaders import load_values_any     # 순환 import 방지 — 저장 시점에만 필요
     rows = load_values_any(tmp_path, sheet_name=sheet_name)
     bad = []
@@ -160,7 +168,10 @@ def _verify_patches(tmp_path: str, patches: dict[str, str], sheet_name) -> None:
         if not m:
             continue
         col_letters, row_num = m.group(1), int(m.group(2))
-        r, c = row_num - 1, column_index_from_string(col_letters) - 1
+        if row_num in (delete_row_nums or ()):
+            continue                       # 통째로 지워진 행 — 확인할 자리가 없다
+        shift = sum(1 for d in deleted if d < row_num)
+        r, c = row_num - 1 - shift, column_index_from_string(col_letters) - 1
         got = rows[r][c] if (0 <= r < len(rows) and 0 <= c < len(rows[r])) else ""
         if got != expect:
             bad.append(f"{ref}: 쓰려던 값 {expect!r} → 파일에는 {got!r}")
@@ -229,7 +240,7 @@ def _write_patches_to_file(
         # 의도한 값으로 들어갔는지 대조한다. 백업(.bak)은 만들지 않으므로(사용자 요청)
         # 잘못 쓴 파일로 원본을 덮으면 되돌릴 수단이 없다. 검증이 실패하면 임시 파일만
         # 버리고 원본은 손대지 않는다.
-        _verify_patches(tmp, patches, sheet_name)
+        _verify_patches(tmp, patches, sheet_name, delete_row_nums)
         # 임시 파일을 원자적으로 교체(백업 .bak 은 만들지 않음 — 사용자 요청으로 제거).
         os.replace(tmp, path_base)
     except Exception:
