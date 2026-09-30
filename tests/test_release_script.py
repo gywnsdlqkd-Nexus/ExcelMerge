@@ -173,3 +173,22 @@ def test_quoted_path_with_spaces():
 
 def test_empty_status_means_clean():
     assert release.blocking_changes("", ALLOWED) == []
+
+
+# ── 콘솔 인코딩 ──────────────────────────────────────────────────────────────
+# 진행 문구에 쓰는 '▶'·'✖'·'—' 는 cp949 로 인코딩되지 않는다. 한국어 Windows 콘솔이
+# cp949 라, v206 릴리스가 **버전 bump 직후** UnicodeEncodeError 로 끊겼다 — 파일은
+# 이미 고쳐졌는데 커밋 전이라 손으로 되돌려야 했다. 출력 때문에 릴리스가 멈추면 안 된다.
+
+def test_release_does_not_die_on_a_cp949_console():
+    import os
+    import subprocess
+    import sys
+
+    env = dict(os.environ, PYTHONIOENCODING="cp949")
+    r = subprocess.run([sys.executable, release.__file__, "999", "--dry-run"],
+                       cwd=os.path.dirname(release.__file__), env=env,
+                       capture_output=True, text=True, encoding="cp949",
+                       errors="replace")
+    # 게이트에 걸려 exit 1 이 될 수는 있다(작업 트리가 더러우면). 인코딩으로 죽으면 안 된다.
+    assert "UnicodeEncodeError" not in (r.stderr or ""), r.stderr

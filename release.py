@@ -25,6 +25,16 @@ import re
 import subprocess
 import sys
 
+# 콘솔이 cp949 여도 진행 문구 때문에 죽지 않게 한다. '—'(—)·'▶'·'✖' 는 cp949 로
+# 인코딩되지 않아, v206 릴리스가 **버전 bump 직후** UnicodeEncodeError 로 끊긴 적이 있다
+# (파일은 이미 고쳐졌는데 커밋 전이라, 손으로 되돌려야 했다). 출력은 부수적인 것이므로
+# 인코딩은 그대로 두고 실패한 글자만 대체한다 — 한글은 cp949 에서 그대로 보인다.
+for _stream in (sys.stdout, sys.stderr):
+    try:
+        _stream.reconfigure(errors="replace")
+    except (AttributeError, OSError):      # 리다이렉트/파이프 등 reconfigure 불가
+        pass
+
 HERE = os.path.dirname(os.path.abspath(__file__))
 INIT_PY = os.path.join(HERE, "excelmerge", "__init__.py")
 CHANGELOG = os.path.join(HERE, "CHANGELOG.md")
