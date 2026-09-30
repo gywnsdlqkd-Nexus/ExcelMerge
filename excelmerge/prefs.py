@@ -104,6 +104,50 @@ def save_last_key(path: str, key_row: int, key_col: int) -> None:
     _write_prefs(c)
 
 
+def load_last_excluded(path: str):
+    """그 파일에서 사용자가 마지막으로 지정한 '검사 제외 열' 목록. 없으면 None.
+
+    제외는 비교할 때마다 초기화됐다. 그런데 어떤 테이블에서 무엇을 안 볼지는 **그 테이블의
+    성질**이지 그때그때 기분이 아니다 — 주석 열(#Desc 등)이나 현지화 열은 늘 같은 것을
+    뺀다. 그래서 파일을 열 때마다 헤더를 우클릭해 같은 열을 다시 골라야 했다.
+    키 위치를 파일별로 기억하게 만든 것과 같은 이유다(load_last_key 참조).
+
+    **빈 목록과 '기억 없음'은 다르다.** 사용자가 제외를 전부 해제한 것도 선택이므로
+    `[]` 를 그대로 돌려준다 — 호출부는 `is None` 으로 구분해야 한다.
+    """
+    if not path:
+        return None
+    m = _read_prefs().get("last_excluded")
+    if isinstance(m, dict):
+        v = m.get(os.path.abspath(path))
+        if (isinstance(v, list)
+                and all(isinstance(x, int) and x >= 0 for x in v)):
+            return sorted(set(v))
+    return None
+
+
+def save_last_excluded(path: str, cols) -> None:
+    """파일별 제외 열을 기록(간단 LRU). 실패는 조용히 무시."""
+    if not path:
+        return
+    try:
+        vals = sorted({int(c) for c in cols if int(c) >= 0})
+    except (TypeError, ValueError):
+        return
+    c = _read_prefs()
+    m = c.get("last_excluded")
+    if not isinstance(m, dict):
+        m = {}
+    key = os.path.abspath(path)
+    m.pop(key, None)                      # 재삽입으로 최근 항목을 뒤로
+    m[key] = vals
+    if len(m) > _LAST_SHEETS_MAX:
+        for k in list(m.keys())[: len(m) - _LAST_SHEETS_MAX]:
+            del m[k]
+    c["last_excluded"] = m
+    _write_prefs(c)
+
+
 def load_last_sheet(path: str):
     """해당 파일에서 사용자가 마지막으로 선택한 시트 이름. 없으면 None."""
     if not path:

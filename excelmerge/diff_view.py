@@ -25,6 +25,7 @@ from .diff_engine import (count_changed_masked, keep_mask,
 from .loaders import _EXCEL_EXTS, list_sheet_names, clear_values_cache
 from .panels import FilePanel
 from .prefs import (load_key_prefs, save_key_prefs, load_last_key, save_last_key,
+                    load_last_excluded, save_last_excluded,
                     load_last_sheet, save_last_sheet)
 from .theme import APP_QSS, DIFF_COLORS, ui_font, ext_tab_icon
 from . import staging
@@ -651,6 +652,9 @@ class DiffView(QWidget):
             self.panel_a.table.set_key_row(0)
             self.panel_b.table.set_key_row(0)
             self.status.showMessage("키 행이 현재 시트 범위를 벗어나 1행으로 초기화했습니다.")
+        # 기억해 둔 제외 열 복원 — **키가 확정된 뒤**여야 한다(키 열은 제외 불가라
+        # 걸러내야 하고, 위의 범위 초과 리셋으로 키가 바뀔 수 있다).
+        self._apply_remembered_excluded(ncols)
         # 비교(compute_diff)와 O(R×C) 카운트는 DiffWorker(백그라운드)에서 — 대형 데이터에서
         # 로드 직후 UI 프리즈를 없앤다. 결과는 _on_diff_ready로 돌아온다.
         self._start_diff("load")
@@ -698,8 +702,11 @@ class DiffView(QWidget):
             else:
                 self.diff_only_btn.setChecked(True)
             warn = f"  | ⚠ {dropped}개 행이 키 중복/공백으로 비교에서 제외됨" if dropped else ""
+            # 기억해 둔 제외 열이 되살아나면 변경 셀 수가 줄어 보인다 — 왜 줄었는지
+            # 말해 주지 않으면 회색 열이 조용히 결과를 바꾼 꼴이 된다.
+            excl = self._excluded_cols_label()
             self.status.showMessage(
-                f"비교 완료 — {rows}행 × {cols}열 | 변경된 셀: {changed}개{warn}  "
+                f"비교 완료 — {rows}행 × {cols}열 | 변경된 셀: {changed}개{warn}{excl}  "
                 "| 셀 선택 후 우클릭 → 병합 준비 → 선택 병합 저장"
             )
             self._focus_grid()
@@ -747,6 +754,53 @@ class DiffView(QWidget):
                 p.table.set_key_row(row)
                 p.table.set_key_col(col)
             return True
+        return False
+
+    def _excluded_cols_label(self) -> str:
+        """상태 메시지에 붙일 " | 검사 제외 열: C, D" — 제외가 없으면 빈 문자열."""
+        if not self._excluded_cols:
+            return ""
+        letters = ", ".join(get_column_letter(c + 1)
+                            for c in sorted(self._excluded_cols))
+        return f"  | 검사 제외 열: {letters}"
+
+    def _remember_excluded(self):
+        """지금 검사 제외 열을 **파일별로** 기억한다(A/B 각각).
+
+        어떤 열을 안 볼지는 그 테이블의 성질이지 그때의 기분이 아니다 — 주석 열·현지화
+        열은 늘 같은 것을 뺀다. 그런데 제외는 비교할 때마다 초기화돼서, 파일을 열 때마다
+        헤더를 우클릭해 같은 열을 다시 골라야 했다. 키를 파일별로 기억하게 만든 것과
+        같은 이유다(_remember_key 참조).
+
+        **사용자 조작에서만 부른다.** 키 변경 재계산(_recompute_diff)의 자동 초기화까지
+        기록하면, 한 번 키를 건드린 것만으로 애써 잡아 둔 제외가 지워진다.
+        """
+        for panel in (self.panel_a, self.panel_b):
+            path = panel.get_path()
+            if path:
+                save_last_excluded(path, self._excluded_cols)
+
+    def _apply_remembered_excluded(self, ncols: int = 0) -> bool:
+        """이 파일에 기억된 제외 열을 적용한다. 하나라도 적용했으면 True.
+
+        A/B 중 먼저 기억이 있는 쪽을 따른다(_apply_remembered_key 와 같은 규칙 —
+        보통 같은 이름의 두 빌드라 둘의 기억은 대개 같다).
+
+        거르는 것 둘:
+          · 지금 시트 폭을 벗어난 열 — 좁은 시트로 옮기면 없는 열을 회색칠하게 된다.
+          · 키 열 — 키는 제외할 수 없다(excludable_cols 와 같은 규칙).
+        """
+        for panel in (self.panel_a, self.panel_b):
+            remembered = load_last_excluded(panel.get_path())
+            if remembered is None:          # [] 는 "전부 해제" 라는 선택이다
+                continue
+            cols = [c for c in remembered if c < ncols] if ncols else list(remembered)
+            cols = staging.excludable_cols(cols, self._key_col, set())
+            self._excluded_cols.clear()
+            self._excluded_cols.update(cols)
+            for p in (self.panel_a, self.panel_b):
+                p.table.set_excluded_cols(self._excluded_cols)
+            return bool(cols)
         return False
 
     def _on_key_col_changed(self, col: int):
@@ -1460,6 +1514,7 @@ class DiffView(QWidget):
         # set_excluded_cols가 모델에 열 단위 dataChanged + 헤더 갱신을 방출한다
         self.panel_a.table.set_excluded_cols(self._excluded_cols)
         self.panel_b.table.set_excluded_cols(self._excluded_cols)
+        self._remember_excluded()      # 사용자 조작 → 이 파일엔 이 제외를 기억
         self._silent_clear_selection()
         self._apply_diff_filter()
         # 제외/해제 시 스크롤을 좌상단으로 초기화(변경점 필터로 행 구성이 바뀌므로 위치 재설정).
