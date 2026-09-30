@@ -83,6 +83,72 @@ def count_dropped_key_rows(a_data: list, b_data: list, key_col: int,
     return _dropped(a_data or []) + _dropped(b_data or [])
 
 
+def match_columns(a_data: list, b_data: list, key_row: int = 0) -> list | None:
+    """헤더 이름으로 열을 맞춘 col_meta. 이름으로 맞출 수 없으면 None(= 위치 기준).
+
+    **왜 필요한가.** 행은 키로 맞추면서 열은 번호로만 비교했다. 그래서 누가 B 중간에
+    열 하나를 끼우면 그 오른쪽 전부가 '변경' 으로 뜨고, 그 상태로 병합하면 A 의 값이
+    B 의 엉뚱한 열에 들어간다(실측: ID/NAME/VALUE 에 GRADE 를 끼우자 9개 셀이 변경으로
+    잡히고, 병합 시 등급 열이 무기 이름으로 덮였다). 저장 검증도 통과한다 — 의도한
+    자리에 의도한 값을 썼으니까.
+
+    반환:
+      [(a_col, b_col), ...]  — 화면 열 순서대로. None 은 그 파일에 없는 열.
+      None                   — 이름으로 맞출 수 없어 호출부가 위치 기준을 써야 함.
+
+    표시 순서는 **A 가 뼈대**다. B 에만 있는 열은 B 에서의 제자리(다음 공통 열 바로 앞)에
+    끼운다 — 신규 행을 B 위치에 끼우는 규칙과 같다. 뒤에 공통 열이 없으면 맨 뒤로 간다.
+
+    이름으로 맞추지 않는 경우(그대로 위치 기준):
+      · 한쪽 파일이 비었거나 key_row 가 그 파일의 행 범위를 벗어난다.
+      · 헤더에 빈 칸이 있다 — 이름이 없으면 맞출 수가 없다(꼬리의 빈 칸은 떼고 본다).
+      · 한 파일 안에서 헤더 이름이 중복된다 — 어느 쪽에 붙일지 정할 수 없다.
+    이 판정은 **보수적**이다. 애매하면 지금 동작(위치 기준)을 유지한다.
+    """
+    kr = key_row if (key_row and key_row > 0) else 0
+    if not a_data or not b_data or kr >= len(a_data) or kr >= len(b_data):
+        return None
+
+    def names(row):
+        out = [str(v).strip() for v in (row or [])]
+        while out and out[-1] == "":     # 꼬리의 빈 칸은 열이 아니다
+            out.pop()
+        if not out or "" in out:         # 가운데 빈 헤더 → 맞출 수 없다
+            return None
+        if len(set(out)) != len(out):    # 같은 이름이 둘 → 어디에 붙일지 모른다
+            return None
+        return out
+
+    a_names = names(a_data[kr])
+    b_names = names(b_data[kr])
+    if a_names is None or b_names is None:
+        return None
+
+    a_index = {n: i for i, n in enumerate(a_names)}
+    b_index = {n: i for i, n in enumerate(b_names)}
+
+    # B 전용 열을 어느 공통 열 앞에 끼울지 — compute_diff 의 신규 행 규칙과 같은 모양.
+    inserts: dict[str, list[str]] = {}
+    pending: list[str] = []
+    for n in b_names:
+        if n in a_index:
+            if pending:
+                inserts.setdefault(n, []).extend(pending)
+                pending = []
+        else:
+            pending.append(n)
+    tail = pending
+
+    col_meta: list[tuple] = []
+    for i, n in enumerate(a_names):
+        for bn in inserts.get(n, ()):
+            col_meta.append((None, b_index[bn]))
+        col_meta.append((i, b_index.get(n)))
+    for bn in tail:
+        col_meta.append((None, b_index[bn]))
+    return col_meta
+
+
 def _cell_status(a_val: str, b_val: str) -> str:
     """added: 한쪽 파일에만 값이 있음 (A 전용/B 전용 모두) / modified: 양쪽 값이 다름."""
     if (a_val == "") != (b_val == ""):
@@ -119,11 +185,17 @@ def _compute_diff_row_order(
 
 
 def compute_diff(
-    a_data: list[list], b_data: list[list], key_col: int = 0, key_row: int = 0
+    a_data: list[list], b_data: list[list], key_col: int = 0, key_row: int = 0,
+    col_meta: list | None = None,
 ) -> tuple[list[list], list[tuple[int | None, int | None]]]:
     """
     key_col 열 값을 키로 행을 매칭하여 diff를 계산한다.
     key_col == -1 이면 행 순서 기반(ROW order) 비교를 수행한다(key_row 무시).
+
+    col_meta: match_columns() 가 만든 [(a_col, b_col), ...] — 화면 열 ↔ 파일 열.
+    None 이면 항등 매핑(화면 열 = 양쪽 파일의 같은 열 번호) = 예전 그대로의 동작이다.
+    key_col 은 **화면 열** 번호이며, 항등 매핑에서는 파일 열 번호와 같다.
+    키 열이 양쪽 파일에 다 있지 않으면 행을 맞출 수 없으므로 항등 매핑으로 물러선다.
 
     key_row: 헤더 행 인덱스(기본 0). 행 0..key_row(프리앰블 + 헤더)는 키 매칭 없이
     위치 기준 1:1로 상단에 그대로 방출하고, 행 key_row+1 이후만 key_col 값으로 매칭한다.
@@ -145,19 +217,31 @@ def compute_diff(
     kr = key_row if (key_row and key_row > 0) else 0
     n_head = kr + 1   # 프리앰블+헤더 행 수 (행 0..kr)
 
-    cols = max(
+    wide = max(
         (max(len(r) for r in a_data) if a_data else 0),
         (max(len(r) for r in b_data) if b_data else 0),
     )
+    if col_meta:
+        a_key = col_meta[key_col][0] if 0 <= key_col < len(col_meta) else None
+        b_key = col_meta[key_col][1] if 0 <= key_col < len(col_meta) else None
+        if a_key is None or b_key is None:
+            col_meta = None          # 키가 한쪽에만 있다 — 행을 맞출 수 없다
+    if not col_meta:
+        col_meta = [(c, c) for c in range(wide)]
+        a_key = b_key = key_col
+    cols = len(col_meta)
 
-    def get_key(row):
-        return row[key_col] if row and key_col < len(row) else ""
+    def get_a_key(row):
+        return row[a_key] if (row and a_key is not None and a_key < len(row)) else ""
+
+    def get_b_key(row):
+        return row[b_key] if (row and b_key is not None and b_key < len(row)) else ""
 
     def make_row(a_row, b_row):
         row = []
-        for c in range(cols):
-            av = a_row[c] if c < len(a_row) else ""
-            bv = b_row[c] if c < len(b_row) else ""
+        for ac, bc in col_meta:
+            av = a_row[ac] if (ac is not None and ac < len(a_row)) else ""
+            bv = b_row[bc] if (bc is not None and bc < len(b_row)) else ""
             row.append((_cell_status(av, bv), av, bv))
         return row
 
@@ -167,7 +251,7 @@ def compute_diff(
 
     a_map: dict[str, tuple[int, list]] = {}
     for i, row in enumerate(a_body):
-        key = get_key(row)
+        key = get_a_key(row)
         if key == "":
             continue   # 키가 없는 행(빈 행 등)은 키 비교 대상에서 제외
         if key not in a_map:   # 중복 키는 첫 번째 행 사용
@@ -175,7 +259,7 @@ def compute_diff(
 
     b_map: dict[str, tuple[int, list]] = {}
     for i, row in enumerate(b_body):
-        key = get_key(row)
+        key = get_b_key(row)
         if key == "":
             continue
         if key not in b_map:
@@ -193,7 +277,7 @@ def compute_diff(
     pending: list[str] = []
     seen_b: set[str] = set()
     for row in b_body:
-        k = get_key(row)
+        k = get_b_key(row)
         if k == "" or k in seen_b:
             continue
         seen_b.add(k)
@@ -208,7 +292,7 @@ def compute_diff(
     all_keys: list[str] = []
     seen: set[str] = set()
     for row in a_body:
-        k = get_key(row)
+        k = get_a_key(row)
         if k == "" or k in seen:
             continue
         seen.add(k)
