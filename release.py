@@ -151,11 +151,48 @@ def write(path, text):
         f.write(text)
 
 
+def _alive(pid: int) -> bool:
+    """그 PID 가 아직 살아 있나(Windows)."""
+    if os.name != "nt":
+        return False
+    r = subprocess.run(["tasklist", "/FI", f"PID eq {pid}", "/NH"],
+                       capture_output=True, text=True, errors="replace")
+    return str(pid) in (r.stdout or "")
+
+
+def _kill_tree(proc, extra_pids=()) -> None:
+    """부트로더와 **그 자식(실제 앱)** 까지 함께 종료한다.
+
+    PyInstaller onefile 은 부트로더가 자식 프로세스로 앱을 띄운다. 그래서
+    proc.terminate() 는 부모만 죽이고 앱 창은 그대로 남았다 — 배포할 때마다
+    'ExcelMerge v<N>' 창이 하나씩 살아남았다(실측: v206 배포 9분 뒤에도 생존).
+    자식이 고아가 되기 전에 taskkill /T 로 트리를 먼저 정리하고, 창에서 알아낸
+    실제 앱 PID(extra_pids)도 확인 사살한다.
+    """
+    if os.name == "nt" and proc.poll() is None:
+        subprocess.run(["taskkill", "/F", "/T", "/PID", str(proc.pid)],
+                       capture_output=True)
+    try:
+        proc.terminate()
+        proc.wait(timeout=10)
+    except Exception:
+        try:
+            proc.kill()
+        except Exception:
+            pass
+    for pid in extra_pids:
+        if pid and _alive(pid):
+            subprocess.run(["taskkill", "/F", "/T", "/PID", str(pid)],
+                           capture_output=True)
+
+
 def exe_smoke(version: str, timeout: int = 90) -> None:
     """빌드된 exe 를 띄워 '창이 뜨고 살아 있는지' 확인하고 닫는다(Windows 전용).
 
     파일이 만들어졌다는 것만으로는 부족하다 — 과거에 부트로더/DLL 문제로 '빌드는 됐는데
     실행이 안 되는' 사고가 있었다(RELEASE.md 참고).
+
+    끝나면 **띄운 것을 전부 거둔다** — _kill_tree 주석 참조.
     """
     exe = os.path.join(HERE, "dist", f"ExcelMerge_v{version}.exe")
     if not os.path.isfile(exe):
@@ -166,6 +203,7 @@ def exe_smoke(version: str, timeout: int = 90) -> None:
     import ctypes
     import time
     proc = subprocess.Popen([exe], cwd=HERE)
+    found_pid = 0          # finally 가 참조한다 — try 안에서 처음 만들면 안 된다
     try:
         user32 = ctypes.windll.user32
         want = f"ExcelMerge v{version}"
@@ -177,11 +215,14 @@ def exe_smoke(version: str, timeout: int = 90) -> None:
                 fail(f"exe 가 조기 종료했습니다(exit={proc.returncode}).")
 
             def cb(hwnd, _lp):
-                nonlocal found
+                nonlocal found, found_pid
                 buf = ctypes.create_unicode_buffer(256)
                 user32.GetWindowTextW(hwnd, buf, 256)
                 if buf.value.strip() == want and user32.IsWindowVisible(hwnd):
                     found = hwnd
+                    owner = ctypes.c_uint(0)
+                    user32.GetWindowThreadProcessId(hwnd, ctypes.byref(owner))
+                    found_pid = owner.value          # 창을 가진 = 진짜 앱 프로세스
                 return True
 
             proto = ctypes.WINFUNCTYPE(ctypes.c_bool, ctypes.c_void_p, ctypes.c_void_p)
@@ -190,11 +231,11 @@ def exe_smoke(version: str, timeout: int = 90) -> None:
             fail(f"'{want}' 창이 {timeout}초 안에 뜨지 않았습니다.")
         print(f"  창 확인: {want}")
     finally:
-        try:
-            proc.terminate()
-            proc.wait(timeout=10)
-        except Exception:
-            proc.kill()
+        _kill_tree(proc, (found_pid,))
+        leftover = [p for p in (proc.pid, found_pid) if p and _alive(p)]
+        if leftover:
+            # 릴리스를 막을 일은 아니다(빌드는 멀쩡하다) — 다만 조용히 넘기지 않는다.
+            print(f"  ⚠ 스모크 프로세스가 남았습니다: {leftover} — 수동으로 종료하세요.")
 
 
 # ── 본체 ─────────────────────────────────────────────────────────────────────

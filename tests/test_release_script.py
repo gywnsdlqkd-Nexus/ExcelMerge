@@ -9,6 +9,10 @@
   2. [미배포] 가 비어 있으면 시작하지 않는다 — 본문이 빈 릴리스가 나가는 것을 막는다.
 """
 import inspect
+import os
+import subprocess
+import sys
+import time
 
 import pytest
 
@@ -192,3 +196,62 @@ def test_release_does_not_die_on_a_cp949_console():
                        errors="replace")
     # 게이트에 걸려 exit 1 이 될 수는 있다(작업 트리가 더러우면). 인코딩으로 죽으면 안 된다.
     assert "UnicodeEncodeError" not in (r.stderr or ""), r.stderr
+
+
+# ── 스모크 뒷정리 ────────────────────────────────────────────────────────────
+# PyInstaller onefile 은 **부트로더가 자식 프로세스로 앱을 띄운다.** 그래서 스모크가
+# proc.terminate() 로 부모만 죽이면 앱 창은 그대로 살아남는다 — 실제로 v206 을 배포한
+# 9분 뒤에도 'ExcelMerge v206' 창이 떠 있었다. 배포할 때마다 창이 하나씩 쌓인다.
+
+@pytest.mark.skipif(os.name != "nt", reason="taskkill /T 는 Windows 전용")
+def test_kill_tree_also_kills_the_child_process():
+    """부모만 죽이면 자식이 남는다 — 트리째 정리해야 한다."""
+    child_code = "import time; time.sleep(120)"
+    parent_code = (
+        "import subprocess, sys, time;"
+        f"c = subprocess.Popen([sys.executable, '-c', {child_code!r}]);"
+        "print(c.pid, flush=True);"
+        "time.sleep(120)"
+    )
+    parent = subprocess.Popen([sys.executable, "-c", parent_code],
+                              stdout=subprocess.PIPE, text=True)
+    child_pid = 0
+    try:
+        child_pid = int(parent.stdout.readline().strip())
+        assert release._alive(child_pid), "전제: 자식이 살아 있어야 한다"
+        release._kill_tree(parent)
+        assert parent.poll() is not None, "부모가 안 죽었다"
+        for _ in range(20):                       # 종료는 즉시가 아닐 수 있다
+            if not release._alive(child_pid):
+                break
+            time.sleep(0.25)
+        assert not release._alive(child_pid), "부모만 죽고 자식이 살아남았다"
+    finally:
+        # 실패해도 아무것도 남기지 않는다 — 이 테스트가 확인하는 바로 그 누수를
+        # 테스트 자신이 내면 안 된다(되돌림 검사에서 실제로 자식이 하나 남았다).
+        if parent.poll() is None:
+            parent.kill()
+            parent.wait(timeout=10)
+        if child_pid and release._alive(child_pid):
+            subprocess.run(["taskkill", "/F", "/PID", str(child_pid)],
+                           capture_output=True)
+
+
+@pytest.mark.skipif(os.name != "nt", reason="tasklist 는 Windows 전용")
+def test_alive_reports_a_dead_pid_as_dead():
+    p = subprocess.Popen([sys.executable, "-c", "pass"])
+    p.wait()
+    for _ in range(20):
+        if not release._alive(p.pid):
+            break
+        time.sleep(0.25)
+    assert not release._alive(p.pid)
+
+
+def test_smoke_cleans_up_in_a_finally_block():
+    """어디서 실패하든 띄운 프로세스는 거둬야 한다 — 정리는 finally 안에 있어야 한다."""
+    src = inspect.getsource(release.exe_smoke)
+    i_fin = src.index("finally:")
+    assert src.index("_kill_tree(") > i_fin, "정리가 finally 밖에 있다"
+    # found_pid 는 finally 가 참조한다 — try 안에서 처음 만들면 NameError 가 난다.
+    assert src.index("found_pid = 0") < src.index("try:")
