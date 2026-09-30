@@ -14,7 +14,8 @@ import pytest
 
 from excelmerge.loaders import load_values_any, clear_values_cache, _cell_to_str
 from excelmerge.xlsx_writer import (
-    _is_file_locked, _is_numeric, _write_patches_to_file,
+    _is_file_locked, _is_numeric, _promote_empty_cols_to_delete,
+    _write_patches_to_file,
 )
 
 
@@ -231,3 +232,89 @@ def test_deleted_column_does_not_shift_verification(tmp_path):
     rows = _values(p)
     assert rows[1][0] == "k2" and rows[1][2] == "끝값"
     assert rows[1][1] == "", "지운 열 자리는 비어야 한다"
+
+
+# ── 한쪽에만 있는 행 지우기 — '결과가 빈 수식' 이 행 삭제를 막으면 안 된다 ────
+# 실사용 신고: Data_HelpPopUp_C.xlsx 에서 TID 245101~245103 을 A→B 로 지웠더니
+# 245102 자리에 **빈 행**이 남았다. 흐름은 이렇다.
+#   · A 에 없는 행이라 모든 셀이 '추가'로 잡히지만, 양쪽 다 빈 셀은 '같음'이라
+#     병합 준비에서 빠진다(staging.stageable_cells) → 그 셀엔 패치가 안 붙는다.
+#   · 그 셀이 마침 결과가 빈 수식(`<f>…</f><v/>`)이면, 수식 원문을 값으로 치는
+#     행-비었나 판정이 '아직 내용 있음'으로 읽어 행 삭제 승격을 막는다.
+#   · 결국 나머지 열만 빈값으로 덮여, 눈에는 아무것도 없는 행이 남는다.
+# 그래서 행 판정은 **보이는 값**(수식이면 계산 결과)으로 한다. 열 판정은 그대로다.
+
+def _formula_cell_xlsx(path, rows, formulas):
+    """formulas: {"C2": "IF(1=1,\"\",\"x\")"} — <f> 만 있고 캐시값이 없는 셀."""
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    for r in rows:
+        ws.append(r)
+    for ref, f in formulas.items():
+        ws[ref] = "=" + f
+    wb.save(str(path))
+    return str(path)
+
+
+def test_empty_formula_does_not_block_deleting_the_row(tmp_path):
+    p = _formula_cell_xlsx(tmp_path / "a.xlsx",
+                           [["k1", "v1", None], ["k2", "v2", None]],
+                           {"C2": 'IF(1=1,"","x")'})
+    # A 에 없는 행이라 A·B 열은 빈값으로 덮이고, C 열(빈 수식)은 패치가 없다.
+    patches = {"A2": "", "B2": ""}
+    new_patches, deletes, _cols = _promote_empty_cols_to_delete(patches, set(), p)
+    assert deletes == {2}, "결과가 빈 수식 때문에 행 삭제가 막혔다"
+    assert new_patches == {}, "삭제된 행의 패치가 남아 있다"
+
+
+def test_formula_with_a_cached_value_still_keeps_the_row(tmp_path):
+    """수식이 실제로 값을 내고 있으면 그 행은 비어 있지 않다 — 지우면 안 된다."""
+    p = _make_xlsx(tmp_path / "a.xlsx", [["k1", "v1", "x"], ["k2", "v2", "남을값"]])
+    new_patches, deletes, _cols = _promote_empty_cols_to_delete(
+        {"A2": "", "B2": ""}, set(), p)
+    assert deletes == set(), "내용이 남아 있는 행을 지웠다"
+    assert new_patches == {"A2": "", "B2": ""}
+
+
+def test_empty_formula_column_is_still_not_deleted(tmp_path):
+    """열 판정은 수식 원문을 본다 — 지금 결과가 비었다고 수식 열을 지우면 안 된다."""
+    p = _formula_cell_xlsx(tmp_path / "a.xlsx",
+                           [["k1", "v1", None], ["k2", "v2", None]],
+                           {"C1": 'IF(1=1,"","x")', "C2": 'IF(1=1,"","x")'})
+    _new, _del, cols = _promote_empty_cols_to_delete({"A2": ""}, set(), p)
+    assert "C" not in cols, "수식이 든 열을 통째로 지우려 했다"
+
+
+def test_cached_empty_value_element_counts_as_empty(tmp_path):
+    """실제 파일의 모양은 `<f>…</f><v/>` 였다 — <v> 가 있되 내용이 없는 경우."""
+    import zipfile
+    src = _formula_cell_xlsx(tmp_path / "src.xlsx",
+                             [["k1", "v1", None], ["k2", "v2", None]],
+                             {"C2": 'IF(1=1,"","x")'})
+    dst = str(tmp_path / "a.xlsx")
+    with zipfile.ZipFile(src) as zin, zipfile.ZipFile(dst, "w") as zout:
+        for item in zin.infolist():
+            data = zin.read(item.filename)
+            if item.filename == "xl/worksheets/sheet1.xml":
+                text = data.decode("utf-8")
+                text = text.replace("<v></v>", "<v/>")
+                assert "<v/>" in text, "테스트 준비 실패: <v/> 를 넣지 못했다"
+                data = text.encode("utf-8")
+            zout.writestr(item, data)
+    _new, deletes, _cols = _promote_empty_cols_to_delete({"A2": "", "B2": ""}, set(), dst)
+    assert deletes == {2}
+
+
+def test_the_whole_row_really_disappears_after_the_promotion(tmp_path):
+    """승격 → 실제 저장까지: 빈 행이 남지 않고 아래 행이 위로 당겨져야 한다."""
+    p = _formula_cell_xlsx(
+        tmp_path / "a.xlsx",
+        [["k1", "v1", None], ["k2", "v2", None], ["k3", "v3", None]],
+        {"C2": 'IF(1=1,"","x")'})
+    new_patches, deletes, cols = _promote_empty_cols_to_delete(
+        {"A2": "", "B2": ""}, set(), p)
+    _write_patches_to_file(p, new_patches, delete_row_nums=deletes,
+                           delete_col_letters=cols)
+    rows = _values(p)
+    assert [r[0] for r in rows] == ["k1", "k3"], f"빈 행이 남았다: {rows}"
+    assert all(any(str(c).strip() for c in r) for r in rows), f"빈 행이 남았다: {rows}"

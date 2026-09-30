@@ -36,6 +36,16 @@ def _promote_empty_cols_to_delete(
     """
     1단계: 패치 적용 후 모든 셀이 빈값인 행 → delete_row_nums로 승격 (patches에서 제거)
     2단계: 행 삭제 반영 후 모든 셀이 빈값인 열 → delete_col_letters 반환
+
+    ★ 1단계의 '빈값'은 **화면에 보이는 값**(수식이면 계산 결과)으로 판단한다.
+    한쪽에만 있는 행을 지울 때, 그 행의 어떤 셀이 양쪽 모두 빈값이면 변경이 아니라
+    '같음'이라 병합 준비에서 빠진다 → 패치가 안 붙는다. 그 셀이 마침 **결과가 빈
+    수식**(`<f>…</f><v/>`)이면 수식 원문을 값으로 쳤을 때 '이 행엔 아직 내용이 있다'로
+    읽혀 행 삭제 승격이 막히고, 나머지 열만 빈값으로 덮여 **빈 행**이 남았다.
+    (실제 사례: Data_HelpPopUp_C.xlsx 의 TID 245102 — L열 `#Desc` 가 결과가 빈 VLOOKUP.)
+
+    2단계(열 삭제)는 그대로 수식 원문을 값으로 본다 — 지금 결과가 비어 있다고 해서
+    수식이 든 열을 통째로 지우면 안 되기 때문이다.
     """
     if not path:
         return patches, delete_row_nums, set()
@@ -48,6 +58,7 @@ def _promote_empty_cols_to_delete(
         ns = _NS
         sheetdata = tree.find(f"{{{ns}}}sheetData")
         file_cells: dict[str, str] = {}
+        file_disp: dict[str, str] = {}
         file_row_refs: dict[int, set[str]] = defaultdict(set)
         if sheetdata is not None:
             for row_el in sheetdata:
@@ -59,16 +70,16 @@ def _promote_empty_cols_to_delete(
                     v_el  = c_el.find(f"{{{ns}}}v")
                     f_el  = c_el.find(f"{{{ns}}}f")
                     is_el = c_el.find(f"{{{ns}}}is")
-                    if f_el is not None and f_el.text:
-                        val = "=" + f_el.text
-                    elif v_el is not None and v_el.text:
-                        val = v_el.text
+                    if v_el is not None and v_el.text:
+                        disp = v_el.text
                     elif is_el is not None:
                         t_el = is_el.find(f"{{{ns}}}t")
-                        val  = t_el.text if (t_el is not None and t_el.text) else ""
+                        disp = t_el.text if (t_el is not None and t_el.text) else ""
                     else:
-                        val = ""
+                        disp = ""
+                    val = ("=" + f_el.text) if (f_el is not None and f_el.text) else disp
                     file_cells[ref] = val
+                    file_disp[ref] = disp
                     file_row_refs[rn].add(ref)
     except Exception:
         # 빈 열/행 감지 실패 → 승격 없이 진행(안전). 원인은 진단 로그로만 남긴다.
@@ -76,6 +87,9 @@ def _promote_empty_cols_to_delete(
         return patches, delete_row_nums, set()
 
     merged: dict[str, str] = {**file_cells, **patches}
+    # 행이 비었는지 볼 때만 쓰는 '보이는 값' 시야 — 수식은 **계산 결과**로 본다.
+    # (열 삭제 판정은 아래 merged 를 계속 쓴다 — 수식이 든 열은 지우지 않는다.)
+    merged_disp: dict[str, str] = {**file_disp, **patches}
 
     new_patches = dict(patches)
     new_deletes = set(delete_row_nums)
@@ -96,7 +110,7 @@ def _promote_empty_cols_to_delete(
         # 파일의 이 행에 패치 외 다른 값이 있는지 확인
         all_refs_in_row = file_row_refs.get(row_num, set())
         non_patched_refs = all_refs_in_row - patched_refs
-        if any(merged.get(ref, "") != "" for ref in non_patched_refs):
+        if any(merged_disp.get(ref, "") != "" for ref in non_patched_refs):
             continue
         # 행 전체가 빈값 → 행 삭제로 전환
         for ref in patched_refs:
