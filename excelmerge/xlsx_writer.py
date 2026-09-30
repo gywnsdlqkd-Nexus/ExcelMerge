@@ -152,30 +152,105 @@ def _is_file_locked(path: str) -> bool:
         return True
 
 
-def _verify_patches(tmp_path: str, patches: dict[str, str], sheet_name,
-                    delete_row_nums=None) -> None:
-    """갓 쓴 임시 파일을 되읽어 덮어쓴 셀이 의도한 값인지 확인. 다르면 예외.
+def _trim_grid(grid) -> list:
+    """뒤쪽 빈 칸·빈 행을 떼어 낸다 — 같은 내용이 다른 모양으로 읽히는 것을 막는다.
 
-    '쓰고 나서 확인'이 아니라 **'확인하고 나서 바꾼다'** — 원본을 교체하기 전에 본다.
-    읽기는 비교에 쓰는 로더 그대로라, 사용자가 다음에 열었을 때 보게 될 글자를 그대로
-    본다(예전 _is_numeric 버그처럼 XML 은 멀쩡한데 값이 달라 보이는 경우까지 잡힌다).
+    로더는 파일에 <c> 가 없는 꼬리를 돌려주지 않는다. 그래서 "마지막 열을 비웠다" 같은
+    저장은 기대 격자엔 빈 칸이 남고 실제 파일엔 없어서, 내용이 같은데도 다르다고 잡힌다.
+    비교 전에 양쪽을 같은 모양으로 맞춘다(중간의 빈 칸은 그대로 — 그건 진짜 내용이다).
+    """
+    out = [list(r) for r in (grid or [])]
+    for row in out:
+        while row and (row[-1] or "") == "":
+            row.pop()
+    while out and not out[-1]:
+        out.pop()
+    return out
+
+
+def _expected_after(before, patches, insert_rows=None,
+                    delete_row_nums=None, delete_col_letters=None) -> list:
+    """저장 뒤 시트가 어떤 모습이어야 하는지 — **되읽었을 때 보일 값**으로 계산한다.
+
+    _patch_sheet_xml 의 순서를 그대로 흉내 낸다: 덮어쓰기(저장 전 좌표) → 행 삭제
+    (아래가 위로 당겨짐) → 열 삭제 → 신규 행 꼬리 추가.
+
+    수식(= 로 시작)은 캐시값 없이 쓰이므로 되읽으면 빈 칸이다 — 기대값도 빈 칸.
+    """
+    grid = [list(r) for r in (before or [])]
+
+    for ref, val in (patches or {}).items():
+        m = _COL_RE.match(ref)
+        if not m:
+            continue
+        r = int(m.group(2)) - 1
+        c = column_index_from_string(m.group(1)) - 1
+        if r < 0 or c < 0:
+            continue
+        while len(grid) <= r:
+            grid.append([])
+        row = grid[r]
+        while len(row) <= c:
+            row.append("")
+        row[c] = "" if (val or "").startswith("=") else val
+
+    dead = {n - 1 for n in (delete_row_nums or ())}
+    grid = [row for i, row in enumerate(grid) if i not in dead]
+
+    for letter in (delete_col_letters or ()):
+        c = column_index_from_string(letter) - 1
+        for row in grid:
+            if 0 <= c < len(row):
+                row[c] = ""
+
+    for cells in (insert_rows or []):
+        width = max((t[0] for t in cells), default=-1) + 1
+        row = [""] * width
+        for t in cells:
+            c, val = t[0], t[1]
+            if 0 <= c < width:
+                row[c] = "" if (val or "").startswith("=") else val
+        grid.append(row)
+
+    return grid
+
+
+def _grid_mismatches(after, expected, limit: int = 5) -> list:
+    """기대 격자와 실제 격자를 전수 대조 — 어긋난 곳을 사람이 읽을 문장으로."""
+    a = _trim_grid(after)
+    e = _trim_grid(expected)
+    bad = []
+    if len(a) != len(e):
+        bad.append(f"행 수가 다릅니다 — 예상 {len(e):,}행 → 파일에는 {len(a):,}행")
+    for r in range(max(len(a), len(e))):
+        ar = a[r] if r < len(a) else []
+        er = e[r] if r < len(e) else []
+        for c in range(max(len(ar), len(er))):
+            av = ar[c] if c < len(ar) else ""
+            ev = er[c] if c < len(er) else ""
+            if av != ev:
+                bad.append(f"{_cell_ref(r, c)}: 예상 {ev!r} → 파일에는 {av!r}")
+                if len(bad) >= limit:
+                    return bad
+    return bad
+
+
+def _patch_mismatches(rows, patches: dict, delete_row_nums=None,
+                      limit: int = 5) -> list:
+    """덮어쓴 셀이 의도한 값으로 들어갔는지 — 좌표를 짚어 주는 정밀 검사.
 
     ★ 행을 지우는 저장에서는 **자리가 밀린다**. _renumber_after_delete 가 VBA .Delete
     처럼 삭제된 행 아래를 위로 당기므로, 패치 좌표(저장 전 기준)를 그대로 보면 한 칸
     아래 행의 값과 비교하게 된다 — 멀쩡한 저장이 '검증 실패'로 막혔다(실사용 신고).
     그래서 삭제된 행 수만큼 행 번호를 당겨서 본다. 지워진 행 자체의 패치는 건너뛴다.
 
-    검사 대상은 '덮어쓰기(patches)' 뿐이다. 수식(= 로 시작)은 캐시값이 없어 되읽으면
-    빈 칸이므로 건너뛴다. 신규 행은 파일 끝에 붙어 기존 좌표를 밀지 않는다.
-    열 삭제는 <c> 만 지우고 열 문자는 그대로라 좌표가 밀리지 않는다.
+    수식(= 로 시작)은 캐시값이 없어 되읽으면 빈 칸이므로 건너뛴다.
     """
-    targets = {ref: v for ref, v in patches.items()
+    targets = {ref: v for ref, v in (patches or {}).items()
                if not (v or "").startswith("=")}
     if not targets:
-        return
+        return []
     deleted = sorted(delete_row_nums or ())
-    from .loaders import load_values_any     # 순환 import 방지 — 저장 시점에만 필요
-    rows = load_values_any(tmp_path, sheet_name=sheet_name)
     bad = []
     for ref, expect in targets.items():
         m = _COL_RE.match(ref)
@@ -189,13 +264,59 @@ def _verify_patches(tmp_path: str, patches: dict[str, str], sheet_name,
         got = rows[r][c] if (0 <= r < len(rows) and 0 <= c < len(rows[r])) else ""
         if got != expect:
             bad.append(f"{ref}: 쓰려던 값 {expect!r} → 파일에는 {got!r}")
-        if len(bad) >= 5:
+        if len(bad) >= limit:
             break
+    return bad
+
+
+def _verify_saved(tmp_path: str, before, patches: dict, insert_rows=None,
+                  delete_row_nums=None, delete_col_letters=None,
+                  sheet_name=None) -> None:
+    """갓 쓴 임시 파일을 되읽어 **화면이 약속한 결과 전체**와 대조. 다르면 예외.
+
+    '쓰고 나서 확인'이 아니라 **'확인하고 나서 바꾼다'** — 원본을 교체하기 전에 본다.
+    읽기는 비교에 쓰는 로더 그대로라, 사용자가 다음에 열었을 때 보게 될 글자를 그대로
+    본다(예전 _is_numeric 버그처럼 XML 은 멀쩡한데 값이 달라 보이는 경우까지 잡힌다).
+
+    두 단계로 본다.
+      1. 덮어쓴 셀 — 좌표를 짚어 주는 정밀 검사(_patch_mismatches).
+      2. **시트 전체** — 기대 격자와 전수 대조(_grid_mismatches).
+
+    2 가 필요한 이유: 1 은 **자기가 쓴 셀만** 본다. 그래서 '지웠어야 할 행이 빈 행으로
+    살아남은' 경우(실사용 신고, v206)나 건드리지 않기로 한 셀이 바뀐 경우를 못 잡는다.
+    앞으로 열 매칭이 들어오면 '엉뚱한 열에 썼다'도 1 로는 잡히지 않는다 — 의도한 자리에
+    의도한 값을 썼으니 통과한다. 그 구멍을 2 가 막는다.
+
+    before 가 None 이면(원본을 못 읽었다) 2 는 건너뛴다 — 확인 수단이 없다고 멀쩡한
+    저장을 막지는 않는다. 1 은 그대로 돈다.
+    """
+    from .loaders import load_values_any     # 순환 import 방지 — 저장 시점에만 필요
+    after = load_values_any(tmp_path, sheet_name=sheet_name)
+    bad = _patch_mismatches(after, patches, delete_row_nums)
+    if not bad and before is not None:
+        bad = _grid_mismatches(
+            after,
+            _expected_after(before, patches, insert_rows,
+                            delete_row_nums, delete_col_letters))
     if bad:
         raise ValueError(
-            "저장 검증 실패 — 원본 파일을 그대로 두었습니다.\n"
-            + "\n".join(bad)
-            + (f"\n… 외 {len(targets) - len(bad)}개 확인" if len(targets) > len(bad) else ""))
+            "저장 검증 실패 — 원본 파일을 그대로 두었습니다." + \
+            chr(10) + chr(10).join(bad))
+
+
+def _before_values(path: str, sheet_name):
+    """저장 전 원본 값 격자 — 전수 대조의 기준. 못 읽으면 None(대조를 건너뛴다).
+
+    원본은 os.replace 전까지 그대로이므로 언제 읽어도 같다. 보통은 방금 비교하며 읽은
+    것이 값 캐시에 남아 있어 공짜에 가깝다(캐시 열쇠 = 경로·mtime·시트).
+    """
+    try:
+        from .loaders import load_values_any
+        return load_values_any(path, sheet_name=sheet_name)
+    except Exception:
+        log.warning("저장 전 원본을 읽지 못해 전수 대조를 건너뜁니다: %s",
+                    path, exc_info=True)
+        return None
 
 
 def _write_patches_to_file(
@@ -250,11 +371,13 @@ def _write_patches_to_file(
                         patch_styles,
                     )
                 zout.writestr(item, data)
-        # 바꾸기 **전에** 확인한다 — 임시 파일을 비교와 같은 로더로 되읽어, 덮어쓴 셀이
-        # 의도한 값으로 들어갔는지 대조한다. 백업(.bak)은 만들지 않으므로(사용자 요청)
-        # 잘못 쓴 파일로 원본을 덮으면 되돌릴 수단이 없다. 검증이 실패하면 임시 파일만
-        # 버리고 원본은 손대지 않는다.
-        _verify_patches(tmp, patches, sheet_name, delete_row_nums)
+        # 바꾸기 **전에** 확인한다 — 임시 파일을 비교와 같은 로더로 되읽어, 화면이
+        # 약속한 결과 전체와 대조한다. 백업(.bak)은 만들지 않으므로(사용자 요청) 잘못 쓴
+        # 파일로 원본을 덮으면 되돌릴 수단이 없다. 검증이 실패하면 임시 파일만 버리고
+        # 원본은 손대지 않는다.
+        _verify_saved(tmp, _before_values(path_base, sheet_name), patches,
+                      insert_rows, delete_row_nums, delete_col_letters,
+                      sheet_name)
         # 임시 파일을 원자적으로 교체(백업 .bak 은 만들지 않음 — 사용자 요청으로 제거).
         os.replace(tmp, path_base)
     except Exception:
