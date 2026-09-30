@@ -20,12 +20,13 @@ from PyQt5.QtCore import Qt, pyqtSignal, QThread
 from PyQt5.QtGui import QIcon, QKeySequence
 from openpyxl.utils import get_column_letter
 
-from .diff_engine import (count_changed_masked, keep_mask,
+from .diff_engine import (count_changed_masked, keep_mask, match_columns,
+                          usable_col_meta,
                           row_change_masks)
 from .loaders import _EXCEL_EXTS, list_sheet_names, clear_values_cache
 from .panels import FilePanel
 from .prefs import (load_key_prefs, save_key_prefs, load_last_key, save_last_key,
-                    load_last_excluded, save_last_excluded,
+                    load_last_key_name, load_last_excluded, save_last_excluded,
                     load_last_sheet, save_last_sheet)
 from .theme import APP_QSS, DIFF_COLORS, ui_font, ext_tab_icon
 from . import staging
@@ -97,6 +98,9 @@ class DiffView(QWidget):
         self._excluded_cols: set[int] = set()   # 변경 검사에서 제외할 (display) 열 인덱스
         # 화면 열 ↔ 파일 열 [(a_col, b_col)]. None/빈 값이면 위치 기준(화면 열 = 파일 열).
         self._diff_col_meta: list | None = None
+        # match_columns 의 원본 결과 — 키와 무관하다. 여기서 한 번만 계산해 화면·워커가
+        # **같은 것**을 쓰게 한다(따로 계산하면 서로 어긋날 수 있다).
+        self._raw_col_match: list | None = None
         self._sheet_names: list[str] = []       # 현재 시트 탭에 표시 중인 이름 목록(A∪B)
         self._current_sheet: str | None = None  # 현재 비교/미리보기 중인 시트 이름
 
@@ -656,8 +660,13 @@ class DiffView(QWidget):
             self.panel_a.table.set_key_row(0)
             self.panel_b.table.set_key_row(0)
             self.status.showMessage("키 행이 현재 시트 범위를 벗어나 1행으로 초기화했습니다.")
+        # 열 매칭은 **여기서 한 번만** 계산한다(키와 무관). 워커도 이 값을 받아 쓰므로
+        # 화면과 계산이 어긋날 여지가 없다.
+        self._raw_col_match = match_columns(a_data, b_data, self._key_row)
+        # 기억해 둔 키를 이름으로 되찾는다 — 번호 기억(_apply_remembered_key)보다 우선.
+        self._apply_remembered_key_name()
         # 기억해 둔 제외 열 복원 — **키가 확정된 뒤**여야 한다(키 열은 제외 불가라
-        # 걸러내야 하고, 위의 범위 초과 리셋으로 키가 바뀔 수 있다).
+        # 걸러내야 하고, 위의 범위 초과 리셋·이름 복원으로 키가 바뀔 수 있다).
         self._apply_remembered_excluded(ncols)
         # 비교(compute_diff)와 O(R×C) 카운트는 DiffWorker(백그라운드)에서 — 대형 데이터에서
         # 로드 직후 UI 프리즈를 없앤다. 결과는 _on_diff_ready로 돌아온다.
@@ -676,6 +685,7 @@ class DiffView(QWidget):
             # 키를 바꿔 재비교할 때도 다시 센다 — 안 그러면 키를 고쳤는데도 옛 경고가
             # 남는다. 비용은 O(행)으로 실측 8 ms(11,289행).
             token, mode, want_dropped=True,
+            col_meta=self._effective_col_meta(),
         )
         w.done.connect(self._on_diff_ready)
         w.error.connect(self._on_error)
@@ -735,10 +745,12 @@ class DiffView(QWidget):
         B열로 비교돼, B가 키가 아닌 파일에서 중복 키로 수천 행이 조용히 빠졌다.
         사용자가 직접 바꾼 경우에만 기록한다(범위 초과 자동 리셋은 기록하지 않는다).
         """
+        names = self._display_header_names(self._diff_col_meta)
+        name = names[self._key_col] if 0 <= self._key_col < len(names) else ""
         for panel in (self.panel_a, self.panel_b):
             path = panel.get_path()
             if path:
-                save_last_key(path, self._key_row, self._key_col)
+                save_last_key(path, self._key_row, self._key_col, name)
 
     def _apply_remembered_key(self) -> bool:
         """이 파일에 기억된 키가 있으면 적용한다. 적용했으면 True.
@@ -808,6 +820,55 @@ class DiffView(QWidget):
                             for c in sorted(self._excluded_cols))
         return f"  | 검사 제외 열: {letters}"
 
+    def _apply_remembered_key_name(self) -> bool:
+        """기억해 둔 **키 열 이름**이 지금 화면에 있으면 그 자리로 옮긴다.
+
+        번호만 기억하면 열 하나가 끼는 순간 옆 열을 키로 잡는다. 이름이 우선이고,
+        번호는 이름을 못 찾았을 때의 대비책이다(_apply_remembered_key 가 이미 적용해 둠).
+        한쪽에만 있는 열로는 옮기지 않는다 — 키가 될 수 없다.
+        """
+        names = self._display_header_names(self._raw_col_match)
+        if not names:
+            return False
+        for panel in (self.panel_a, self.panel_b):
+            want = load_last_key_name(panel.get_path())
+            if not want:
+                continue
+            for c, n in enumerate(names):
+                if n != want or c == self._key_col:
+                    continue
+                if self._raw_col_match and None in self._raw_col_match[c]:
+                    continue                 # 한쪽에만 있는 열 — 키가 될 수 없다
+                self._key_col = c
+                for p in (self.panel_a, self.panel_b):
+                    p.table.set_key_col(c)
+                return True
+            return False
+        return False
+
+    def _display_header_names(self, col_meta=None) -> list:
+        """화면 열 순서대로의 헤더 이름 — 그 열을 가진 쪽 파일에서 읽는다.
+
+        번호가 아니라 이름으로 기억하려면 '지금 이 화면의 각 열이 무슨 이름인지' 가
+        필요하다. 한쪽에만 있는 열은 그쪽 파일에서 읽는다.
+        """
+        kr = self._key_row if self._key_row and self._key_row > 0 else 0
+        a, b = self._raw_data["a"], self._raw_data["b"]
+        ah = a[kr] if kr < len(a) else []
+        bh = b[kr] if kr < len(b) else []
+
+        def txt(row, i):
+            return str(row[i]).strip() if (i is not None and i < len(row)) else ""
+
+        if not col_meta:
+            n = max(len(ah), len(bh))
+            return [txt(ah, c) or txt(bh, c) for c in range(n)]
+        return [txt(ah, ac) or txt(bh, bc) for ac, bc in col_meta]
+
+    def _effective_col_meta(self) -> list | None:
+        """지금 키로 실제로 쓰일 열 매핑 — 워커에 넘기는 것과 같은 값."""
+        return usable_col_meta(self._raw_col_match, self._key_col)
+
     def _remember_excluded(self):
         """지금 검사 제외 열을 **파일별로** 기억한다(A/B 각각).
 
@@ -819,10 +880,13 @@ class DiffView(QWidget):
         **사용자 조작에서만 부른다.** 키 변경 재계산(_recompute_diff)의 자동 초기화까지
         기록하면, 한 번 키를 건드린 것만으로 애써 잡아 둔 제외가 지워진다.
         """
+        names = self._display_header_names(self._diff_col_meta)
+        keep = [names[c] for c in sorted(self._excluded_cols)
+                if c < len(names) and names[c]]
         for panel in (self.panel_a, self.panel_b):
             path = panel.get_path()
             if path:
-                save_last_excluded(path, self._excluded_cols)
+                save_last_excluded(path, keep)
 
     def _apply_remembered_excluded(self, ncols: int = 0) -> bool:
         """이 파일에 기억된 제외 열을 적용한다. 하나라도 적용했으면 True.
@@ -830,15 +894,24 @@ class DiffView(QWidget):
         A/B 중 먼저 기억이 있는 쪽을 따른다(_apply_remembered_key 와 같은 규칙 —
         보통 같은 이름의 두 빌드라 둘의 기억은 대개 같다).
 
+        기억은 **헤더 이름**이다. 번호로 기억하면 열 하나가 끼는 순간 엉뚱한 열이
+        회색이 된다. 옛 설정(숫자 목록)도 그대로 읽어 번호로 해석한다.
+
         거르는 것 둘:
-          · 지금 시트 폭을 벗어난 열 — 좁은 시트로 옮기면 없는 열을 회색칠하게 된다.
+          · 지금 화면에 없는 열 — 이름을 못 찾거나 폭을 벗어나면 버린다.
           · 키 열 — 키는 제외할 수 없다(excludable_cols 와 같은 규칙).
         """
+        names = self._display_header_names(self._effective_col_meta())
+        width = len(names) if names else ncols
         for panel in (self.panel_a, self.panel_b):
             remembered = load_last_excluded(panel.get_path())
             if remembered is None:          # [] 는 "전부 해제" 라는 선택이다
                 continue
-            cols = [c for c in remembered if c < ncols] if ncols else list(remembered)
+            if all(isinstance(x, str) for x in remembered):
+                idx = {n: c for c, n in enumerate(names) if n}
+                cols = [idx[n] for n in remembered if n in idx]
+            else:                            # 옛 형식 — 화면 열 번호
+                cols = [c for c in remembered if not width or c < width]
             cols = staging.excludable_cols(cols, self._key_col, set())
             self._excluded_cols.clear()
             self._excluded_cols.update(cols)

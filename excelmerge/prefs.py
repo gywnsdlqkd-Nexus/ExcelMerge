@@ -79,15 +79,36 @@ def load_last_key(path: str):
     m = _read_prefs().get("last_keys")
     if isinstance(m, dict):
         v = m.get(os.path.abspath(path))
-        if (isinstance(v, list) and len(v) == 2
-                and all(isinstance(x, int) for x in v)
+        # [row, col] (옛) 또는 [row, col, 헤더이름] (지금) — 둘 다 읽는다.
+        if (isinstance(v, list) and len(v) in (2, 3)
+                and all(isinstance(x, int) for x in v[:2])
                 and v[0] >= 0 and v[1] >= -1):
             return (v[0], v[1])
     return None
 
 
-def save_last_key(path: str, key_row: int, key_col: int) -> None:
-    """파일별 키 위치를 기록(간단 LRU). 실패는 조용히 무시."""
+def load_last_key_name(path: str):
+    """그 파일에서 마지막으로 고른 **키 열의 헤더 이름**. 없으면 None.
+
+    번호만 기억하면 열 하나가 끼는 순간 옆 열을 키로 잡는다. 이름이 있으면 자리가
+    바뀌어도 따라간다 — 번호는 이름을 못 찾았을 때의 대비책으로만 쓴다.
+    """
+    if not path:
+        return None
+    m = _read_prefs().get("last_keys")
+    if isinstance(m, dict):
+        v = m.get(os.path.abspath(path))
+        if isinstance(v, list) and len(v) >= 3 and isinstance(v[2], str) and v[2]:
+            return v[2]
+    return None
+
+
+def save_last_key(path: str, key_row: int, key_col: int, key_name: str = "") -> None:
+    """파일별 키 위치를 기록(간단 LRU). 실패는 조용히 무시.
+
+    형식: [key_row, key_col] (옛) 또는 [key_row, key_col, 헤더이름] (지금).
+    옛 형식도 그대로 읽히므로 기존 설정이 깨지지 않는다.
+    """
     if not path:
         return
     c = _read_prefs()
@@ -96,7 +117,7 @@ def save_last_key(path: str, key_row: int, key_col: int) -> None:
         m = {}
     key = os.path.abspath(path)
     m.pop(key, None)                      # 재삽입으로 최근 항목을 뒤로
-    m[key] = [int(key_row), int(key_col)]
+    m[key] = [int(key_row), int(key_col), str(key_name or "")]
     if len(m) > _LAST_SHEETS_MAX:
         for k in list(m.keys())[: len(m) - _LAST_SHEETS_MAX]:
             del m[k]
@@ -120,20 +141,30 @@ def load_last_excluded(path: str):
     m = _read_prefs().get("last_excluded")
     if isinstance(m, dict):
         v = m.get(os.path.abspath(path))
-        if (isinstance(v, list)
-                and all(isinstance(x, int) and x >= 0 for x in v)):
-            return sorted(set(v))
+        if isinstance(v, list):
+            if all(isinstance(x, str) for x in v):
+                return list(v)                       # 지금 형식 — 헤더 이름
+            if all(isinstance(x, int) and x >= 0 for x in v):
+                return sorted(set(v))                # 옛 형식 — 화면 열 번호
     return None
 
 
 def save_last_excluded(path: str, cols) -> None:
-    """파일별 제외 열을 기록(간단 LRU). 실패는 조용히 무시."""
+    """파일별 제외 열을 **헤더 이름**으로 기록(간단 LRU). 실패는 조용히 무시.
+
+    번호로 기억하면 열이 하나 끼는 순간 엉뚱한 열이 회색이 된다. 이름이 없는 열(빈
+    헤더)은 기억하지 않는다 — 다음에 찾을 방법이 없어서다.
+    숫자 목록을 주면 옛 형식으로 저장한다(읽기 호환용 경로).
+    """
     if not path:
         return
-    try:
-        vals = sorted({int(c) for c in cols if int(c) >= 0})
-    except (TypeError, ValueError):
-        return
+    if all(isinstance(c, str) for c in cols):
+        vals = sorted({c for c in cols if c})
+    else:
+        try:
+            vals = sorted({int(c) for c in cols if int(c) >= 0})
+        except (TypeError, ValueError):
+            return
     c = _read_prefs()
     m = c.get("last_excluded")
     if not isinstance(m, dict):

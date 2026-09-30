@@ -9,7 +9,6 @@ from PyQt5.QtCore import QThread, pyqtSignal
 from .loaders import load_values_any, load_formula_flags_any
 from .diff_engine import (
     compute_diff, count_changed_masked, count_dropped_key_rows, keep_mask,
-    match_columns, usable_col_meta,
     row_change_masks,
 )
 from .folder_compare import compare_folders, refine_modified
@@ -129,7 +128,8 @@ class DiffWorker(QThread):
     error = pyqtSignal(str)
 
     def __init__(self, a_data, b_data, key_col, key_row, excluded_cols,
-                 token: int, mode: str, want_dropped: bool = True):
+                 token: int, mode: str, want_dropped: bool = True,
+                 col_meta=None):
         super().__init__()
         self.a_data = a_data
         self.b_data = b_data
@@ -139,15 +139,14 @@ class DiffWorker(QThread):
         self.token = token
         self.mode = mode
         self.want_dropped = want_dropped
+        # 화면 열 ↔ 파일 열. DiffView 가 계산해 넘긴다 — 여기서 따로 계산하면 화면이
+        # 쓰는 것과 어긋날 수 있다(usable_col_meta 판정이 키에 달려 있다).
+        self.col_meta = col_meta
 
     def run(self):
         try:
-            # 열을 헤더 이름으로 맞춘다. 맞출 수 없으면(빈 헤더·이름 중복·키 열이 한쪽에만)
-            # None 이 되어 예전처럼 위치 기준으로 비교한다.
-            # ★ 화면에 내보내는 col_meta 는 **실제로 쓰인 것**이어야 한다 — 여기서 걸러
-            #   두지 않으면 compute_diff 가 속으로 물러섰을 때 화면만 맞춘 좌표로 그린다.
-            col_meta = usable_col_meta(
-                match_columns(self.a_data, self.b_data, self.key_row), self.key_col)
+            # 열 매핑은 DiffView 가 이미 걸러서(usable_col_meta) 넘겨 준다.
+            col_meta = self.col_meta
             matrix, row_meta = compute_diff(
                 self.a_data, self.b_data, self.key_col, self.key_row, col_meta)
             # 행별 변경열 비트마스크 — 필터/미니맵/변경점 이동/변경 셀 수가 공유하는

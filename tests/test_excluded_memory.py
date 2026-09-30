@@ -1,6 +1,9 @@
 # -*- coding: utf-8 -*-
 """검사 제외 열을 파일별로 기억한다 — 열 때마다 같은 열을 다시 고르지 않도록.
 
+기억은 **헤더 이름**으로 남는다(열이 하나 끼면 번호는 다른 열을 가리키므로).
+옛 숫자 형식도 계속 읽힌다 — 아래 저장소 계층 테스트가 그 호환을 함께 본다.
+
 어떤 열을 안 볼지는 그 테이블의 성질이지 그때의 기분이 아니다. 주석 열(#Desc 등)이나
 현지화 열은 늘 같은 것을 뺀다. 그런데 제외는 비교할 때마다 초기화돼서, 파일을 열 때마다
 헤더를 우클릭해 같은 열을 다시 골라야 했다. 키 위치를 파일별로 기억하게 만든 것과
@@ -179,8 +182,8 @@ def test_a_key_change_does_not_erase_the_memory(make_view, qapp):
         w.wait(8000)
     for _ in range(20):
         qapp.processEvents()
-    assert load_last_excluded(view.panel_a.get_path()) == [2], \
-        "키 변경의 자동 초기화가 기억까지 덮어썼다"
+    assert load_last_excluded(view.panel_a.get_path()) == ["#주석"], (
+        "키 변경의 자동 초기화가 기억까지 덮어썼다")
 
 
 def test_restored_exclusion_is_shown_in_the_status(make_view, qapp):
