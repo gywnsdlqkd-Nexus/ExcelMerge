@@ -20,10 +20,9 @@ from PyQt5.QtCore import Qt, pyqtSignal, QThread
 from PyQt5.QtGui import QIcon, QKeySequence
 from openpyxl.utils import get_column_letter
 
-from .diff_engine import (count_changed_masked, dropped_key_rows, keep_mask,
-                          row_change_masks, unique_key_candidates)
+from .diff_engine import (count_changed_masked, keep_mask,
+                          row_change_masks)
 from .loaders import _EXCEL_EXTS, list_sheet_names, clear_values_cache
-from .dropped_rows_dialog import DroppedRowsDialog
 from .panels import FilePanel
 from .prefs import (load_key_prefs, save_key_prefs, load_last_key, save_last_key,
                     load_last_sheet, save_last_sheet)
@@ -50,7 +49,6 @@ class DiffView(QWidget):
         # MainWindow가 소유한 공유 상태바. _build_ui 이전에 세팅해야
         # 빌드 중 showMessage 호출이 안전하다.
         self.status = status_bar
-        self.status.warning_clicked.connect(self._on_status_warning_clicked)
         self._load_worker:          LoadWorker | None         = None
         self._preview_workers: dict[str, PreviewWorker | None] = {"a": None, "b": None}
         self._staged_merge_worker: StagedMergeWorker | None = None
@@ -85,7 +83,6 @@ class DiffView(QWidget):
         self._diff_only: bool = False
         # 찾기 결과 캐시 — (열쇠, 매트릭스 ref, 셀 목록). _find_cells 참고.
         self._find_cache = None
-        self._dropped_count = 0          # 마지막 비교에서 빠진 행 수(진단 창용)
         # 병합 준비/취소 되돌리기(Ctrl+Z).
         #   ("stage",   [cell, ...], direction)
         #   ("unstage", [(cell, direction), ...])
@@ -282,17 +279,6 @@ class DiffView(QWidget):
             # 첫 셀 선택 시 수식 플래그 지연 로드(파랑 폰트 표시용) 트리거.
             panel.table.selectionModel().selectionChanged.connect(
                 lambda *_: self._maybe_load_formula_flags())
-
-    def showEvent(self, e):
-        """탭이 앞으로 나오면 상태바 경고를 이 탭의 상태로 되돌린다.
-        상태바는 모든 탭이 공유해서, 놔두면 다른 탭의 경고가 남는다."""
-        super().showEvent(e)
-        self._show_dropped_warning(self._dropped_count)
-
-    def _on_status_warning_clicked(self):
-        """공유 상태바의 경고 클릭 — 지금 화면에 있는 탭만 반응한다."""
-        if self.isVisible():
-            self._open_dropped_dialog()
 
     def _apply_style(self):
         self.setStyleSheet(APP_QSS)
@@ -712,8 +698,6 @@ class DiffView(QWidget):
             else:
                 self.diff_only_btn.setChecked(True)
             warn = f"  | ⚠ {dropped}개 행이 키 중복/공백으로 비교에서 제외됨" if dropped else ""
-            self._dropped_count = dropped
-            self._show_dropped_warning(dropped)
             self.status.showMessage(
                 f"비교 완료 — {rows}행 × {cols}열 | 변경된 셀: {changed}개{warn}  "
                 "| 셀 선택 후 우클릭 → 병합 준비 → 선택 병합 저장"
@@ -724,42 +708,12 @@ class DiffView(QWidget):
                 anchor = f"{self._key_row + 1}행 {get_column_letter(self._key_col + 1)}열"
             else:
                 anchor = "ROW 순서(키 없음)"
-            self._dropped_count = dropped
-            self._show_dropped_warning(dropped)
-            warn = f"  |  ⚠ {dropped}행 제외됨" if dropped else ""
             self.status.showMessage(
-                f"키 헤더: {anchor}  |  {rows}행 × {cols}열  |  변경된 셀: {changed}개{warn}  "
+                f"키 헤더: {anchor}  |  {rows}행 × {cols}열  |  변경된 셀: {changed}개  "
                 "| 셀 선택 후 우클릭 → 병합 준비 → 선택 병합 저장"
             )
         # 첫 결과가 화면에 떴으니 미뤄둔 시트 탭 색칠을 이제 시작(임계 경로 밖).
         self._flush_sheet_diff()
-
-    # ── 비교에서 빠진 행 진단 ────────────────────────────────────────────────
-
-    def _show_dropped_warning(self, dropped: int):
-        """빠진 행이 있으면 상태바 우측에 누를 수 있는 경고를 띄운다."""
-        if dropped:
-            self.status.show_warning(
-                f"⚠ {dropped:,}행 제외됨 — 자세히",
-                "키 중복·빈 키로 비교에서 빠진 행이 있습니다. "
-                "눌러서 원인과 쓸 수 있는 키 열을 확인하세요.")
-        else:
-            self.status.clear_warning()
-
-    def _open_dropped_dialog(self):
-        """진단 창 — 원인 집계 · 상위 중복 키 · 키 후보 · 빠진 행 목록.
-
-        키 후보 탐색은 O(행×열)이라 비교할 때가 아니라 **이 창을 열 때만** 계산한다
-        (실측: 11,289행 × 29열에서 43 ms).
-        """
-        a, b = self._raw_data["a"], self._raw_data["b"]
-        if not (a or b) or self._key_col < 0:
-            return
-        info = dropped_key_rows(a, b, self._key_col, self._key_row)
-        cands = [(c, h) for c, h in unique_key_candidates(a, b, self._key_row)
-                 if c != self._key_col]
-        DroppedRowsDialog(self, self._key_col, info, cands,
-                          self._dropped_count, self._on_key_col_changed).exec_()
 
     # ── 키 열 변경 ────────────────────────────────────────────────────────────
 
