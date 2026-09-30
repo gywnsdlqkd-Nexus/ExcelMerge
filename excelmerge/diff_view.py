@@ -1245,6 +1245,38 @@ class DiffView(QWidget):
 
     # ── 선택 셀 스테이징 (우클릭) ─────────────────────────────────────────────
 
+    def _unmergeable_cells(self, cells, direction: str) -> set:
+        """병합할 수 없는 셀 — 한쪽 파일에만 있는 열. 판정은 **행마다** 다르다.
+
+        · 대상에 그 열이 없으면 쓸 자리가 없다(열 삽입 미지원).
+        · 소스에 그 열이 없으면 쓸 값이 "" 라 대상의 멀쩡한 열을 비우게 된다. 열 하나를
+          통째로 지우는 셈이라 손대지 않는다 — 헤더가 연초록이라 눈에 보인다.
+        · ★ 단, 그 **행이 대상에만 있으면** 이 병합은 곧 '행 삭제' 다. 그때는 한쪽 전용
+          열까지 비워야 행이 통째로 비고 삭제로 승격된다. 여기서 빼면 그 열만 값이 남아
+          반쪽짜리 빈 행이 생긴다(build_side_patches 에 같은 규칙이 있다).
+        """
+        cm = self._diff_col_meta
+        if not cm:
+            return set()
+        a2b = (direction == DIR_A2B)
+        meta = self._diff_row_meta or []
+        out = set()
+        for (r, c) in cells:
+            if not (0 <= c < len(cm)):
+                continue
+            a_col, b_col = cm[c]
+            tgt_col = b_col if a2b else a_col
+            src_col = a_col if a2b else b_col
+            if tgt_col is None:
+                out.add((r, c))
+                continue
+            if src_col is None:
+                a_row, b_row = meta[r] if r < len(meta) else (None, None)
+                src_row = a_row if a2b else b_row
+                if src_row is not None:      # 행이 양쪽에 있다 → 그 열은 손대지 않는다
+                    out.add((r, c))
+        return out
+
     def _stage_selected(self, direction: str):
         if not self._diff_matrix:
             return
@@ -1263,6 +1295,19 @@ class DiffView(QWidget):
         if not cells:
             QMessageBox.information(self, "알림", "선택한 셀 중 변경된 셀이 없습니다.")
             return
+
+        # 대상 파일에 없는 열(한쪽에만 있는 열)은 준비하지 않는다. 쓰려면 열을 새로
+        # 끼워야 하는데, 열 삽입은 그 오른쪽 모든 셀 참조·수식·서식을 밀어서 행 삽입과는
+        # 비교가 안 되게 위험하다. 조용히 빼면 '준비했는데 저장이 안 됐다' 가 되므로 센다.
+        skipped = self._unmergeable_cells(cells, direction)
+        if skipped:
+            cells -= skipped
+            if not cells:
+                QMessageBox.information(
+                    self, "알림",
+                    "고른 셀이 모두 반대쪽 파일에 없는 열입니다 — 열을 새로 만드는 "
+                    "병합은 지원하지 않습니다.")
+                return
 
         # undo 스택에 stage 동작 기록 (셀 목록과 방향을 한 번에 저장)
         self._undo_stack.append(("stage", list(cells), direction))
@@ -1287,8 +1332,12 @@ class DiffView(QWidget):
         self.panel_b.cell_edit.clear()
         self.panel_b.cell_edit.setEnabled(False)
         self._set_save_btn_state()
+        note = ""
+        if skipped:
+            note = f"  | 반대쪽에 없는 열 {len({c for _r, c in skipped})}개는 제외됨"
         self.status.showMessage(
-            f"병합 준비 완료 — {len(self._staged)}개 셀 대기 중  | '저장'을 클릭하면 파일에 저장됩니다."
+            f"병합 준비 완료 — {len(self._staged)}개 셀 대기 중{note}  "
+            "| '저장'을 클릭하면 파일에 저장됩니다."
         )
 
     # ── 선택 셀 언스테이징 (병합 준비 취소) ───────────────────────────────────────
@@ -1329,19 +1378,6 @@ class DiffView(QWidget):
 
     # ── 저장 ─────────────────────────────────────────────────────────────────
 
-    def _columns_are_shifted(self) -> bool:
-        """화면 열 번호가 파일 열 번호와 다른가 — 즉 헤더 이름으로 열을 맞춘 상태인가.
-
-        ★ 임시. 저장 경로는 아직 화면 열 번호를 그대로 파일 열로 쓴다. 맞춘 상태에서
-        그대로 저장하면 A 의 값이 B 의 엉뚱한 열에 들어간다 — 바로 이 기능이 막으려던
-        사고를 우리가 내는 꼴이다. 저장 경로가 col_meta 를 쓰게 되면(3단계) 이 함수와
-        _save_staged 의 차단은 함께 사라진다.
-        """
-        cm = self._diff_col_meta
-        if not cm:
-            return False
-        return any(t != (i, i) for i, t in enumerate(cm))
-
     def _save_staged(self, side: str):
         """side: 'a' 또는 'b' — 해당 파일만 저장. 병합 준비(staged)된 셀만 기록한다."""
         path = self.panels[side].get_path()
@@ -1357,17 +1393,6 @@ class DiffView(QWidget):
 
         # 직접 편집 기능이 제거되어 저장할 내용은 병합 준비 셀뿐 — diff 필수
         if not self._diff_matrix:
-            return
-
-        # ★ 임시 차단(3단계에서 제거) — _columns_are_shifted 주석 참조.
-        if self._columns_are_shifted():
-            QMessageBox.warning(
-                self, "저장 보류",
-                "두 파일의 열 구성이 달라 열을 이름으로 맞춰 비교하고 있습니다."
-                + chr(10) +
-                "이 상태의 저장은 아직 지원하지 않습니다 — 잘못된 열에 기록될 수 "
-                "있어 막았습니다." + chr(10) + chr(10) +
-                "엑셀에서 열 구성을 맞춘 뒤 다시 비교해 주세요.")
             return
 
         # 저장 대상 측이 실제로 쓸 내용이 있는지 확인
@@ -1410,6 +1435,7 @@ class DiffView(QWidget):
             staged_for_side,
             self._current_sheet,
             src_path, self._current_sheet,
+            self._diff_col_meta,
         )
         self._staged_merge_worker.done.connect(self._on_staged_saved)
         self._staged_merge_worker.error.connect(self._on_error)

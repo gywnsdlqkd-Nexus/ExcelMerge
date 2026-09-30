@@ -5,9 +5,10 @@
 화면까지 흘려보내고, 헤더가 **side 별 자기 열 문자**를 보여 주는 것을 고정한다. 세로
 헤더가 row_meta 로 side 별 원본 행 번호를 보여 주는 것과 같은 규칙이다.
 
-★ 저장은 아직 막혀 있다. 저장 경로는 여전히 화면 열 번호를 파일 열로 쓰기 때문에,
-   맞춘 상태로 저장하면 A 의 값이 B 의 엉뚱한 열에 들어간다 — 이 기능이 막으려던 사고를
-   우리가 내는 꼴이다. 3단계에서 저장이 col_meta 를 쓰게 되면 그 차단은 사라진다.
+3단계부터는 저장도 col_meta 로 좌표를 옮겨 쓴다. 다만 **대상 파일에 없는 열**은 병합할
+수 없다 — 쓰려면 열을 새로 끼워야 하는데, 열 삽입은 그 오른쪽 모든 셀 참조·수식·서식을
+밀어서 행 삽입과는 비교가 안 되게 위험하다. 그래서 준비 단계에서 걸러내고, 몇 개를
+뺐는지 말해 준다(조용히 빼면 '준비했는데 저장이 안 됐다' 가 된다).
 """
 import pytest
 from PyQt5.QtCore import Qt
@@ -73,7 +74,7 @@ def test_the_matrix_width_follows_col_meta(make_view):
 def test_matching_is_off_when_headers_are_identical(make_view):
     """맞추나 마나 같은 경우에는 화면에 아무 표시도 뜨면 안 된다."""
     v = make_view(SAME_A, SAME_B)
-    assert not v._columns_are_shifted()
+    assert v._diff_col_meta == [(0, 0), (1, 1)]
     assert "이름으로 맞춤" not in v.status.currentMessage()
 
 
@@ -151,31 +152,135 @@ def test_a_only_columns_are_counted_too(make_view):
     assert "A 전용 1열" in msg, msg
 
 
-# ── 저장 차단 (3단계에서 사라진다) ──────────────────────────────────────────
+# ── 준비: 반대쪽에 없는 열은 뺀다 ───────────────────────────────────────────
+# 쓰려면 열을 새로 끼워야 하는데, 열 삽입은 그 오른쪽 모든 셀 참조·수식·서식을 밀어서
+# 행 삽입과는 비교가 안 되게 위험하다. 그래서 준비 단계에서 걸러낸다.
 
-def test_saving_is_blocked_while_columns_are_shifted(make_view, monkeypatch):
-    """저장 경로가 아직 화면 열 번호를 파일 열로 쓴다 — 그대로 쓰면 엉뚱한 열에 들어간다."""
+def test_one_sided_columns_are_skipped_in_both_directions(make_view):
+    """행이 양쪽에 있으면 한쪽 전용 열(GRADE)은 어느 방향으로도 건드리지 않는다.
+
+    B→A 는 쓸 자리가 없고(A 에 그 열이 없다), A→B 는 쓸 값이 "" 라 B 의 멀쩡한 열을
+    비우게 된다 — 열 하나를 통째로 지우는 셈이라 둘 다 손대지 않는다.
+    """
+    from excelmerge.constants import DIR_A2B, DIR_B2A
+    v = make_view()
+    cells = {(1, c) for c in range(4)}
+    assert v._unmergeable_cells(cells, DIR_A2B) == {(1, 1)}
+    assert v._unmergeable_cells(cells, DIR_B2A) == {(1, 1)}
+
+
+def test_a_row_only_in_the_target_clears_the_one_sided_column_too(make_view):
+    """행 삭제 병합은 예외 — 한쪽 전용 열까지 비워야 행이 통째로 사라진다.
+
+    여기서 빼면 그 열만 값이 남아 반쪽짜리 빈 행이 생긴다(v206 과 같은 종류).
+    """
+    from excelmerge.constants import DIR_A2B
+    a = [["ID", "NAME"], ["k1", "칼"]]
+    b = [["ID", "GRADE", "NAME"], ["k1", "A", "칼"], ["k9", "S", "창"]]
+    v = make_view(a, b)
+    r = next(i for i, (ar, _br) in enumerate(v._diff_row_meta) if ar is None)
+    cells = {(r, c) for c in range(3)}
+    assert v._unmergeable_cells(cells, DIR_A2B) == set(), (
+        "행을 지우는 병합인데 한쪽 전용 열을 뺐다")
+
+
+# 행 1 에 '쓸 수 있는 변경'(NAME)과 '쓸 수 없는 변경'(B 전용 GRADE)이 함께 있다.
+MIX_A = [["ID", "NAME"], ["k1", "칼"]]
+MIX_B = [["ID", "GRADE", "NAME"], ["k1", "A", "검"]]
+
+
+def test_staging_keeps_the_writable_cells_and_drops_the_rest(make_view, qapp):
+    from excelmerge.constants import DIR_B2A
+    v = make_view(MIX_A, MIX_B)
+    assert v._diff_col_meta == [(0, 0), (None, 1), (1, 2)]
+    v.panel_b.table.selectRow(1)
+    for _ in range(10):
+        qapp.processEvents()
+    v._stage_selected(DIR_B2A)
+    for _ in range(10):
+        qapp.processEvents()
+    assert set(v._staged) == {(1, 2)}, f"준비 대상이 틀렸다: {v._staged}"
+    assert "제외됨" in v.status.currentMessage(), v.status.currentMessage()
+
+
+def test_staging_says_nothing_when_nothing_is_skipped(make_view, qapp):
+    """뺄 게 없으면 군더더기 문구를 붙이지 않는다."""
+    from excelmerge.constants import DIR_A2B
+    v = make_view(SAME_A, SAME_B)          # 열 구성이 같아 뺄 열이 없다
+    v.panel_b.table.selectRow(2)
+    for _ in range(10):
+        qapp.processEvents()
+    v._stage_selected(DIR_A2B)
+    for _ in range(10):
+        qapp.processEvents()
+    assert v._staged, "전제: 준비된 셀이 있어야 한다"
+    assert "제외됨" not in v.status.currentMessage()
+
+
+def test_staging_only_unwritable_cells_stages_nothing(make_view, qapp, monkeypatch):
+    """고른 게 전부 반대쪽에 없는 열이면 아무것도 준비되지 않고 이유를 알려 준다."""
+    from excelmerge import diff_view as dv_mod
+    from excelmerge.constants import DIR_B2A
+    told = []
+    monkeypatch.setattr(dv_mod.QMessageBox, "information",
+                        staticmethod(lambda *a, **k: told.append(a[2] if len(a) > 2 else "")))
+    v = make_view()
+    v.panel_b.table.selectRow(1)
+    for _ in range(10):
+        qapp.processEvents()
+    v._stage_selected(DIR_B2A)
+    assert v._staged == {}, v._staged
+    assert told and "열을 새로 만드는" in told[-1], told
+
+
+class _FakeSignal:
+    def connect(self, *a, **k):
+        pass
+
+
+class _FakeWorker:
+    """StagedMergeWorker 대역 — 파일을 쓰지 않고 받은 인자만 기록한다.
+
+    QThread 흉내를 blockSignals/isRunning 까지 내야 한다. 탭을 닫을 때
+    DiffView.shutdown() 이 실행 중 워커를 정리하면서 이 객체를 건드리는데, 거기서
+    예외가 나면 closeEvent 안에서 터져 프로세스가 통째로 죽는다(실제로 겪었다:
+    0xC0000409 fail-fast, 테스트는 전부 통과한 뒤 요약 직전에 사망).
+    """
+    last = None
+
+    def __init__(self, *args, **kw):
+        _FakeWorker.last = self
+        self.args = args
+        self.done = _FakeSignal()
+        self.error = _FakeSignal()
+        self.finished = _FakeSignal()
+
+    def start(self):
+        self.started = True
+
+    def blockSignals(self, _b):
+        pass
+
+    def isRunning(self):
+        return False
+
+    def deleteLater(self):
+        pass
+
+
+def test_saving_is_no_longer_blocked_when_columns_are_matched(make_view, monkeypatch):
+    """3단계부터 저장은 col_meta 로 좌표를 옮겨 쓴다 — 더 이상 막지 않는다."""
     from excelmerge import diff_view as dv_mod
     from excelmerge.constants import DIR_A2B
     v = make_view()
     warned = []
     monkeypatch.setattr(dv_mod.QMessageBox, "warning",
-                        staticmethod(lambda *a, **k: warned.append(a[2] if len(a) > 2 else "")))
-    started = []
-    monkeypatch.setattr(dv_mod, "StagedMergeWorker",
-                        lambda *a, **k: started.append(1))
+                        staticmethod(lambda *a, **k: warned.append(a)))
+    monkeypatch.setattr(dv_mod, "StagedMergeWorker", _FakeWorker)
+    monkeypatch.setattr(dv_mod, "_is_file_locked", lambda p: False)
     v._staged[(1, 2)] = DIR_A2B
     v._save_staged("b")
-    assert started == [], "열이 어긋난 채로 저장이 시작됐다"
-    assert warned and "열 구성" in warned[0], warned
-
-
-def test_saving_is_not_blocked_when_columns_line_up(make_view, monkeypatch):
-    """맞출 필요가 없던 비교까지 막으면 안 된다."""
-    from excelmerge import diff_view as dv_mod
-    v = make_view(SAME_A, SAME_B)
-    blocked = []
-    monkeypatch.setattr(dv_mod.QMessageBox, "warning",
-                        staticmethod(lambda *a, **k: blocked.append(1)))
-    v._save_staged("b")          # staged 가 없어 조용히 반환 — 차단 경고는 없어야 한다
-    assert blocked == []
+    assert warned == [], f"저장이 막혔다: {warned}"
+    assert _FakeWorker.last is not None, "저장 워커가 시작되지 않았다"
+    assert _FakeWorker.last.args[-1] == v._diff_col_meta, (
+        "워커에 col_meta 가 전달되지 않았다")

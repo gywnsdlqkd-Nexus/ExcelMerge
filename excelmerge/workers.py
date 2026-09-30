@@ -325,7 +325,8 @@ class StagedMergeWorker(QThread):
     error = pyqtSignal(str)
 
     def __init__(self, path_a, path_b, diff_matrix, row_meta, staged: dict,
-                 sheet_name=None, src_path=None, src_sheet_name=None):
+                 sheet_name=None, src_path=None, src_sheet_name=None,
+                 col_meta=None):
         # staged:   {(display_r, c): 'a_to_b'|'b_to_a'}
         # row_meta: [(orig_a_row, orig_b_row), ...]
         super().__init__()
@@ -333,6 +334,7 @@ class StagedMergeWorker(QThread):
         self.path_b = path_b
         self.diff_matrix = diff_matrix
         self.row_meta = row_meta
+        self.col_meta = col_meta   # 화면 열 ↔ 파일 열. None 이면 화면 열 = 파일 열
         self.staged = staged
         self.sheet_name = sheet_name   # 저장 대상 시트 (None이면 activeTab 폴백)
         # 서식 병합용 — 저장 대상의 반대편(소스) 파일 경로/시트.
@@ -346,7 +348,8 @@ class StagedMergeWorker(QThread):
             # a2b는 B 파일에, b2a는 A 파일에 쓴다. 방향별 패치 구성은 순수 모듈에 위임.
             for direction, path in ((DIR_A2B, self.path_b), (DIR_B2A, self.path_a)):
                 patches, insert_rows, style_src = build_side_patches(
-                    direction, self.diff_matrix, self.row_meta, self.staged)
+                    direction, self.diff_matrix, self.row_meta, self.staged,
+                    self.col_meta)
                 delete_rows: set[int] = set()   # 1-based 행 번호(빈행 승격 결과)
                 if (patches or insert_rows) and path:
                     patches, delete_rows, del_cols = _promote_empty_cols_to_delete(
