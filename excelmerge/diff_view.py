@@ -718,10 +718,7 @@ class DiffView(QWidget):
             )
             self._focus_grid()
         else:
-            if self._key_col >= 0:
-                anchor = f"{self._key_row + 1}행 {get_column_letter(self._key_col + 1)}열"
-            else:
-                anchor = "ROW 순서(키 없음)"
+            anchor = self._key_anchor_label()
             self.status.showMessage(
                 f"키 헤더: {anchor}  |  {rows}행 × {cols}열  |  변경된 셀: {changed}개  "
                 "| 셀 선택 후 우클릭 → 병합 준비 → 선택 병합 저장"
@@ -762,6 +759,25 @@ class DiffView(QWidget):
                 p.table.set_key_col(col)
             return True
         return False
+
+    def _key_anchor_label(self) -> str:
+        """상태바에 쓸 키 위치 — 열을 맞춘 비교에서는 두 파일의 키 열 번호가 다르다.
+
+        화면 열 번호 하나만 찍으면 둘 중 한쪽에는 거짓말이 된다. 다르면 둘 다 보여 준다.
+        """
+        if self._key_col < 0:
+            return "ROW 순서(키 없음)"
+        row = f"{self._key_row + 1}행"
+        cm = self._diff_col_meta
+        if cm and 0 <= self._key_col < len(cm):
+            a_col, b_col = cm[self._key_col]
+            if a_col != b_col:
+                a_txt = get_column_letter(a_col + 1) if a_col is not None else "-"
+                b_txt = get_column_letter(b_col + 1) if b_col is not None else "-"
+                return f"{row} A:{a_txt}열 / B:{b_txt}열"
+            if a_col is not None:
+                return f"{row} {get_column_letter(a_col + 1)}열"
+        return f"{row} {get_column_letter(self._key_col + 1)}열"
 
     def _matched_cols_label(self) -> str:
         """열을 이름으로 맞췄을 때만 붙는 안내 — 화면 열 번호가 파일과 다르다는 뜻이다.
@@ -833,6 +849,16 @@ class DiffView(QWidget):
 
     def _on_key_col_changed(self, col: int):
         if col == self._key_col:
+            return
+        # 한쪽에만 있는 열은 키가 될 수 없다. 키로 잡으면 반대편에서 키를 읽을 자리가
+        # 없어 그 파일의 모든 행이 탈락하므로, 비교 전체가 조용히 위치 기준으로 되돌아
+        # 간다(usable_col_meta). 화면이 통째로 달라지는데 이유를 알 수 없게 된다.
+        cm = self._diff_col_meta
+        if cm and 0 <= col < len(cm) and None in cm[col]:
+            QMessageBox.information(
+                self, "키로 쓸 수 없는 열",
+                "이 열은 한쪽 파일에만 있어 키로 쓸 수 없습니다." + chr(10) +
+                "양쪽 파일에 모두 있는 열을 골라 주세요.")
             return
         self._key_col = col
         self.panel_a.table.set_key_col(col)

@@ -59,28 +59,38 @@ def count_changed_masked(masks: list, keep: int) -> int:
 
 
 def count_dropped_key_rows(a_data: list, b_data: list, key_col: int,
-                           key_row: int = 0) -> int:
+                           key_row: int = 0, col_meta: list | None = None) -> int:
     """키 열 기반 비교에서 매칭 대상에서 제외되는 본문 행 수(공백 키 + 중복 키).
     compute_diff는 공백 키 행을 건너뛰고 중복 키는 첫 행만 쓰므로, 사용자가 '행이 줄었다'를
     인지할 수 있도록 그 수를 센다. ROW 순서(key_col == -1)면 드롭 없음(0).
-    key_row: 헤더 행 인덱스 — 행 0..key_row(프리앰블+헤더)는 본문에서 제외한다."""
+    key_row: 헤더 행 인덱스 — 행 0..key_row(프리앰블+헤더)는 본문에서 제외한다.
+
+    ★ key_col 은 **화면 열**이다. 열을 이름으로 맞춘 비교에서는 두 파일의 키 열 번호가
+    다를 수 있으므로 col_meta 로 side 별 파일 열을 풀어 쓴다. 이 변환을 빼먹으면 엉뚱한
+    열의 중복을 세서, 실제로는 멀쩡한 비교에 '수천 행 제외됨' 이 뜬다(그 반대도 된다).
+    col_meta 가 없으면 화면 열 = 양쪽 파일의 같은 열(예전 그대로)."""
     if key_col is None or key_col < 0:
         return 0
 
+    cm = usable_col_meta(col_meta, key_col)
+    a_key, b_key = cm[key_col] if cm else (key_col, key_col)
+
     start = (key_row if key_row and key_row > 0 else 0) + 1  # 본문 시작 = 헤더 다음 행
 
-    def _dropped(rows: list) -> int:
+    def _dropped(rows: list, kc) -> int:
+        if kc is None:
+            return 0
         seen: set = set()
         dropped = 0
         for row in rows[start:]:   # 프리앰블+헤더 제외
-            key = row[key_col] if row and key_col < len(row) else ""
+            key = row[kc] if row and kc < len(row) else ""
             if key == "" or key in seen:
                 dropped += 1
             else:
                 seen.add(key)
         return dropped
 
-    return _dropped(a_data or []) + _dropped(b_data or [])
+    return _dropped(a_data or [], a_key) + _dropped(b_data or [], b_key)
 
 
 def match_columns(a_data: list, b_data: list, key_row: int = 0) -> list | None:

@@ -157,7 +157,7 @@ class DiffWorker(QThread):
             changed = count_changed_masked(
                 row_masks, keep_mask(cols, self.excluded_cols))
             dropped = (count_dropped_key_rows(
-                self.a_data, self.b_data, self.key_col, self.key_row)
+                self.a_data, self.b_data, self.key_col, self.key_row, col_meta)
                 if self.want_dropped else 0)
             self.done.emit(self.token, matrix, row_meta, col_meta, row_masks,
                            changed, dropped, self.mode)
