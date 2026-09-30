@@ -95,6 +95,8 @@ class DiffView(QWidget):
         # 키 헤더 앵커 = (키 행, 키 열). 전역 저장값을 기본으로 로드(없으면 A1 = 0,0).
         self._key_row, self._key_col = load_key_prefs()
         self._excluded_cols: set[int] = set()   # 변경 검사에서 제외할 (display) 열 인덱스
+        # 화면 열 ↔ 파일 열 [(a_col, b_col)]. None/빈 값이면 위치 기준(화면 열 = 파일 열).
+        self._diff_col_meta: list | None = None
         self._sheet_names: list[str] = []       # 현재 시트 탭에 표시 중인 이름 목록(A∪B)
         self._current_sheet: str | None = None  # 현재 비교/미리보기 중인 시트 이름
 
@@ -346,6 +348,7 @@ class DiffView(QWidget):
         self._diff_matrix = []
         self._row_masks = []
         self._diff_row_meta = []
+        self._diff_col_meta = None
         self._merged_cells.clear()   # 제자리 비우기 — 선언부 주석 참조
         self._staged.clear()         # 〃
         self._undo_stack.clear()     # 매트릭스가 사라지면 좌표가 무의미
@@ -611,6 +614,7 @@ class DiffView(QWidget):
         self._diff_matrix = []
         self._row_masks = []
         self._diff_row_meta = []   # 미리보기 잠금 해제
+        self._diff_col_meta = None
         self._excluded_cols.clear()
         self.panel_a.table.set_excluded_cols(self._excluded_cols)
         self.panel_b.table.set_excluded_cols(self._excluded_cols)
@@ -679,8 +683,8 @@ class DiffView(QWidget):
         self._diff_worker = w
         w.start()
 
-    def _on_diff_ready(self, token, matrix, row_meta, row_masks, changed, dropped,
-                       mode):
+    def _on_diff_ready(self, token, matrix, row_meta, col_meta, row_masks,
+                       changed, dropped, mode):
         # 낡은 결과(빠른 연속 키 변경/새 비교로 토큰이 밀림) 폐기.
         if token != self._diff_token:
             return
@@ -688,6 +692,7 @@ class DiffView(QWidget):
         self._diff_matrix = matrix
         self._row_masks = row_masks   # 매트릭스와 같은 시점의 파생 상태 — 항상 함께 갱신
         self._diff_row_meta = row_meta
+        self._diff_col_meta = col_meta
         self.panel_a._row_meta = row_meta
         self.panel_b._row_meta = row_meta
         self._refresh_tables()   # populate + 수식플래그 + _apply_diff_filter
@@ -705,8 +710,10 @@ class DiffView(QWidget):
             # 기억해 둔 제외 열이 되살아나면 변경 셀 수가 줄어 보인다 — 왜 줄었는지
             # 말해 주지 않으면 회색 열이 조용히 결과를 바꾼 꼴이 된다.
             excl = self._excluded_cols_label()
+            matched = self._matched_cols_label()
             self.status.showMessage(
-                f"비교 완료 — {rows}행 × {cols}열 | 변경된 셀: {changed}개{warn}{excl}  "
+                f"비교 완료 — {rows}행 × {cols}열 | 변경된 셀: {changed}개"
+                f"{warn}{matched}{excl}  "
                 "| 셀 선택 후 우클릭 → 병합 준비 → 선택 병합 저장"
             )
             self._focus_grid()
@@ -755,6 +762,27 @@ class DiffView(QWidget):
                 p.table.set_key_col(col)
             return True
         return False
+
+    def _matched_cols_label(self) -> str:
+        """열을 이름으로 맞췄을 때만 붙는 안내 — 화면 열 번호가 파일과 다르다는 뜻이다.
+
+        말해 주지 않으면 헤더의 열 문자가 왜 A, C, D 처럼 건너뛰는지, 왜 연초록 열이
+        생겼는지 알 수 없다.
+        """
+        cm = self._diff_col_meta
+        if not cm or not any(t != (i, i) for i, t in enumerate(cm)):
+            return ""
+        only_a = sum(1 for a, b in cm if b is None)
+        only_b = sum(1 for a, b in cm if a is None)
+        tail = ""
+        if only_a or only_b:
+            parts = []
+            if only_a:
+                parts.append(f"A 전용 {only_a}열")
+            if only_b:
+                parts.append(f"B 전용 {only_b}열")
+            tail = " (" + ", ".join(parts) + ")"
+        return f"  | 열을 이름으로 맞춤{tail}"
 
     def _excluded_cols_label(self) -> str:
         """상태 메시지에 붙일 " | 검사 제외 열: C, D" — 제외가 없으면 빈 문자열."""
@@ -1301,6 +1329,19 @@ class DiffView(QWidget):
 
     # ── 저장 ─────────────────────────────────────────────────────────────────
 
+    def _columns_are_shifted(self) -> bool:
+        """화면 열 번호가 파일 열 번호와 다른가 — 즉 헤더 이름으로 열을 맞춘 상태인가.
+
+        ★ 임시. 저장 경로는 아직 화면 열 번호를 그대로 파일 열로 쓴다. 맞춘 상태에서
+        그대로 저장하면 A 의 값이 B 의 엉뚱한 열에 들어간다 — 바로 이 기능이 막으려던
+        사고를 우리가 내는 꼴이다. 저장 경로가 col_meta 를 쓰게 되면(3단계) 이 함수와
+        _save_staged 의 차단은 함께 사라진다.
+        """
+        cm = self._diff_col_meta
+        if not cm:
+            return False
+        return any(t != (i, i) for i, t in enumerate(cm))
+
     def _save_staged(self, side: str):
         """side: 'a' 또는 'b' — 해당 파일만 저장. 병합 준비(staged)된 셀만 기록한다."""
         path = self.panels[side].get_path()
@@ -1316,6 +1357,17 @@ class DiffView(QWidget):
 
         # 직접 편집 기능이 제거되어 저장할 내용은 병합 준비 셀뿐 — diff 필수
         if not self._diff_matrix:
+            return
+
+        # ★ 임시 차단(3단계에서 제거) — _columns_are_shifted 주석 참조.
+        if self._columns_are_shifted():
+            QMessageBox.warning(
+                self, "저장 보류",
+                "두 파일의 열 구성이 달라 열을 이름으로 맞춰 비교하고 있습니다."
+                + chr(10) +
+                "이 상태의 저장은 아직 지원하지 않습니다 — 잘못된 열에 기록될 수 "
+                "있어 막았습니다." + chr(10) + chr(10) +
+                "엑셀에서 열 구성을 맞춘 뒤 다시 비교해 주세요.")
             return
 
         # 저장 대상 측이 실제로 쓸 내용이 있는지 확인
@@ -1454,9 +1506,11 @@ class DiffView(QWidget):
         stage/unstage/편집/저장확정/undo는 _notify_cells()로 부분 갱신한다."""
         self._invalidate_find_cache()
         self.panel_a.populate(self._diff_matrix, self._merged_cells, self._staged,
-                              self._diff_row_meta, self._excluded_cols)
+                              self._diff_row_meta, self._excluded_cols,
+                              self._diff_col_meta)
         self.panel_b.populate(self._diff_matrix, self._merged_cells, self._staged,
-                              self._diff_row_meta, self._excluded_cols)
+                              self._diff_row_meta, self._excluded_cols,
+                              self._diff_col_meta)
         # populate가 모델의 수식 플래그를 리셋하므로, 보관본이 있으면 다시 반영.
         self._apply_formula_flags()
         self._apply_diff_filter()

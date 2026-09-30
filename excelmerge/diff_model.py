@@ -14,7 +14,8 @@ from openpyxl.utils import get_column_letter
 from .theme import (
     DIFF_COLORS, EXCLUDED_CELL_BG, CELL_FORMULA_FG, ui_font,
     key_header_icon, exclude_header_icon,
-    HEADER_KEY_BG, HEADER_EXCL_BG, HEADER_NORMAL_BG, HEADER_FG, HEADER_EXCL_FG,
+    HEADER_KEY_BG, HEADER_EXCL_BG, HEADER_NORMAL_BG, HEADER_ONESIDE_BG,
+    HEADER_FG, HEADER_EXCL_FG,
 )
 from .constants import (
     STATUS_SAME, STATUS_ADDED, STATUS_MODIFIED,
@@ -57,6 +58,7 @@ class DiffTableModel(QAbstractTableModel):
         self._col_count = 0
         self._diff_matrix: list = []
         self._row_meta: list = []
+        self._col_meta: list = []   # [(a_col, b_col)] — 빈 리스트면 위치 기준
         self._staged: dict = {}
         self._merged: set = set()
         self._excluded: set = set()
@@ -84,13 +86,15 @@ class DiffTableModel(QAbstractTableModel):
 
     # ── 모드 전환 (전부 모델 리셋) ────────────────────────────────────────────
     def set_diff_data(self, diff_matrix: list, row_meta: list,
-                      staged: dict, merged: set, excluded_cols: set):
+                      staged: dict, merged: set, excluded_cols: set,
+                      col_meta: list = None):
         self.beginResetModel()
         self._char_range_cache.clear()
         self._clear_value_caches()
         self._mode = MODE_DIFF
         self._diff_matrix = diff_matrix
         self._row_meta = row_meta or []
+        self._col_meta = col_meta or []
         self._staged = staged
         self._merged = merged
         self._excluded = excluded_cols
@@ -109,6 +113,7 @@ class DiffTableModel(QAbstractTableModel):
         self._preview = data
         self._diff_matrix = []
         self._row_meta = []
+        self._col_meta = []
         self._formula_flags = []
         self._data_rows = len(data)
         self._data_cols = max((len(r) for r in data), default=0)
@@ -132,6 +137,7 @@ class DiffTableModel(QAbstractTableModel):
         self._mode = MODE_EMPTY
         self._diff_matrix = []
         self._row_meta = []
+        self._col_meta = []
         self._preview = []
         self._formula_flags = []
         self._data_rows = 0
@@ -418,9 +424,30 @@ class DiffTableModel(QAbstractTableModel):
             return _ALIGN
         return None
 
+    def own_col(self, section: int):
+        """이 패널(side) 기준의 원본 열 번호. 그 파일에 없는 열이면 None.
+
+        열을 헤더 이름으로 맞추면 화면 열 번호는 더 이상 파일 열 번호가 아니다. 세로
+        헤더가 row_meta 로 side 별 원본 행 번호를 보여 주는 것과 같은 규칙을 가로에도
+        적용한다. col_meta 가 없으면(위치 기준) 화면 번호가 곧 파일 번호다.
+        """
+        if not self._col_meta:
+            return section
+        if 0 <= section < len(self._col_meta):
+            return self._col_meta[section][0 if self.side == "a" else 1]
+        return None
+
+    def one_sided_col(self, section: int) -> bool:
+        """한쪽 파일에만 있는 열인가 — 헤더를 연초록으로 알린다(신규 행과 같은 뜻)."""
+        if not self._col_meta or not (0 <= section < len(self._col_meta)):
+            return False
+        a_col, b_col = self._col_meta[section]
+        return a_col is None or b_col is None
+
     def headerData(self, section, orientation, role=Qt.DisplayRole):
         if orientation == Qt.Horizontal:
-            col_letter = get_column_letter(section + 1)
+            own = self.own_col(section)
+            col_letter = get_column_letter(own + 1) if own is not None else "-"
             # 미리보기/빈 상태: 기존과 동일하게 색·아이콘 없는 순수 라벨
             if self._mode != MODE_DIFF:
                 return col_letter if role == Qt.DisplayRole else None
@@ -438,7 +465,14 @@ class DiffTableModel(QAbstractTableModel):
                     return HEADER_KEY_BG
                 if section in self._excluded:
                     return HEADER_EXCL_BG
+                if self.one_sided_col(section):
+                    return HEADER_ONESIDE_BG
                 return HEADER_NORMAL_BG
+            if role == Qt.ToolTipRole:
+                if self.one_sided_col(section):
+                    return ("이 열은 한쪽 파일에만 있습니다 — 같은 이름의 열이 "
+                            "반대편에 없습니다.")
+                return None
             if role == Qt.ForegroundRole:
                 return HEADER_EXCL_FG if (section in self._excluded
                                      and section != self._key_col) else HEADER_FG

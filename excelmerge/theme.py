@@ -72,6 +72,7 @@ HATCH_COLOR = QColor(0xB0, 0xB0, 0xB0)   # 회색
 HEADER_KEY_BG = QColor(255, 213, 0)      # 키 열/행 헤더 배경(노랑)
 HEADER_EXCL_BG = QColor(220, 220, 220)   # 검사 제외 열 헤더 배경(회색)
 HEADER_NORMAL_BG = QColor(232, 234, 240) # 일반 헤더 배경
+HEADER_ONESIDE_BG = QColor(198, 239, 206)  # 한쪽 파일에만 있는 열 헤더(연초록 — 신규 행과 같은 뜻)
 HEADER_FG = QColor(0, 0, 0)              # 일반 헤더 글자(검정)
 HEADER_EXCL_FG = QColor(140, 140, 140)   # 검사 제외 열 헤더 글자(회색)
 

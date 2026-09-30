@@ -298,9 +298,9 @@ class FilePanel(QWidget):
 
     def populate(self, diff_matrix: list[list], merged_set: set = None,
                  staged: dict = None, row_meta: list = None,
-                 excluded_cols: set = None):
+                 excluded_cols: set = None, col_meta: list = None):
         self.table.populate(diff_matrix, self.side, merged_set, staged, row_meta,
-                            excluded_cols)
+                            excluded_cols, col_meta)
 
     def preview(self, data: list[list]):
         self.table.populate_preview(data)

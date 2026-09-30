@@ -149,6 +149,26 @@ def match_columns(a_data: list, b_data: list, key_row: int = 0) -> list | None:
     return col_meta
 
 
+def usable_col_meta(col_meta: list | None, key_col: int) -> list | None:
+    """그 col_meta 를 실제로 쓸 수 있나 — 못 쓰면 None(= 위치 기준).
+
+    키 열이 **양쪽 파일에 다 있어야** 행을 맞출 수 있다. 한쪽에만 있으면 그쪽 파일의 모든
+    행이 빈 키로 탈락해 비교에서 통째로 사라진다.
+
+    판정을 여기 한 군데로 모은 이유: compute_diff 가 속으로 물러서 버리면, 화면은 맞춘
+    col_meta 로 그리는데 매트릭스는 위치 기준으로 만들어진 상태가 된다 — 열이 어긋난 채
+    보이고, 그 좌표로 저장까지 간다. 부르는 쪽과 계산하는 쪽이 같은 규칙을 봐야 한다.
+    """
+    if not col_meta:
+        return None
+    if key_col == -1:                       # ROW 순서 — 헤더 개념이 없다
+        return None
+    if not (0 <= key_col < len(col_meta)):
+        return None
+    a_key, b_key = col_meta[key_col]
+    return col_meta if (a_key is not None and b_key is not None) else None
+
+
 def _cell_status(a_val: str, b_val: str) -> str:
     """added: 한쪽 파일에만 값이 있음 (A 전용/B 전용 모두) / modified: 양쪽 값이 다름."""
     if (a_val == "") != (b_val == ""):
@@ -221,12 +241,10 @@ def compute_diff(
         (max(len(r) for r in a_data) if a_data else 0),
         (max(len(r) for r in b_data) if b_data else 0),
     )
+    col_meta = usable_col_meta(col_meta, key_col)
     if col_meta:
-        a_key = col_meta[key_col][0] if 0 <= key_col < len(col_meta) else None
-        b_key = col_meta[key_col][1] if 0 <= key_col < len(col_meta) else None
-        if a_key is None or b_key is None:
-            col_meta = None          # 키가 한쪽에만 있다 — 행을 맞출 수 없다
-    if not col_meta:
+        a_key, b_key = col_meta[key_col]
+    else:
         col_meta = [(c, c) for c in range(wide)]
         a_key = b_key = key_col
     cols = len(col_meta)

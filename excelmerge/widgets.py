@@ -2594,7 +2594,8 @@ class ExcelTableView(QTableView):
 
     def populate(self, diff_matrix: list[list], which: str,
                  merged_set: set = None, staged: dict = None,
-                 row_meta: list = None, excluded_cols: set = None):
+                 row_meta: list = None, excluded_cols: set = None,
+                 col_meta: list = None):
         if not diff_matrix:
             self._safe_clear()
             return
@@ -2615,7 +2616,7 @@ class ExcelTableView(QTableView):
                 diff_matrix, row_meta,
                 staged if staged is not None else {},
                 merged_set if merged_set is not None else set(),
-                self._excluded_cols)
+                self._excluded_cols, col_meta)
             # 1) 샘플 기반 자동 너비(상한 클립 포함)
             # → 2) 사용자가 직접 조정한 열/행만 그 위에 덮어쓰기 (상한 무시).
             # 새로고침(_run_refresh)은 _user_col_widths/_user_row_heights를 미리
