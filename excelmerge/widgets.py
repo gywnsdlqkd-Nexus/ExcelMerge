@@ -1695,10 +1695,20 @@ class ExcelTableView(QTableView):
             stride = max(1, rows // (max_samples - 100))
             sample_rows = list(range(100)) + list(range(100, rows, stride))
         hdr_fm = self.horizontalHeader().fontMetrics()
+        # 헤더 아이콘(키 열 열쇠·제외 열 표시) 자리. 예전엔 열 문자 폭만 재서 아이콘이
+        # 글자를 밀어냈고, 키 열은 열쇠에 가려 열 문자가 잘려 보였다(🔑A → 🔑!).
+        icon_w = self.horizontalHeader().iconSize().width() + 6
         self._applying_sizes = True
         try:
             for c in range(cols):
-                w = hdr_fm.horizontalAdvance(get_column_letter(c + 1)) + 24
+                # 헤더에 **실제로 보이는 글자**를 잰다. 열을 이름으로 맞춘 비교에서는
+                # 패널마다 열 문자가 다르고, 그 파일에 없는 열은 '-' 다.
+                txt = self._model.headerData(c, Qt.Horizontal, Qt.DisplayRole)
+                txt = str(txt) if txt else get_column_letter(c + 1)
+                hdr_min = hdr_fm.horizontalAdvance(txt) + 24
+                if self._model.headerData(c, Qt.Horizontal, Qt.DecorationRole) is not None:
+                    hdr_min += icon_w
+                w = hdr_min
                 for r in sample_rows:
                     text = m.display_text(r, c)
                     if not text:
@@ -1711,7 +1721,9 @@ class ExcelTableView(QTableView):
                         w = tw + pad
                         if w >= MAX_AUTO_COL_WIDTH_PX:
                             break
-                self.setColumnWidth(c, min(w, MAX_AUTO_COL_WIDTH_PX))
+                # 상한을 씌우되 헤더가 잘릴 만큼 줄이지는 않는다 — 데이터가 길어도
+                # 열 문자와 아이콘은 보여야 한다.
+                self.setColumnWidth(c, max(min(w, MAX_AUTO_COL_WIDTH_PX), hdr_min))
         finally:
             self._applying_sizes = False
 

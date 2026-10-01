@@ -154,3 +154,65 @@ def test_an_opaque_tint_would_fail_the_colour_tests(view):
     opaque = (HEADER_ONESIDE_BG.red(), HEADER_ONESIDE_BG.green(), HEADER_ONESIDE_BG.blue())
     assert not _close(_expected_tint(HEADER_ONESIDE_BG), opaque), (
         "기대색이 원색과 같다 — 반투명 여부를 구분하지 못한다")
+
+
+# ── 헤더가 잘리지 않을 만큼 넓은가 ──────────────────────────────────────────
+# 자동 열 너비가 **열 문자 폭만** 재고 아이콘 자리를 빼먹어, 키 열은 열쇠에 가려
+# 열 문자가 잘려 보였다(🔑A 가 🔑! 처럼). 아이콘이 붙는 열은 그만큼 더 넓어야 한다.
+
+
+def _need(table, section):
+    """그 열 헤더가 잘리지 않으려면 필요한 최소 폭."""
+    hdr = table.horizontalHeader()
+    m = table.model()
+    txt = str(m.headerData(section, Qt.Horizontal, Qt.DisplayRole) or "")
+    need = hdr.fontMetrics().horizontalAdvance(txt) + 24
+    if m.headerData(section, Qt.Horizontal, Qt.DecorationRole) is not None:
+        need += hdr.iconSize().width() + 6
+    return need
+
+
+def test_the_key_column_is_wide_enough_for_icon_and_letter(view):
+    """키 열은 본체에서 숨겨지고 고정 밴드가 그린다 — 폭도 거기서 봐야 한다."""
+    for panel in (view.panel_a, view.panel_b):
+        fz = panel.table._freeze
+        assert fz is not None and fz._active
+        got = fz.corner.columnWidth(0)
+        assert got >= _need(panel.table, 0), (
+            f"{panel.side} 키 열 폭 {got} < 필요 {_need(panel.table, 0)} — 열 문자가 잘린다")
+
+
+def test_an_excluded_column_is_wide_enough_too(view, qapp):
+    """제외 열에도 아이콘이 붙는다 — 같은 규칙이 적용돼야 한다."""
+    c = _col(view, "MEMO")
+    view._on_columns_exclude_set([c], True)
+    for _ in range(20):
+        qapp.processEvents()
+    view._refresh_tables()
+    for _ in range(20):
+        qapp.processEvents()
+    tbl = view.panel_b.table
+    assert tbl.columnWidth(c) >= _need(tbl, c), (
+        f"제외 열 폭 {tbl.columnWidth(c)} < 필요 {_need(tbl, c)}")
+
+
+# 아이콘이 없는 열에 아이콘 자리가 붙지 않는지는 여기서 테스트하지 않는다 —
+# 자동 폭은 보통 **데이터**가 정해서(헤더 최소치보다 넓다) 둘을 분리해 재기 어렵다.
+# 규칙 자체는 _apply_auto_widths 에서 DecorationRole 이 있을 때만 더하는 한 줄이다.
+
+
+def test_long_data_never_clips_the_header(view, qapp):
+    """데이터가 길어 상한에 걸려도 헤더 글자와 아이콘은 보여야 한다."""
+    from excelmerge.widgets import MAX_AUTO_COL_WIDTH_PX
+    long_a = [["ID", "NAME"], ["k1", "x" * 400]]
+    long_b = [["ID", "NAME"], ["k1", "y" * 400]]
+    view._on_loaded(long_a, long_b)
+    w = getattr(view, "_diff_worker", None)
+    if w is not None:
+        w.wait(8000)
+    for _ in range(30):
+        qapp.processEvents()
+    tbl = view.panel_b.table
+    fz = tbl._freeze
+    assert fz.corner.columnWidth(0) >= _need(tbl, 0), "키 열이 상한에 깎여 잘렸다"
+    assert tbl.columnWidth(1) <= MAX_AUTO_COL_WIDTH_PX, "상한이 안 먹었다"
