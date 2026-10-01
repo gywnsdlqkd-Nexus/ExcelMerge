@@ -117,7 +117,13 @@ def test_one_sided_column_is_marked_on_both_panels(make_view):
         assert [c for c in range(4) if m.one_sided_col(c)] == [1]
 
 
-def test_one_sided_header_is_tinted(make_view):
+def test_one_sided_header_asks_for_the_tint(make_view):
+    """모델이 색을 **요청**하는지까지만 본다.
+
+    ★ 이게 화면에 칠해지는지는 여기서 알 수 없다. 실제로 한동안 한 픽셀도 칠해지지
+    않았는데 이 테스트는 통과했다(스타일시트가 헤더 배경을 먼저 그려 버린다).
+    그려진 픽셀은 tests/test_header_paint.py 가 본다.
+    """
     m = make_view().panel_a.table.model()
     assert m.headerData(1, Qt.Horizontal, Qt.BackgroundRole) == HEADER_ONESIDE_BG
     assert m.headerData(2, Qt.Horizontal, Qt.BackgroundRole) != HEADER_ONESIDE_BG

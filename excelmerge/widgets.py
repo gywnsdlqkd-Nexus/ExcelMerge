@@ -26,6 +26,7 @@ from .theme import (
     CELL_DIFF_HL, CELL_DIFF_FG, HATCH_COLOR, MENU_QSS, SHEET_TAB_CHANGED_BG,
     MINIMAP_MARKER_COLOR, ui_font, key_header_icon, exclude_header_icon,
     reset_header_icon, force_active_highlight,
+    HEADER_NORMAL_BG, HEADER_TINT_ALPHA,
 )
 
 
@@ -482,6 +483,42 @@ AX_COL = _Axis(True)
 AX_ROW = _Axis(False)
 
 
+class _TintHeaderView(QHeaderView):
+    """모델이 준 헤더 색을 실제로 칠하는 헤더 — 본체와 고정 밴드 오버레이가 함께 쓴다."""
+
+    def paintSection(self, painter, rect, logicalIndex):
+        """모델이 준 헤더 색을 **실제로** 칠한다.
+
+        앱에 스타일시트가 걸려 있으면 Qt(QStyleSheetStyle)가 헤더 섹션 배경을 직접
+        그리면서 모델의 BackgroundRole 을 무시한다. 그래서 키 열 노랑은 **한 번도
+        칠해진 적이 없었고**(실측: 전 열이 QSS 색 #e8eaf0), 나중에 넣은 '한쪽에만 있는
+        열' 연초록도 같은 이유로 죽어 있었다. QSS 에서 background 를 빼 봐도 모델 색이
+        살아나지 않는다 — 스타일이 그리는 것 자체가 바뀌지 않기 때문이다.
+
+        그래서 **덧칠**한다. super() 가 테두리·글자·아이콘까지 다 그린 뒤에 색을 얹되,
+        덮어 칠하면 글자가 사라지므로 반투명(HEADER_TINT_ALPHA)으로 올린다.
+        일반 색(HEADER_NORMAL_BG)은 얹지 않는다 — 얹어 봐야 같은 색이고 공짜도 아니다.
+
+        ★ super() 호출을 save/restore 로 **감싸야** 한다. QHeaderView.paintSection 은
+        painter 에 클립을 남기고 돌아와, 그대로 칠하면 전부 잘려 나간다(실측: 불투명
+        빨강을 칠해도 화면에 단 한 픽셀도 안 나왔다). 이 한 줄이 기능의 전부다.
+        """
+        painter.save()
+        super().paintSection(painter, rect, logicalIndex)
+        painter.restore()
+        model = self.model()
+        if model is None:
+            return
+        bg = model.headerData(logicalIndex, self.orientation(), Qt.BackgroundRole)
+        if not isinstance(bg, QColor) or bg == HEADER_NORMAL_BG:
+            return
+        tint = QColor(bg)
+        tint.setAlpha(HEADER_TINT_ALPHA)
+        painter.save()
+        painter.fillRect(rect, tint)
+        painter.restore()
+
+
 class _FrozenView(QTableView):
     """틀 고정 헬퍼 뷰 — 본체 모델/선택모델을 공유한다. 자체 스크롤바 없음.
     휠 이벤트는 본체로 전달해 본체가 스크롤되고 컨트롤러가 헬퍼를 되동기하게 한다.
@@ -764,6 +801,15 @@ class FreezeController(QObject):
     def _make_view(self, headers: bool):
         host = self.host
         v = _FrozenView(host)
+        # 키 열 헤더는 본체에서 숨겨지고 **이 오버레이가** 그린다 — 색을 칠하는
+        # 헤더로 바꿔 두지 않으면 키 노랑이 여기서만 또 안 나온다.
+        # (QTableView 는 sectionsClickable/highlightSections 를 자기가 만든 기본
+        #  헤더에만 켠다 — 교체하면서 직접 켜 줘야 헤더 클릭이 산다.)
+        for _h, _set in ((_TintHeaderView(Qt.Horizontal, v), v.setHorizontalHeader),
+                         (_TintHeaderView(Qt.Vertical, v), v.setVerticalHeader)):
+            _h.setSectionsClickable(True)
+            _h.setHighlightSections(True)
+            _set(_h)
         v.setModel(host.model())
         # 선택 모델을 본체와 공유 — 고정 셀(키 열/행)을 이 뷰에서 클릭하면 본체 선택이 갱신되고
         # selectionChanged가 발화해 셀값란·A/B 미러·수식 플래그 등 기존 배선이 그대로 동작한다.
@@ -1119,7 +1165,7 @@ class FreezeController(QObject):
         self._apply_frozen_size(AX_ROW, idx, new, mirror=mirror)
 
 
-class _BandHeaderView(QHeaderView):
+class _BandHeaderView(_TintHeaderView):
     """틀 고정 밴드 크기를 sizeHint 에 포함시키는 헤더.
 
     QTableView.updateGeometries() 는 ① 헤더 sizeHint 로 뷰포트 여백을 잡고
@@ -1153,7 +1199,6 @@ class _BandHeaderView(QHeaderView):
         if self.orientation() == Qt.Vertical:
             return QSize(sh.width() + self._band, sh.height())
         return QSize(sh.width(), sh.height() + self._band)
-
 
 class ExcelTableView(QTableView):
     stage_requested   = pyqtSignal(str)   # direction: 'a_to_b' | 'b_to_a'

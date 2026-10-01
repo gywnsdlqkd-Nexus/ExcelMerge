@@ -73,6 +73,10 @@ HEADER_KEY_BG = QColor(255, 213, 0)      # 키 열/행 헤더 배경(노랑)
 HEADER_EXCL_BG = QColor(220, 220, 220)   # 검사 제외 열 헤더 배경(회색)
 HEADER_NORMAL_BG = QColor(232, 234, 240) # 일반 헤더 배경
 HEADER_ONESIDE_BG = QColor(198, 239, 206)  # 한쪽 파일에만 있는 열 헤더(연초록 — 신규 행과 같은 뜻)
+# 헤더 색을 덧칠할 때의 불투명도. 스타일시트가 헤더 배경을 먼저 그려 버리므로 모델의
+# BackgroundRole 은 그대로는 **한 번도 칠해지지 않았다**(키 열 노랑도 마찬가지였다).
+# 글자까지 지우지 않으려면 덮어 칠하지 말고 반투명으로 얹어야 한다.
+HEADER_TINT_ALPHA = 120
 HEADER_FG = QColor(0, 0, 0)              # 일반 헤더 글자(검정)
 HEADER_EXCL_FG = QColor(140, 140, 140)   # 검사 제외 열 헤더 글자(회색)
 
