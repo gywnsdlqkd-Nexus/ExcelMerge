@@ -361,6 +361,63 @@ def _package_mismatches(path: str, limit: int = 5) -> list:
     return bad[:limit]
 
 
+def _formula_mismatches(path: str, limit: int = 5) -> list:
+    """저장한 파일의 수식이 성립하는가 — 공유 수식 그룹과 수식 ref 범위.
+
+    값 대조로는 못 잡는다. 셀 값은 <v> 에 그대로 있어 전부 일치하는데, Excel 은
+    열면서 "내용에 문제가 있습니다" 복구 창을 띄운다. 실제로 그런 파일 둘이 사용자에게
+    나갔다(Data_MiniGameRoulette_CS.xlsx, Data_TextUITable_CS.xlsm).
+    """
+    bad = []
+    with zipfile.ZipFile(path) as zf:
+        sheets = sorted(n for n in zf.namelist()
+                        if n.startswith("xl/worksheets/") and n.endswith(".xml"))
+        for sp in sheets:
+            root = etree.fromstring(zf.read(sp))
+            sd = root.find(_TAG_SHEETDATA)
+            if sd is None:
+                continue
+            masters, members = {}, {}
+            for c_el in sd.iter(_TAG_C):
+                f_el = c_el.find(_TAG_F)
+                if f_el is None:
+                    continue
+                own = c_el.get("r", "")
+                # 공유가 아닌 수식(배열 등)의 ref 는 **자기 셀을 담아야** 한다.
+                if f_el.get("t") != "shared":
+                    rng = f_el.get("ref")
+                    if rng and not _ref_in(own, rng):
+                        bad.append(f"{sp}: {own} 의 "
+                                   f"{f_el.get('t') or '수식'} ref={rng} 가 "
+                                   f"자기 셀을 담지 못합니다")
+                        if len(bad) >= limit:
+                            return bad[:limit]
+                    continue
+                si = f_el.get("si")
+                members.setdefault(si, []).append(own)
+                if f_el.get("ref"):
+                    if si in masters:
+                        bad.append(f"{sp}: 공유수식 si={si} 의 주인이 둘입니다"
+                                   f" ({masters[si][0]}, {own})")
+                    masters[si] = (own, f_el.get("ref"), (f_el.text or "").strip())
+            for si, refs in members.items():
+                if si not in masters:
+                    bad.append(f"{sp}: 공유수식 si={si} 에 주인이 없습니다"
+                               f" (추종자 {len(refs)}개, 예: {refs[0]})")
+                    continue
+                own, rng, body = masters[si]
+                if not body:
+                    bad.append(f"{sp}: 공유수식 si={si} 주인 {own} 의 수식이 비었습니다")
+                outside = [r for r in refs if not _ref_in(r, rng)]
+                if outside:
+                    who = "주인" if own in outside else "추종자"
+                    bad.append(f"{sp}: 공유수식 si={si} 의 ref={rng} 가 "
+                               f"{who} {outside[0]} 을(를) 담지 못합니다")
+                if len(bad) >= limit:
+                    return bad[:limit]
+    return bad[:limit]
+
+
 def _verify_saved(tmp_path: str, before, patches: dict, insert_rows=None,
                   delete_row_nums=None, delete_col_letters=None,
                   sheet_name=None) -> None:
@@ -371,7 +428,8 @@ def _verify_saved(tmp_path: str, before, patches: dict, insert_rows=None,
     본다(예전 _is_numeric 버그처럼 XML 은 멀쩡한데 값이 달라 보이는 경우까지 잡힌다).
 
     세 단계로 본다.
-      0. **패키지 구조** — 없는 부품을 가리키는 선언·관계(_package_mismatches).
+      0. **파일 구조** — 없는 부품을 가리키는 선언·관계(_package_mismatches),
+         그리고 성립하지 않는 수식(_formula_mismatches).
       1. 덮어쓴 셀 — 좌표를 짚어 주는 정밀 검사(_patch_mismatches).
       2. **시트 전체** — 기대 격자와 전수 대조(_grid_mismatches).
 
@@ -387,7 +445,7 @@ def _verify_saved(tmp_path: str, before, patches: dict, insert_rows=None,
     before 가 None 이면(원본을 못 읽었다) 2 는 건너뛴다 — 확인 수단이 없다고 멀쩡한
     저장을 막지는 않는다. 1 은 그대로 돈다.
     """
-    bad = _package_mismatches(tmp_path)
+    bad = _package_mismatches(tmp_path) or _formula_mismatches(tmp_path)
     if not bad:
         from .loaders import load_values_any   # 순환 import 방지 — 저장 시점에만 필요
         after = load_values_any(tmp_path, sheet_name=sheet_name)
@@ -869,6 +927,183 @@ def _set_cell_value(c_el, new_val: str):
         v_el.text = new_val
 
 
+def _ref_parts(ref: str):
+    """'B12' → ('B', 12). 좌표 형식이 아니면 None."""
+    m = _COL_RE.match(ref or "")
+    return (m.group(1), int(m.group(2))) if m else None
+
+
+def _bounding_ref(refs) -> str:
+    """좌표들을 모두 담는 최소 직사각형 — 'A3' 또는 'A3:A66'."""
+    cols, rows = [], []
+    for r in refs:
+        p = _ref_parts(r)
+        if p:
+            cols.append(column_index_from_string(p[0]))
+            rows.append(p[1])
+    if not cols:
+        return ""
+    first = f"{get_column_letter(min(cols))}{min(rows)}"
+    last = f"{get_column_letter(max(cols))}{max(rows)}"
+    return first if first == last else f"{first}:{last}"
+
+
+def _ref_in(ref: str, rng: str) -> bool:
+    """ref 가 'A3:A66' 같은 범위 안에 드는가. 판단할 수 없으면 True(문제 삼지 않는다)."""
+    parts = (rng or "").split(":")
+    a, b, p = _ref_parts(parts[0]), _ref_parts(parts[-1]), _ref_parts(ref)
+    if not (a and b and p):
+        return True
+    ca, cb = column_index_from_string(a[0]), column_index_from_string(b[0])
+    cp = column_index_from_string(p[0])
+    return (min(ca, cb) <= cp <= max(ca, cb)
+            and min(a[1], b[1]) <= p[1] <= max(a[1], b[1]))
+
+
+def _shift_ref_rows(ref: str, sorted_deleted) -> str:
+    """'H117' / 'H117:H120' 의 행 번호를 삭제분만큼 당긴다 — 셀 좌표와 같은 규칙.
+
+    수식의 ref 는 **그 수식이 덮는 범위**다. 배열 수식은 자기 셀을, 공유 수식은 주인과
+    추종자를 담는다. 행을 지우면 <c r> 은 당겨지는데 이 속성이 그대로 남아, 수식이
+    자기 자리를 벗어난 범위를 가리키게 된다 — Excel 은 그런 파일을 거부한다.
+    """
+    out = []
+    for part in (ref or "").split(":"):
+        p = _ref_parts(part)
+        if p is None:
+            return ref                     # 모르는 모양 — 건드리지 않는다
+        col, rn = p
+        out.append(f"{col}{rn - sum(1 for d in sorted_deleted if d < rn)}")
+    return ":".join(out)
+
+
+def _cell_sort_key(c_el):
+    p = _ref_parts(c_el.get("r", ""))
+    return (p[1], column_index_from_string(p[0])) if p else (0, 0)
+
+
+def _shared_groups(sheetdata) -> dict:
+    """바꾸기 **전** 공유 수식 그룹 — si → {주인 좌표, 수식 본문, (셀, 원래 좌표)들}.
+
+    엑셀은 같은 모양의 수식을 한 번만 적는다.
+
+        <c r="B4"><f t="shared" ref="B4:B16" si="0">ROW()-1</f><v>3</v></c>   주인
+        <c r="B5"><f t="shared" si="0"/><v>4</v></c>                          추종자
+
+    추종자는 본문이 없다. 주인을 보고 자기 자리에 맞게 옮겨 쓴다. 그래서 **주인이
+    사라지면 추종자는 읽을 수 없는 셀**이 되고 Excel 이 파일을 거부한다.
+
+    바꾸기 **전에** 잡아 두는 이유: 주인 셀을 덮어쓰거나 그 행을 지우고 나면 수식
+    본문을 되살릴 방법이 없다. 원래 좌표도 함께 남긴다 — 행을 지우면 좌표가 당겨지는데,
+    수식을 옮겨 쓸 때는 **당기기 전 좌표**를 기준으로 해야 본문이 그대로 나온다.
+    """
+    groups: dict = {}
+    for row_el in sheetdata:
+        for c_el in row_el:
+            f_el = c_el.find(_TAG_F)
+            if f_el is None or f_el.get("t") != "shared":
+                continue
+            si = f_el.get("si")
+            if si is None:
+                continue
+            g = groups.setdefault(si, {"origin": None, "formula": None, "cells": []})
+            g["cells"].append((c_el, c_el.get("r", "")))
+            if f_el.get("ref"):
+                g["origin"] = c_el.get("r", "")
+                g["formula"] = (f_el.text or "").strip()
+    return groups
+
+
+def _drop_shared_formula(c_el) -> None:
+    """<f> 를 떼고 캐시 값(<v>)만 남긴다 — 수식은 잃지만 셀 값과 파일은 지킨다."""
+    f_el = c_el.find(_TAG_F)
+    if f_el is not None:
+        c_el.remove(f_el)
+
+
+def _make_plain_formula(c_el, body: str) -> None:
+    """공유 수식을 평범한 수식으로 되돌린다(혼자 남았을 때)."""
+    f_el = c_el.find(_TAG_F)
+    if f_el is None:
+        return
+    f_el.attrib.pop("t", None)
+    f_el.attrib.pop("si", None)
+    f_el.attrib.pop("ref", None)
+    f_el.text = body
+
+
+def _promote_shared_master(cells, group, orig_of):
+    """남은 셀 하나를 새 주인으로 올린다. 못 하면 None.
+
+    수식 본문은 주인 자리 기준으로 적혀 있으므로, 새 주인 자리로 **옮겨 써야** 한다
+    (B2 를 가리키던 상대 참조는 다섯 칸 아래에서 B7 이 된다). 좌표는 둘 다 '당기기 전'
+    것을 쓴다 — 그래야 원래 파일에서 그 셀이 가졌을 수식과 같아진다.
+    """
+    if not group.get("formula") or not group.get("origin"):
+        return None
+    target = min(cells, key=_cell_sort_key)
+    dest = orig_of.get(target) or target.get("r", "")
+    try:
+        from openpyxl.formula.translate import Translator
+        text = Translator("=" + group["formula"],
+                          origin=group["origin"]).translate_formula(dest)
+    except Exception:
+        log.warning("공유 수식을 새 주인 자리로 옮겨 쓰지 못했습니다: %s → %s",
+                    group.get("origin"), dest, exc_info=True)
+        return None
+    f_el = target.find(_TAG_F)
+    f_el.text = text[1:] if text.startswith("=") else text
+    f_el.set("ref", target.get("r", ""))
+    return target
+
+
+def _repair_shared_formulas(sheetdata, groups) -> None:
+    """공유 수식을 Excel 이 받아들이는 상태로 되돌린다. 바꾼 **뒤에** 부른다.
+
+    실사용에서 둘 다 터졌다(40_Build 두 파일이 열리지 않았다).
+
+      1. **주인이 사라졌다.** 병합이 주인 셀을 값으로 덮으면 추종자가 고아가 된다
+         (Data_MiniGameRoulette_CS.xlsx: si=2 추종자 3개). 남은 셀 하나를 새 주인으로
+         올린다. 옮겨 쓸 수 없으면 <f> 를 떼어 **값만 남긴다** — 수식은 잃어도 파일은
+         열린다.
+
+      2. **주인의 ref 가 자기를 안 담는다.** 행을 지우면 <c r> 은 당겨지는데 ref 는
+         그대로 남는다(Data_TextUITable_CS.xlsm: 주인 A5250 의 ref 가 A5251:A5314).
+         ref 는 주인 자신과 살아남은 추종자를 모두 담아야 한다.
+
+    값은 건드리지 않는다 — <v> 의 캐시 값은 그대로다.
+    """
+    if not groups:
+        return
+    orig_of = {c_el: orig for g in groups.values() for c_el, orig in g["cells"]}
+
+    live: dict = {}
+    for row_el in sheetdata:
+        for c_el in row_el:
+            f_el = c_el.find(_TAG_F)
+            if f_el is not None and f_el.get("t") == "shared" and f_el.get("si"):
+                live.setdefault(f_el.get("si"), []).append(c_el)
+
+    for si, cells in live.items():
+        group = groups.get(si, {"origin": None, "formula": None, "cells": []})
+        master = next((c for c in cells if c.find(_TAG_F).get("ref")), None)
+        if master is None:
+            master = _promote_shared_master(cells, group, orig_of)
+            if master is None:
+                for c_el in cells:
+                    _drop_shared_formula(c_el)
+                continue
+        if len(cells) == 1:
+            body = (master.find(_TAG_F).text or "").strip()
+            if body:
+                _make_plain_formula(master, body)   # 혼자면 공유할 이유가 없다
+            else:
+                _drop_shared_formula(master)
+            continue
+        master.find(_TAG_F).set(
+            "ref", _bounding_ref([c.get("r", "") for c in cells]))
+
+
 def _index_sheet(sheetdata):
     """sheetData 를 (ref→<c>, 1-based row번호→<row>) 두 인덱스로 스캔."""
     existing: dict[str, etree._Element] = {}
@@ -979,6 +1214,15 @@ def _renumber_after_delete(sheetdata, deleted):
                 m = _COL_RE.match(c_el.get("r", ""))
                 if m:
                     c_el.set("r", f"{m.group(1)}{new_rn}")
+    # 수식의 ref 도 같이 당긴다. 셀만 당기고 두면 배열 수식이 자기 자리를 벗어난
+    # 범위를 가리켜 Excel 이 파일을 거부한다(실측: Data_Illustration_C.xlsx 의
+    # <c r="H116"><f t="array" ref="H117">). 범위 끝이 어디에 있든 같은 규칙으로 센다.
+    # 공유 수식 ref 는 _repair_shared_formulas 가 실제 그룹 범위로 다시 잡는다.
+    for row_el in sheetdata:
+        for c_el in row_el:
+            f_el = c_el.find(_TAG_F)
+            if f_el is not None and f_el.get("ref"):
+                f_el.set("ref", _shift_ref_rows(f_el.get("ref"), sorted_deleted))
 
 
 def _patch_sheet_xml(
@@ -1007,10 +1251,15 @@ def _patch_sheet_xml(
         return data
 
     existing, row_map = _index_sheet(sheetdata)
+    # 공유 수식 그룹은 **건드리기 전에** 잡아 둔다 — 주인을 덮어쓰거나 그 행을 지우고
+    # 나면 수식 본문을 되살릴 방법이 없다.
+    shared = _shared_groups(sheetdata)
     deleted = _delete_rows(sheetdata, row_map, delete_row_nums)
     _apply_patches(sheetdata, existing, row_map, patches, patch_styles)
     _append_rows(sheetdata, insert_rows)
     _delete_columns(sheetdata, delete_col_letters)
     _renumber_after_delete(sheetdata, deleted)
+    # 좌표가 다 정해진 뒤에 고친다 — ref 는 **당긴 뒤** 좌표로 써야 한다.
+    _repair_shared_formulas(sheetdata, shared)
 
     return etree.tostring(tree, xml_declaration=True, encoding="UTF-8", standalone=True)
