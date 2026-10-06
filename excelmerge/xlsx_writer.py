@@ -471,6 +471,54 @@ def _new_circular_formulas(before_path, after_path, self_sheet, limit: int = 5) 
     return [f"{ref} 의 수식이 자기 셀을 가리킵니다(순환 참조)" for ref in fresh[:limit]]
 
 
+def _sheet_order_mismatches(path: str, limit: int = 5) -> list:
+    """행·셀이 번호 순서대로, 겹치지 않게 들어 있는가.
+
+    엑셀은 sheetData 안의 <row> 가 오름차순이고 번호가 겹치지 않기를 요구한다. 행 안의
+    <c> 도 마찬가지다. 어기면 "내용에 문제가 있습니다" 복구 창이 뜬다.
+
+    값 대조로는 못 잡는다 — 로더는 번호로 격자를 채우므로 순서가 어긋나도 같은 값이
+    나온다. 실제로 행 삽입이 빈 <row> 와 번호가 겹쳐 이 상태로 저장된 적이 있다.
+    """
+    bad = []
+    with zipfile.ZipFile(path) as zf:
+        for sp in sorted(n for n in zf.namelist()
+                         if n.startswith("xl/worksheets/") and n.endswith(".xml")):
+            sd = etree.fromstring(zf.read(sp)).find(_TAG_SHEETDATA)
+            if sd is None:
+                continue
+            prev, seen = 0, set()
+            for row_el in sd:
+                try:
+                    rn = int(row_el.get("r", 0))
+                except (TypeError, ValueError):
+                    continue
+                if rn in seen:
+                    bad.append(f"{sp}: {rn}행이 두 번 들어 있습니다")
+                elif rn <= prev:
+                    bad.append(f"{sp}: 행 순서가 뒤집혔습니다({prev} → {rn})")
+                seen.add(rn)
+                prev = rn
+                pc, cols = 0, set()
+                for c_el in row_el:
+                    m = _COL_RE.match(c_el.get("r", ""))
+                    if not m:
+                        continue
+                    ci = column_index_from_string(m.group(1))
+                    if int(m.group(2)) != rn:
+                        bad.append(f"{sp}: {c_el.get('r')} 가 {rn}행 안에 있습니다")
+                    elif ci in cols:
+                        bad.append(f"{sp}: {c_el.get('r')} 가 두 번 들어 있습니다")
+                    elif ci <= pc:
+                        bad.append(f"{sp}: {rn}행의 셀 순서가 뒤집혔습니다"
+                                   f"({c_el.get('r')})")
+                    cols.add(ci)
+                    pc = ci
+                if len(bad) >= limit:
+                    return bad[:limit]
+    return bad[:limit]
+
+
 def _verify_saved(tmp_path: str, before, patches: dict, insert_rows=None,
                   delete_row_nums=None, delete_col_letters=None,
                   sheet_name=None, base_path=None, self_sheet=None) -> None:
@@ -498,7 +546,8 @@ def _verify_saved(tmp_path: str, before, patches: dict, insert_rows=None,
     before 가 None 이면(원본을 못 읽었다) 2 는 건너뛴다 — 확인 수단이 없다고 멀쩡한
     저장을 막지는 않는다. 1 은 그대로 돈다.
     """
-    bad = _package_mismatches(tmp_path) or _formula_mismatches(tmp_path)
+    bad = (_package_mismatches(tmp_path) or _sheet_order_mismatches(tmp_path)
+           or _formula_mismatches(tmp_path))
     if not bad and delete_row_nums and base_path:
         bad = _new_circular_formulas(base_path, tmp_path, self_sheet)
     if not bad:
@@ -1514,27 +1563,76 @@ def _apply_patches(sheetdata, existing, row_map, patches, patch_styles):
                 _COL_RE.match(e.get("r", "A1")).group(1)))
 
 
+def _row_has_value(row_el) -> bool:
+    """그 행에 **보이는 값**이 있나 — <c> 가 있는 것만으로는 부족하다.
+
+    서식만 주고 값은 없는 셀이 꼬리에 남아 있는 파일이 흔하다(실측:
+    Data_TextPCSkillTable_CS.xlsm 은 값 있는 마지막 행이 4166인데 <c> 는 4560행까지
+    있다). 그걸 데이터로 세면 새 행이 빈 행 394개 **아래**에 붙는다 — 비교에 쓰는
+    로더가 보는 마지막 행과 같은 기준으로 세야 한다.
+    """
+    for c_el in row_el:
+        if c_el.find(_TAG_F) is not None:
+            return True
+        v_el = c_el.find(_TAG_V)
+        if v_el is not None and (v_el.text or "").strip():
+            return True
+        if c_el.find(f"{{{_NS}}}is") is not None:
+            return True
+    return False
+
+
 def _append_rows(sheetdata, insert_rows):
-    """실제 셀이 있는 마지막 행 다음부터 새 행을 추가(빈 <row> 요소는 무시)."""
+    """실제 셀이 있는 마지막 행 다음부터 새 행을 추가.
+
+    새 행은 **셀이 있는** 마지막 행 다음에 놓는다. 그런데 그 자리에 빈 <row> 요소가
+    이미 있을 수 있다 — 엑셀이 서식만 준 행을 그렇게 남긴다(실측:
+    Data_RewardGroup_CS.xlsx 는 셀이 있는 행이 423개인데 <row> 는 1207개다).
+    예전엔 빈 행을 무시하고 새로 만들어 **같은 번호의 <row> 가 둘** 생겼고, 순서도
+    뒤집혔다(…1207, 424, 425…). 엑셀은 그런 파일을 거부한다.
+    그래서 그 번호에 행이 이미 있으면 **그 행에 채워 넣는다.**
+    """
     if not insert_rows:
         return
-    last_data_row = max(
-        (int(row_el.get("r", 0)) for row_el in sheetdata if list(row_el)), default=0)
+    by_num = {}
+    for row_el in sheetdata:
+        try:
+            by_num[int(row_el.get("r", 0))] = row_el
+        except (TypeError, ValueError):
+            continue
+    last_data_row = max((n for n, el in by_num.items() if _row_has_value(el)),
+                        default=0)
     next_row = last_data_row + 1 if last_data_row > 0 else 1
     for cells in insert_rows:
-        row_el = etree.SubElement(sheetdata, _TAG_ROW)
-        row_el.set("r", str(next_row))
+        row_el = by_num.get(next_row)
+        if row_el is None:
+            row_el = etree.SubElement(sheetdata, _TAG_ROW)
+            row_el.set("r", str(next_row))
+            by_num[next_row] = row_el
+        # 그 행에 이미 있는 <c>(서식만 준 빈 칸)를 다시 쓴다 — 새로 만들면 같은
+        # 좌표의 셀이 둘 생기고 엑셀이 파일을 거부한다.
+        by_col = {}
+        for c_el in row_el:
+            m = _COL_RE.match(c_el.get("r", ""))
+            if m:
+                by_col[column_index_from_string(m.group(1)) - 1] = c_el
         for cell in sorted(cells, key=lambda x: x[0]):
             col_idx, val = cell[0], cell[1]
             dst_s = cell[2] if len(cell) > 2 else None
             if val == "":
                 continue
-            c_el = etree.SubElement(row_el, _TAG_C)
+            c_el = by_col.get(col_idx)
+            if c_el is None:
+                c_el = etree.SubElement(row_el, _TAG_C)
+                by_col[col_idx] = c_el
             c_el.set("r", _cell_ref(next_row - 1, col_idx))
             _set_cell_value(c_el, val)
             if dst_s is not None:
                 c_el.set("s", str(dst_s))
+        row_el[:] = sorted(row_el, key=lambda e: column_index_from_string(
+            _COL_RE.match(e.get("r", "A1")).group(1)))
         next_row += 1
+    sheetdata[:] = sorted(sheetdata, key=lambda e: int(e.get("r", 0)))
 
 
 def _delete_columns(sheetdata, delete_col_letters):
