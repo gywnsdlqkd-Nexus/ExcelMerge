@@ -1,5 +1,6 @@
 """xlsx 저장 — sheet XML 직접 패치로 수식 보존 기록 (excel_diff_merge.py에서 분리)."""
 import os
+import posixpath
 import re
 import zipfile
 from copy import deepcopy
@@ -21,6 +22,11 @@ _TAG_ROW = f"{{{_NS}}}row"
 _TAG_C = f"{{{_NS}}}c"
 _TAG_F = f"{{{_NS}}}f"
 _TAG_V = f"{{{_NS}}}v"
+
+# 저장하며 패키지에서 빼는 부품. 여기 넣은 것은 그것을 가리키는 **선언·관계까지** 함께
+# 걷어낸다 — 부품만 빼고 참조를 남기면 Excel 이 열 때마다 "내용에 문제가 있습니다" 복구
+# 창을 띄운다. 실제로 그렇게 나갔다(40_Build 의 5개 파일, .xlsx 3 / .xlsm 2).
+_DROP_PARTS = frozenset({"xl/calcChain.xml"})
 
 
 def _cell_ref(r: int, c: int) -> str:
@@ -269,6 +275,92 @@ def _patch_mismatches(rows, patches: dict, delete_row_nums=None,
     return bad
 
 
+def _rel_target_part(rels_path: str, rel) -> str | None:
+    """그 관계가 가리키는 패키지 안 부품 경로. 바깥을 가리키면 None.
+
+    Target 은 그 .rels 가 지키는 폴더 기준의 상대 경로다
+    (xl/_rels/workbook.xml.rels 의 "calcChain.xml" → xl/calcChain.xml).
+    """
+    if rel.get("TargetMode") == "External":
+        return None
+    tgt = (rel.get("Target") or "").strip()
+    if not tgt or "://" in tgt:
+        return None
+    if tgt.startswith("/"):
+        return tgt.lstrip("/")
+    base = posixpath.dirname(posixpath.dirname(rels_path))   # xl/_rels/a.rels → xl
+    return posixpath.normpath(posixpath.join(base, tgt)).replace("\\", "/")
+
+
+def _child_elements(root) -> list:
+    """주석·처리 지시를 뺀 자식 요소만 — lxml 은 주석도 자식으로 돌려준다."""
+    return [el for el in root if isinstance(el.tag, str)]
+
+
+def _strip_dangling_refs(name: str, data: bytes, dropped: set) -> bytes:
+    """뺀 부품을 가리키는 선언([Content_Types].xml)·관계(*.rels)를 걷어낸다.
+
+    calcChain.xml 을 빼는 것 자체는 맞다 — 값을 고치면 계산 순서 캐시는 무효가 되고,
+    Excel 이 다음에 열 때 다시 만든다. 빠져 있던 건 **참조 정리** 하나뿐이었다.
+    """
+    if not dropped:
+        return data
+    if name == "[Content_Types].xml":
+        want = "Override"
+
+        def hit(el):
+            return (el.get("PartName") or "").lstrip("/") in dropped
+    elif name.endswith(".rels"):
+        want = "Relationship"
+
+        def hit(el):
+            return _rel_target_part(name, el) in dropped
+    else:
+        return data
+
+    root = etree.fromstring(data)
+    gone = [el for el in _child_elements(root)
+            if etree.QName(el).localname == want and hit(el)]
+    if not gone:
+        return data
+    for el in gone:
+        root.remove(el)
+    return etree.tostring(root, xml_declaration=True, encoding="UTF-8",
+                          standalone=True)
+
+
+def _package_mismatches(path: str, limit: int = 5) -> list:
+    """패키지 안에 **없는 부품**을 가리키는 선언·관계를 찾는다.
+
+    값 대조로는 이걸 못 잡는다. 셀은 전부 맞는데 열 때마다 Excel 이 복구 창을 띄우는
+    파일이 실제로 사용자에게 나갔다 — 저장이 calcChain.xml 을 빼면서 그것을 가리키는
+    Content_Types Override 와 workbook 관계를 남겼기 때문이다. 값만 보는 검증은 그
+    파일을 그대로 통과시켰다. 그래서 여기서 **구조**를 본다.
+    """
+    bad = []
+    with zipfile.ZipFile(path) as zf:
+        names = set(zf.namelist())
+        try:
+            ct = zf.read("[Content_Types].xml")
+        except KeyError:
+            return ["[Content_Types].xml 이 없습니다 — 패키지가 깨졌습니다."]
+        for el in _child_elements(etree.fromstring(ct)):
+            if etree.QName(el).localname != "Override":
+                continue
+            part = (el.get("PartName") or "").lstrip("/")
+            if part and part not in names:
+                bad.append(f"[Content_Types].xml 이 없는 부품을 선언합니다: {part}")
+        for rels in sorted(n for n in names if n.endswith(".rels")):
+            for el in _child_elements(etree.fromstring(zf.read(rels))):
+                if etree.QName(el).localname != "Relationship":
+                    continue
+                part = _rel_target_part(rels, el)
+                if part and part not in names:
+                    bad.append(
+                        f"{rels} 의 {el.get('Id')} 가 없는 부품을 가리킵니다: {part}")
+    return bad[:limit]
+
+
 def _verify_saved(tmp_path: str, before, patches: dict, insert_rows=None,
                   delete_row_nums=None, delete_col_letters=None,
                   sheet_name=None) -> None:
@@ -278,9 +370,14 @@ def _verify_saved(tmp_path: str, before, patches: dict, insert_rows=None,
     읽기는 비교에 쓰는 로더 그대로라, 사용자가 다음에 열었을 때 보게 될 글자를 그대로
     본다(예전 _is_numeric 버그처럼 XML 은 멀쩡한데 값이 달라 보이는 경우까지 잡힌다).
 
-    두 단계로 본다.
+    세 단계로 본다.
+      0. **패키지 구조** — 없는 부품을 가리키는 선언·관계(_package_mismatches).
       1. 덮어쓴 셀 — 좌표를 짚어 주는 정밀 검사(_patch_mismatches).
       2. **시트 전체** — 기대 격자와 전수 대조(_grid_mismatches).
+
+    0 이 필요한 이유: 1·2 는 **값만** 본다. 그래서 셀은 전부 맞는데 Excel 이 열 때마다
+    복구 창을 띄우는 파일을 그대로 통과시켰다(실사용 신고 — calcChain.xml 을 빼면서
+    참조를 남겼다). 값이 맞다고 파일이 멀쩡한 건 아니다.
 
     2 가 필요한 이유: 1 은 **자기가 쓴 셀만** 본다. 그래서 '지웠어야 할 행이 빈 행으로
     살아남은' 경우(실사용 신고, v206)나 건드리지 않기로 한 셀이 바뀐 경우를 못 잡는다.
@@ -290,14 +387,16 @@ def _verify_saved(tmp_path: str, before, patches: dict, insert_rows=None,
     before 가 None 이면(원본을 못 읽었다) 2 는 건너뛴다 — 확인 수단이 없다고 멀쩡한
     저장을 막지는 않는다. 1 은 그대로 돈다.
     """
-    from .loaders import load_values_any     # 순환 import 방지 — 저장 시점에만 필요
-    after = load_values_any(tmp_path, sheet_name=sheet_name)
-    bad = _patch_mismatches(after, patches, delete_row_nums)
-    if not bad and before is not None:
-        bad = _grid_mismatches(
-            after,
-            _expected_after(before, patches, insert_rows,
-                            delete_row_nums, delete_col_letters))
+    bad = _package_mismatches(tmp_path)
+    if not bad:
+        from .loaders import load_values_any   # 순환 import 방지 — 저장 시점에만 필요
+        after = load_values_any(tmp_path, sheet_name=sheet_name)
+        bad = _patch_mismatches(after, patches, delete_row_nums)
+        if not bad and before is not None:
+            bad = _grid_mismatches(
+                after,
+                _expected_after(before, patches, insert_rows,
+                                delete_row_nums, delete_col_letters))
     if bad:
         raise ValueError(
             "저장 검증 실패 — 원본 파일을 그대로 두었습니다." + \
@@ -356,9 +455,13 @@ def _write_patches_to_file(
                 zin, sheet_path, src_path, src_sheet_name,
                 patch_style_src, insert_rows)
 
+            # 뺄 부품을 **먼저** 정한다 — 참조를 걷어내려면 쓰기 전에 알아야 한다.
+            # ([Content_Types].xml 은 보통 zip 맨 앞이라 calcChain 보다 먼저 지나간다.)
+            dropped = {n for n in zin.namelist() if n in _DROP_PARTS}
+
             for item in zin.infolist():
                 # calcChain.xml 항상 제거 — 수식 패치/삽입/삭제 모두 계산 체인을 무효화함
-                if item.filename == "xl/calcChain.xml":
+                if item.filename in dropped:
                     continue
                 data = zin.read(item.filename)
                 if item.filename == "xl/styles.xml" and new_styles_bytes is not None:
@@ -370,6 +473,8 @@ def _write_patches_to_file(
                         delete_col_letters or set(),
                         patch_styles,
                     )
+                # 뺀 부품을 가리키는 선언·관계를 걷어낸다 — 남기면 Excel 복구 창이 뜬다.
+                data = _strip_dangling_refs(item.filename, data, dropped)
                 zout.writestr(item, data)
         # 바꾸기 **전에** 확인한다 — 임시 파일을 비교와 같은 로더로 되읽어, 화면이
         # 약속한 결과 전체와 대조한다. 백업(.bak)은 만들지 않으므로(사용자 요청) 잘못 쓴
