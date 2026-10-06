@@ -112,35 +112,48 @@ def match_columns(a_data: list, b_data: list, key_row: int = 0) -> list | None:
     이름으로 맞추지 않는 경우(그대로 위치 기준):
       · 한쪽 파일이 비었거나 key_row 가 그 파일의 행 범위를 벗어난다.
       · 헤더에 빈 칸이 있다 — 이름이 없으면 맞출 수가 없다(꼬리의 빈 칸은 떼고 본다).
-      · 한 파일 안에서 헤더 이름이 중복된다 — 어느 쪽에 붙일지 정할 수 없다.
     이 판정은 **보수적**이다. 애매하면 지금 동작(위치 기준)을 유지한다.
+
+    **같은 이름이 여럿일 때.** 예전엔 이것도 포기 조건이었다. 그런데 실제 데이터에서
+    열 매칭이 꺼지는 79개 파일 중 **78개가 이 이유** 단 하나였다 — '#X' 는 바로 왼쪽 열의
+    주석 열이라 한 시트에 '#' 가 아홉 개씩 있다(57개 파일 '#', 26개 '#Desc').
+    그래서 **그 이름의 몇 번째냐** 로 구분한다 — A 의 n번째 '#' 는 B 의 n번째 '#' 와 맞춘다.
+
+    중복 이름 사이에 같은 이름이 **끼어들면** 그 오른쪽 착은 한 칸씩 밀려 짝이 틀린다
+    (A: #a #b / B: #a #새것 #b → A의 2번째가 B의 '#새것' 에 붙는다). 다만 위치 기준은 같은
+    어긋남을 저지르면서 **그 오른쪽의 멀줦한 열까지 전부** 밀린다. 더 나빠지지 않는다.
     """
     kr = key_row if (key_row and key_row > 0) else 0
     if not a_data or not b_data or kr >= len(a_data) or kr >= len(b_data):
         return None
 
-    def names(row):
+    def keys(row):
+        """그 헤더 행의 열 식별자 [(이름, 몇 번째), ...]. 맞출 수 없으면 None."""
         out = [str(v).strip() for v in (row or [])]
         while out and out[-1] == "":     # 꼬리의 빈 칸은 열이 아니다
             out.pop()
         if not out or "" in out:         # 가운데 빈 헤더 → 맞출 수 없다
             return None
-        if len(set(out)) != len(out):    # 같은 이름이 둘 → 어디에 붙일지 모른다
-            return None
-        return out
+        seen: dict = {}
+        tagged = []
+        for n in out:                    # 같은 이름은 나온 순서로 구분한다
+            i = seen.get(n, 0)
+            seen[n] = i + 1
+            tagged.append((n, i))
+        return tagged
 
-    a_names = names(a_data[kr])
-    b_names = names(b_data[kr])
-    if a_names is None or b_names is None:
+    a_keys = keys(a_data[kr])
+    b_keys = keys(b_data[kr])
+    if a_keys is None or b_keys is None:
         return None
 
-    a_index = {n: i for i, n in enumerate(a_names)}
-    b_index = {n: i for i, n in enumerate(b_names)}
+    a_index = {n: i for i, n in enumerate(a_keys)}
+    b_index = {n: i for i, n in enumerate(b_keys)}
 
     # B 전용 열을 어느 공통 열 앞에 끼울지 — compute_diff 의 신규 행 규칙과 같은 모양.
-    inserts: dict[str, list[str]] = {}
-    pending: list[str] = []
-    for n in b_names:
+    inserts: dict[tuple, list[tuple]] = {}
+    pending: list[tuple] = []
+    for n in b_keys:
         if n in a_index:
             if pending:
                 inserts.setdefault(n, []).extend(pending)
@@ -150,7 +163,7 @@ def match_columns(a_data: list, b_data: list, key_row: int = 0) -> list | None:
     tail = pending
 
     col_meta: list[tuple] = []
-    for i, n in enumerate(a_names):
+    for i, n in enumerate(a_keys):
         for bn in inserts.get(n, ()):
             col_meta.append((None, b_index[bn]))
         col_meta.append((i, b_index.get(n)))

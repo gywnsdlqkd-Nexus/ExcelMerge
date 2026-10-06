@@ -72,14 +72,66 @@ def test_trailing_blank_headers_are_not_columns():
 
 @pytest.mark.parametrize("a,b,why", [
     ([["ID", "", "VALUE"]], [["ID", "X", "VALUE"]], "가운데 빈 헤더"),
-    ([["ID", "NAME", "NAME"]], [["ID", "NAME", "X"]], "A 안에서 이름 중복"),
-    ([["ID", "NAME"]], [["ID", "NAME", "NAME"]], "B 안에서 이름 중복"),
     ([], [["ID"]], "A 가 비었다"),
     ([["ID"]], [], "B 가 비었다"),
     ([[]], [["ID"]], "헤더가 빈 행"),
 ])
 def test_unmatchable_returns_none(a, b, why):
     assert match_columns(a, b) is None, why
+
+
+# ── 같은 이름이 여럿일 때 — '몇 번째냐' 로 구분한다 ─────────────────────────
+# 예전엔 이것도 포기 조건이었다. 그런데 실제 데이터에서 열 매칭이 꺼지는 79개 파일 중
+# **78개가 이 이유** 하나였다 — '#X' 는 바로 왼쪽 열의 주석 열이라 한 시트에 '#' 가
+# 아홉 개씩 있다(57개 파일이 '#', 26개가 '#Desc'). 그래서 n번째끼리 맞춘다.
+
+def test_duplicate_names_pair_in_order():
+    a = [["UID", "#", "Count", "#"]]
+    b = [["UID", "#", "Count", "#"]]
+    assert match_columns(a, b) == [(0, 0), (1, 1), (2, 2), (3, 3)]
+
+
+def test_extra_duplicates_on_one_side_are_one_sided():
+    """40 빌드가 주석 열을 뒤에 더 붙인 모양(실측: Data_MiniGameRoulette_CS.xlsx).
+
+    위치 기준으로는 이 아홉 열에 59개 셀을 써 넣으려 했다 — 40 에만 있는 주석 열이다.
+    """
+    a = [["UID", "ItemID", "#ItemID", "Count"]]
+    b = [["UID", "ItemID", "#ItemID", "Count", "#", "#"]]
+    assert match_columns(a, b) == [(0, 0), (1, 1), (2, 2), (3, 3),
+                                   (None, 4), (None, 5)]
+
+
+def test_a_missing_duplicate_is_one_sided_too():
+    """반대쪽 — A 에만 있는 꼬리 주석 열(실측: Data_ShopGoodsRewardSelect_CS.xlsx).
+
+    위치 기준으로는 B 에 **없는 열**에 쓰려 해서 고스트 열이 생길 뻔했다.
+    """
+    a = [["UID", "#", "#", "#"]]
+    b = [["UID", "#", "#"]]
+    assert match_columns(a, b) == [(0, 0), (1, 1), (2, 2), (3, None)]
+
+
+def test_duplicates_do_not_disturb_a_real_insertion():
+    """중복 이름이 있어도 가운데 끼인 **다른** 열은 제대로 한쪽 전용으로 잡힌다."""
+    a = [["ID", "#", "NAME", "#"]]
+    b = [["ID", "#", "GRADE", "NAME", "#"]]
+    assert match_columns(a, b) == [(0, 0), (1, 1), (None, 2), (2, 3), (3, 4)]
+
+
+def test_a_duplicate_inserted_in_the_middle_mispairs_only_its_own_kind():
+    """같은 이름이 중간에 끼면 그 뒤의 같은 이름끼리 한 칸씩 밀려 짝이 틀린다.
+
+    숨기지 않고 한계를 적어 둔다. 다만 **이름이 있는 열은 전부 제자리를 찾고**,
+    틀리는 것은 주석 열끼리의 짝뿐이다. 위치 기준은 그 오른쪽의 멀쩡한 열까지 전부
+    밀린다 — 더 나빠지는 경우가 아니다.
+    """
+    a = [["ID", "X", "#", "Y", "#"]]
+    b = [["ID", "X", "#", "NEW", "#", "Y", "#"]]
+    cm = match_columns(a, b)
+    assert (0, 0) in cm and (1, 1) in cm, f"ID·X 가 제자리가 아니다: {cm}"
+    assert (3, 5) in cm, f"Y 가 B 의 5열을 못 찾았다(위치 기준이면 3열로 밀린다): {cm}"
+    assert (4, 4) in cm, f"한계 — A 의 2번째 '#' 는 B 의 2번째 '#' 에 붙는다: {cm}"
 
 
 def test_key_row_out_of_range_returns_none():
