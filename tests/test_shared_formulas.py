@@ -156,20 +156,40 @@ def test_deleting_the_master_row_promotes_too(book):
 
 def test_the_ref_follows_the_renumbered_rows(book):
     """행을 지우면 <c r> 은 당겨진다. ref 가 안 따라가면 주인이 자기 범위 밖이 된다 —
-    실기에서 Data_TextUITable_CS.xlsm 이 바로 이 상태였다."""
-    _save(book, delete_row_nums={2})
+    실기에서 Data_TextUITable_CS.xlsm 이 바로 이 상태였다.
+
+    1행(헤더)을 지운다. 주인 B3 은 B2 로 당겨지지만 그 참조(B2)는 지워지지 않아
+    그룹이 살아남는다 — ref 가 따라오는지만 깨끗하게 볼 수 있다.
+    """
+    _save(book, delete_row_nums={1})
     f = _formulas(book)
     own = next(r for r, (t, ref, _, _) in f.items() if t == "shared" and ref)
     assert own == "B2", f"주인이 B2 로 당겨져야 한다: {f}"
     assert _ref_in(own, f[own][1]), f"주인 {own} 이 자기 ref={f[own][1]} 밖이다"
 
 
-def test_the_master_body_is_not_rewritten_when_it_survives(book):
-    """주인이 살아 있으면 수식 본문은 건드리지 않는다 — 고칠 것은 ref 뿐이다."""
-    _save(book, delete_row_nums={2})
+def test_the_master_body_follows_the_renumbered_rows_too(book):
+    """ref 뿐 아니라 **수식 본문**도 따라가야 한다.
+
+    주인 B3 의 'B2+1' 은 1행이 사라지면 B2 를 가리킬 수 없다 — 그 셀이 B1 이 됐다.
+    본문을 그대로 두면 B2(=자기 자신)를 가리켜 순환 참조가 된다.
+    """
+    _save(book, delete_row_nums={1})
     f = _formulas(book)
     own = next(r for r, (t, ref, _, _) in f.items() if t == "shared" and ref)
-    assert f[own][3] == "B2+1", f
+    assert f[own][3] == "B1+1", f"본문이 안 따라왔다: {f}"
+
+
+def test_a_master_pointing_at_a_deleted_row_becomes_ref_error(book):
+    """지워진 행을 가리키면 #REF! — 엑셀이 하는 그대로다.
+
+    주인 B3 의 'B2+1' 에서 2행을 지우면 가리킬 셀이 없어진다. 그룹은 더 못 쓰므로
+    각 칸이 제 수식을 갖게 되고(엑셀도 깨진 칸을 떼어낸다), 값은 그대로 남는다.
+    """
+    _save(book, delete_row_nums={2})
+    f = _formulas(book)
+    assert any("#REF!" in body for *_x, body in f.values()), f
+    assert _formula_mismatches(str(book)) == []
 
 
 # ── 4. 혼자 남으면 공유할 이유가 없다 ───────────────────────────────────────

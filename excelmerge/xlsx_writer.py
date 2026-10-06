@@ -1,4 +1,5 @@
 """xlsx 저장 — sheet XML 직접 패치로 수식 보존 기록 (excel_diff_merge.py에서 분리)."""
+import bisect
 import os
 import posixpath
 import re
@@ -418,9 +419,61 @@ def _formula_mismatches(path: str, limit: int = 5) -> list:
     return bad[:limit]
 
 
+def _self_referencing(path: str, self_sheet=None) -> set:
+    """자기 셀을 가리키는 수식이 든 셀들 — 순환 참조.
+
+    본문이 있는 수식(주인·일반)만 본다. 추종자는 본문이 없어 주인에서 유도해야 하는데,
+    그 유도까지 돌리면 큰 시트에서 저장이 눈에 띄게 느려진다. 신고된 사고
+    ('B3: =B2+1' 이 행 삭제로 B2 로 당겨져 '=B2+1' 순환)는 일반 수식이라 여기에 걸린다.
+
+    판정은 **자기 셀**을 품는 참조가 있는가다. 자기 '행' 으로 보면 안 된다 — 같은 행의
+    옆 칸을 쓰는 수식('UITable.'&A36 이 D36 에 있는 꼴)이 실제 데이터에 흔해서, 그렇게
+    보면 멀쩡한 저장이 줄줄이 막힌다(실측으로 걸렀다).
+    """
+    out = set()
+    with zipfile.ZipFile(path) as zf:
+        for sp in sorted(n for n in zf.namelist()
+                         if n.startswith("xl/worksheets/") and n.endswith(".xml")):
+            sd = etree.fromstring(zf.read(sp)).find(_TAG_SHEETDATA)
+            if sd is None:
+                continue
+            for c_el in sd.iter(_TAG_C):
+                f_el = c_el.find(_TAG_F)
+                if f_el is None:
+                    continue
+                body = (f_el.text or "").strip()
+                own = c_el.get("r", "")
+                if not body or _ref_parts(own) is None:
+                    continue
+                if any(tok[0] == "ref"
+                       and _prefix_targets_self(tok[1], self_sheet)
+                       and _ref_covers(tok[2], own)
+                       for tok in _formula_tokens(body)):
+                    out.add(f"{sp}!{own}")
+    return out
+
+
+def _new_circular_formulas(before_path, after_path, self_sheet, limit: int = 5) -> list:
+    """저장 전엔 없던 순환 참조가 생겼나.
+
+    행을 지우면 엑셀은 수식도 함께 고쳐 준다. 우리가 그걸 빠뜨리면 'B3: =B2+1' 이
+    B2 로 당겨지며 자기 자신을 가리키게 된다 — 값 대조로는 안 잡힌다(캐시 값은 그대로다).
+
+    **이미 있던** 순환은 건드리지 않는다. 성한 파일만 들어온다고 가정하면 안 된다 —
+    실제 데이터에도 과거 편집이 남긴 #REF! 가 7천 셀 넘게 들어 있다.
+    """
+    try:
+        before = _self_referencing(before_path, self_sheet)
+    except Exception:
+        log.warning("저장 전 순환 참조를 읽지 못해 검사를 건너뜁니다", exc_info=True)
+        return []
+    fresh = sorted(_self_referencing(after_path, self_sheet) - before)
+    return [f"{ref} 의 수식이 자기 셀을 가리킵니다(순환 참조)" for ref in fresh[:limit]]
+
+
 def _verify_saved(tmp_path: str, before, patches: dict, insert_rows=None,
                   delete_row_nums=None, delete_col_letters=None,
-                  sheet_name=None) -> None:
+                  sheet_name=None, base_path=None, self_sheet=None) -> None:
     """갓 쓴 임시 파일을 되읽어 **화면이 약속한 결과 전체**와 대조. 다르면 예외.
 
     '쓰고 나서 확인'이 아니라 **'확인하고 나서 바꾼다'** — 원본을 교체하기 전에 본다.
@@ -446,6 +499,8 @@ def _verify_saved(tmp_path: str, before, patches: dict, insert_rows=None,
     저장을 막지는 않는다. 1 은 그대로 돈다.
     """
     bad = _package_mismatches(tmp_path) or _formula_mismatches(tmp_path)
+    if not bad and delete_row_nums and base_path:
+        bad = _new_circular_formulas(base_path, tmp_path, self_sheet)
     if not bad:
         from .loaders import load_values_any   # 순환 import 방지 — 저장 시점에만 필요
         after = load_values_any(tmp_path, sheet_name=sheet_name)
@@ -508,6 +563,12 @@ def _write_patches_to_file(
             if sheet_path not in zin.namelist():
                 raise ValueError(f"워크시트를 찾을 수 없습니다: {sheet_path}")
 
+            # 시트 이름은 **루프 밖에서** 한 번만 읽는다. 아래 루프 안에서 읽으면
+            # zipfile 이 'Bad magic number for file header' 로 깨진다(멤버를 훑는
+            # 도중에 다른 멤버를 읽는 탓). 조용히 None 이 되어 자기 시트를 이름으로
+            # 가리키는 수식이 통째로 안 고쳐졌다 — 정답지 대조로 잡았다.
+            self_sheet = _sheet_name_for_path(zin, sheet_path)
+
             # 서식 병합 pre-pass — 실패해도 값 병합은 그대로 진행 (내부 try/except).
             patch_styles, new_styles_bytes, insert_rows = _prepare_style_merge(
                 zin, sheet_path, src_path, src_sheet_name,
@@ -530,6 +591,7 @@ def _write_patches_to_file(
                         insert_rows or [], delete_row_nums or set(),
                         delete_col_letters or set(),
                         patch_styles,
+                        self_sheet,
                     )
                 # 뺀 부품을 가리키는 선언·관계를 걷어낸다 — 남기면 Excel 복구 창이 뜬다.
                 data = _strip_dangling_refs(item.filename, data, dropped)
@@ -540,7 +602,7 @@ def _write_patches_to_file(
         # 원본은 손대지 않는다.
         _verify_saved(tmp, _before_values(path_base, sheet_name), patches,
                       insert_rows, delete_row_nums, delete_col_letters,
-                      sheet_name)
+                      sheet_name, path_base, self_sheet)
         # 임시 파일을 원자적으로 교체(백업 .bak 은 만들지 않음 — 사용자 요청으로 제거).
         os.replace(tmp, path_base)
     except Exception:
@@ -927,6 +989,295 @@ def _set_cell_value(c_el, new_val: str):
         v_el.text = new_val
 
 
+# 수식 안의 셀 참조를 알아보기 위한 조각들.
+#   접두  : [1]Sheet!  /  'My Sheet'!  /  Sheet1!     (외부 통합문서·시트 지정)
+#   A1    : B9  $B$9  B$9  $B9
+#   행참조: 9:9  $9:$9                                 (행 전체)
+# 시트 이름은 ASCII 가 아닐 수 있다 — [^\W\d] 는 '숫자가 아닌 낱말 글자'(유니코드
+# 글자·밑줄)다. 이게 [A-Za-z_] 였을 때 [7]메뉴얼!$L$8:$M$15 를 외부 참조로 못 알아보고
+# 그 범위를 조정해 버렸다(정답지 대조에서 잡힘).
+_F_PREFIX = r"(?:\[[^\]]*\])?(?:'(?:[^']|'')*'|[^\W\d][\w.]*)[ ]*!"
+_F_A1 = r"\$?[A-Za-z]{1,3}\$?\d+"
+_F_ROW = r"\$?\d+"
+_F_TOKEN = re.compile(
+    rf"(?P<prefix>{_F_PREFIX})?"
+    rf"(?P<ref>{_F_A1}:{_F_A1}|{_F_A1}|{_F_ROW}:{_F_ROW})")
+_F_A1_PARTS = re.compile(r"^(\$?)([A-Za-z]{1,3})(\$?)(\d+)$")
+_F_ROW_PARTS = re.compile(r"^(\$?)(\d+)$")
+REF_ERROR = "#REF!"
+
+
+def _sheet_name_for_path(zin, sheet_path: str):
+    """그 워크시트 XML 경로의 **시트 이름**. 못 찾으면 None.
+
+    수식이 자기 시트를 이름으로 가리키는 경우가 있다(실측: 18개 파일 85,429건,
+    `VLOOKUP(E2,TextUITable!$D:$E,2,0)` 같은 꼴). 그런 참조도 행 삭제 때 조정돼야
+    하므로, 지금 고치는 시트가 어떤 이름인지 알아야 한다.
+    """
+    try:
+        # Target 은 상대('worksheets/sheet1.xml')일 수도 절대('/xl/worksheets/...')일
+        # 수도 있다 — 엑셀은 상대, openpyxl 은 절대로 쓴다. 둘 다 풀어 주는 기존
+        # 헬퍼를 그대로 쓴다.
+        rp = "xl/_rels/workbook.xml.rels"
+        rels = {r.get("Id"): _rel_target_part(rp, r)
+                for r in etree.fromstring(zin.read(rp))
+                if isinstance(r.tag, str) and r.tag.endswith("Relationship")}
+        for sh in etree.fromstring(zin.read("xl/workbook.xml")).iter(f"{{{_NS}}}sheet"):
+            rid = next((v for k, v in sh.attrib.items() if k.endswith("}id")), None)
+            if rels.get(rid) == sheet_path:
+                return sh.get("name")
+    except Exception:
+        log.warning("시트 이름을 찾지 못했습니다: %s", sheet_path, exc_info=True)
+    return None
+
+
+def _shift_row_num(row: int, deleted_sorted: list, deleted_set: set):
+    """삭제 뒤 그 행의 새 번호. 그 행이 지워졌으면 None."""
+    if row in deleted_set:
+        return None
+    return row - bisect.bisect_left(deleted_sorted, row)
+
+
+def _shift_span(r1: int, r2: int, deleted_sorted: list, deleted_set: set):
+    """범위 [r1, r2] 의 삭제 뒤 범위. 하나도 안 남으면 None.
+
+    **끝점에 규칙을 적용하는 게 아니다.** 양 끝이 모두 지워져도 가운데가 남으면 범위는
+    살아 있다(실측: D={5,8} 일 때 B5:B8 → B5:B6 — 남은 6,7 이 새 5,6 이 된다).
+    """
+    lo, hi = (r1, r2) if r1 <= r2 else (r2, r1)
+    while lo <= hi and lo in deleted_set:
+        lo += 1
+    while hi >= lo and hi in deleted_set:
+        hi -= 1
+    if lo > hi:
+        return None
+    return (_shift_row_num(lo, deleted_sorted, deleted_set),
+            _shift_row_num(hi, deleted_sorted, deleted_set))
+
+
+def _prefix_targets_self(prefix: str, self_sheet) -> bool:
+    """그 접두가 **지금 고치는 시트**를 가리키나.
+
+    외부 통합문서([1]X! 꼴)는 행을 지워도 바뀌지 않는다 — 다른 파일이니까. 같은 파일의
+    다른 시트도 마찬가지다. 자기 시트를 이름으로 쓴 것만 조정 대상이다.
+    """
+    if prefix is None:
+        return True                         # 이름 없음 = 자기 시트
+    if "[" in prefix:
+        return False                        # 외부 통합문서
+    name = prefix.rstrip().rstrip("!").rstrip()
+    if name.startswith("'") and name.endswith("'"):
+        name = name[1:-1].replace("''", "'")
+    return bool(self_sheet) and name == self_sheet
+
+
+def _rewrite_one_ref(ref: str, deleted_sorted: list, deleted_set: set):
+    """A1/범위/행참조 하나를 다시 쓴다. 통째로 사라지면 None."""
+    if ":" in ref:
+        a, b = ref.split(":", 1)
+        ma, mb = _F_A1_PARTS.match(a), _F_A1_PARTS.match(b)
+        if ma and mb:
+            span = _shift_span(int(ma.group(4)), int(mb.group(4)),
+                               deleted_sorted, deleted_set)
+            if span is None:
+                return None
+            return (f"{ma.group(1)}{ma.group(2)}{ma.group(3)}{span[0]}:"
+                    f"{mb.group(1)}{mb.group(2)}{mb.group(3)}{span[1]}")
+        ra, rb = _F_ROW_PARTS.match(a), _F_ROW_PARTS.match(b)
+        if ra and rb:
+            span = _shift_span(int(ra.group(2)), int(rb.group(2)),
+                               deleted_sorted, deleted_set)
+            if span is None:
+                return None
+            return f"{ra.group(1)}{span[0]}:{rb.group(1)}{span[1]}"
+        return ref
+    m = _F_A1_PARTS.match(ref)
+    if not m:
+        return ref
+    new = _shift_row_num(int(m.group(4)), deleted_sorted, deleted_set)
+    if new is None:
+        return None
+    return f"{m.group(1)}{m.group(2)}{m.group(3)}{new}"
+
+
+def _rewrite_formula_rows(formula: str, deleted, self_sheet=None) -> str:
+    """행을 지운 뒤의 수식 본문. 엑셀이 행 삭제 때 하는 일을 그대로 한다.
+
+    규칙은 추측이 아니라 **엑셀에게 물어서** 정했다(탐침 시트 52개 사례).
+
+      · 지워진 행을 가리키면 그 **참조 토큰 전체**가 #REF! 가 된다. 시트 접두는 남는다
+        (Sheet1!B5 → Sheet1!#REF!).
+      · 그 외에는 자기보다 위에서 지워진 행 수만큼 당긴다. 절대 표시($)는 유지되지만
+        행 번호는 **절대여도 조정된다**($B$9 → $B$7).
+      · 범위는 끝점이 아니라 **살아남은 행**으로 다시 잡는다(_shift_span 참조).
+      · 문자열 리터럴 안의 좌표, 다른 시트·외부 통합문서 참조, 열 전체 범위($A:$W),
+        ROW() 류는 건드리지 않는다.
+    """
+    if not formula or not deleted:
+        return formula
+    deleted_set = set(deleted)
+    deleted_sorted = sorted(deleted_set)
+    out = []
+    for tok in _formula_tokens(formula):
+        if tok[0] == "text":
+            out.append(tok[1])
+            continue
+        _k, prefix, ref = tok
+        if _prefix_targets_self(prefix, self_sheet):
+            new = _rewrite_one_ref(ref, deleted_sorted, deleted_set)
+            ref = REF_ERROR if new is None else new
+        out.append((prefix or "") + ref)
+    return "".join(out)
+
+
+def _formula_tokens(formula: str):
+    """수식을 (종류, 조각) 으로 훑는다 — ('text', 글자들) 또는 ('ref', 접두, 참조).
+
+    재작성과 순환 검사가 **같은 눈**으로 봐야 한다. 둘이 따로 훑으면 한쪽만 고쳐져
+    어긋난다(실제로 순환 검사를 따로 짰다가 '자기 행'과 '자기 셀'을 혼동했다).
+    문자열 리터럴은 통째로 'text' 로 넘긴다 — 그 안의 좌표는 참조가 아니다.
+    """
+    i, n = 0, len(formula or "")
+    buf = []
+    while i < n:
+        ch = formula[i]
+        if ch == '"':
+            j = i + 1
+            while j < n:
+                if formula[j] == '"':
+                    if j + 1 < n and formula[j + 1] == '"':
+                        j += 2
+                        continue
+                    j += 1
+                    break
+                j += 1
+            buf.append(formula[i:j])
+            i = j
+            continue
+        if i == 0 or not (formula[i - 1].isalnum() or formula[i - 1] in "_.$!"):
+            m = _F_TOKEN.match(formula, i)
+            if m:
+                if buf:
+                    yield ("text", "".join(buf))
+                    buf = []
+                yield ("ref", m.group("prefix"), m.group("ref"))
+                i = m.end()
+                continue
+        buf.append(ch)
+        i += 1
+    if buf:
+        yield ("text", "".join(buf))
+
+
+def _ref_covers(ref: str, cell: str) -> bool:
+    """그 참조가 cell 을 품는가 — 단일 셀·범위·행 전체 모두."""
+    p = _ref_parts(cell)
+    if p is None:
+        return False
+    col, row = column_index_from_string(p[0]), p[1]
+    parts = ref.split(":")
+    a, b = _F_A1_PARTS.match(parts[0]), _F_A1_PARTS.match(parts[-1])
+    if a and b:
+        c1, c2 = (column_index_from_string(a.group(2)),
+                  column_index_from_string(b.group(2)))
+        r1, r2 = int(a.group(4)), int(b.group(4))
+        return (min(c1, c2) <= col <= max(c1, c2)
+                and min(r1, r2) <= row <= max(r1, r2))
+    ra, rb = _F_ROW_PARTS.match(parts[0]), _F_ROW_PARTS.match(parts[-1])
+    if ra and rb:                            # 행 전체 참조 — 열은 가리지 않는다
+        r1, r2 = int(ra.group(2)), int(rb.group(2))
+        return min(r1, r2) <= row <= max(r1, r2)
+    return False
+
+
+def _has_self_row_ref(formula: str, self_sheet=None) -> bool:
+    """그 수식이 **자기 시트의 행**을 가리키나 — 행 삭제에 영향을 받는지의 기준.
+
+    ROW()-1, 외부 통합문서 참조([1]X!$D:$E), 열 전체 범위($A:$W) 뿐인 수식은 행을
+    지워도 그대로다. 실제 데이터의 큰 그룹들이 여기 해당해서(TextUITable 의 ROW()-1 은
+    추종자가 5천 개가 넘는다) 먼저 걸러 내면 쓸데없는 일을 크게 줄인다.
+    """
+    if not formula:
+        return False
+    probe = {1, 2}
+    return _rewrite_formula_rows(formula, probe, self_sheet) != formula
+
+
+def _translate(formula: str, origin: str, dest: str) -> str:
+    """공유 수식 본문을 origin 자리에서 dest 자리로 옮겨 쓴다. 실패하면 None."""
+    try:
+        from openpyxl.formula.translate import Translator
+        out = Translator("=" + formula, origin=origin).translate_formula(dest)
+    except Exception:
+        return None
+    return out[1:] if out.startswith("=") else out
+
+
+def _rewrite_rows_in_formulas(sheetdata, deleted, self_sheet, orig_of) -> None:
+    """행을 지운 뒤 수식 본문의 셀 참조를 다시 쓴다. _renumber_after_delete **뒤에**.
+
+    엑셀은 행을 지우면 수식도 함께 고쳐 준다. 우리는 좌표(<c r>)만 당기고 본문은
+    그대로 뒀다 — 그래서 'B3: =B2+1' 이 B2 로 당겨지면 '=B2+1' 그대로라 **순환 참조**가
+    됐다. 실측으로 범위를 재 보니 367쌍 중 6개 파일·935셀이 이렇게 틀어진다.
+
+    공유 수식은 엑셀이 하는 대로 한다 — **그룹은 유지하되 깨진 셀만 떼어낸다.**
+    추종자는 주인에서 자기 자리에 맞게 유도되므로 대부분 저절로 맞는다. 유도 결과가
+    정답과 다른 칸(보통 지워진 행을 직접 가리키던 한 칸)만 일반 수식으로 분리한다.
+    """
+    if not deleted:
+        return
+    new_of = {}
+    groups = {}
+    for row_el in sheetdata:
+        for c_el in row_el:
+            f_el = c_el.find(_TAG_F)
+            if f_el is None:
+                continue
+            new_of[c_el] = c_el.get("r", "")
+            if f_el.get("t") == "shared" and f_el.get("si"):
+                groups.setdefault(f_el.get("si"), []).append(c_el)
+
+    done = set()
+    for si, cells in groups.items():
+        master = next((c for c in cells if c.find(_TAG_F).get("ref")), None)
+        if master is None:
+            continue                         # _repair_shared_formulas 가 처리한다
+        body = (master.find(_TAG_F).text or "").strip()
+        m_orig, m_new = orig_of.get(master, new_of[master]), new_of[master]
+        if not _has_self_row_ref(body, self_sheet):
+            done.update(cells)               # 자리에 무관한 식(ROW() 등) — 손댈 것 없다
+            continue
+        new_body = _rewrite_formula_rows(body, deleted, self_sheet)
+        master.find(_TAG_F).text = new_body
+        done.add(master)
+        for c_el in cells:
+            if c_el is master:
+                continue
+            f_orig = _translate(body, m_orig, orig_of.get(c_el, new_of[c_el]))
+            want = (_rewrite_formula_rows(f_orig, deleted, self_sheet)
+                    if f_orig is not None else None)
+            derived = _translate(new_body, m_new, new_of[c_el])
+            if want is not None and derived is not None and want != derived:
+                f_el = c_el.find(_TAG_F)     # 유도로는 못 맞춘다 — 떼어낸다
+                f_el.attrib.pop("t", None)
+                f_el.attrib.pop("si", None)
+                f_el.attrib.pop("ref", None)
+                f_el.text = want
+            done.add(c_el)
+
+    for c_el, _ref in new_of.items():
+        if c_el in done:
+            continue
+        f_el = c_el.find(_TAG_F)
+        if f_el is None:
+            continue
+        if f_el.get("t") == "shared" and not f_el.get("ref"):
+            continue                         # 추종자는 본문이 없다
+        body = (f_el.text or "").strip()
+        if body:
+            f_el.text = _rewrite_formula_rows(body, deleted, self_sheet)
+
+
 def _ref_parts(ref: str):
     """'B12' → ('B', 12). 좌표 형식이 아니면 None."""
     m = _COL_RE.match(ref or "")
@@ -1232,6 +1583,7 @@ def _patch_sheet_xml(
     delete_row_nums: set[int] | None = None,
     delete_col_letters: set[str] | None = None,
     patch_styles: dict[str, int] | None = None,
+    self_sheet: str | None = None,
 ) -> bytes:
     """sheet XML 을 직접 패치. 5개 단계를 순서대로 위임한다(각 단계는 별도 헬퍼).
 
@@ -1240,6 +1592,7 @@ def _patch_sheet_xml(
     delete_row_nums    : {1-based row number}        해당 <row> 요소 자체 삭제
     delete_col_letters : {'A', 'B', ...}             해당 열의 모든 <c> 삭제
     patch_styles       : {cell_ref: style_index}     병합할 소스 서식 인덱스 (덮어쓰기 셀)
+    self_sheet         : 이 시트의 이름 — 수식이 자기 시트를 이름으로 가리킬 때 필요
     """
     insert_rows = insert_rows or []
     delete_row_nums = delete_row_nums or set()
@@ -1260,6 +1613,11 @@ def _patch_sheet_xml(
     _delete_columns(sheetdata, delete_col_letters)
     _renumber_after_delete(sheetdata, deleted)
     # 좌표가 다 정해진 뒤에 고친다 — ref 는 **당긴 뒤** 좌표로 써야 한다.
+    # 구조를 먼저 되돌린다 — 주인이 지워진 그룹은 여기서 본문이 되살아나고, 그
+    # 되살린 본문도 행 삭제에 맞춰 다시 써야 한다(반대 순서면 그 그룹만 옛 참조로 남는다).
     _repair_shared_formulas(sheetdata, shared)
+    _rewrite_rows_in_formulas(
+        sheetdata, deleted, self_sheet,
+        {c: o for g in shared.values() for c, o in g["cells"]})
 
     return etree.tostring(tree, xml_declaration=True, encoding="UTF-8", standalone=True)
