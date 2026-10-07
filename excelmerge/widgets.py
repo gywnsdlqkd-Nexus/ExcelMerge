@@ -14,7 +14,7 @@ from PyQt5.QtCore import (
 )
 from PyQt5.QtGui import (
     QPainter, QPalette, QTextCursor, QTextCharFormat, QTextDocument, QTextOption,
-    QIcon, QPixmap, QFont, QPen, QColor,
+    QIcon, QPixmap, QFont, QPen, QColor, QKeySequence,
 )
 from PyQt5 import sip
 from .colref import get_column_letter
@@ -2897,6 +2897,23 @@ class CellEditWidget(QPlainTextEdit):
         self.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
         self.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         self.setReadOnly(True)   # 값 확인·복사 전용
+
+    def event(self, ev):
+        """고른 글자가 있으면 Ctrl+C 를 이 위젯이 가져간다.
+
+        Qt 는 텍스트 위젯이 **편집 가능할 때만** Ctrl+C 에 ShortcutOverride 를
+        돌려준다(QWidgetTextControl 은 Qt::TextEditable 일 때만 받아들인다). 이 위젯은
+        읽기전용이라 그 길이 막혔고, 패널에 걸린 Ctrl+C 단축키가 먼저 먹었다 — 값을
+        골라 놓고 눌러도 **파일 경로**가 복사됐다. 키가 닿기만 하면 복사 자체는 멀쩡하다.
+
+        고른 게 있을 때만 가로챈다 — 아무것도 안 골랐으면 예전처럼 패널이 경로를 복사한다.
+        """
+        if (ev.type() == QEvent.ShortcutOverride
+                and ev.matches(QKeySequence.Copy)
+                and self.textCursor().hasSelection()):
+            ev.accept()
+            return True
+        return super().event(ev)
 
     def sizeHint(self):
         return QSize(super().sizeHint().width(), getattr(self, "_base_height", 48))

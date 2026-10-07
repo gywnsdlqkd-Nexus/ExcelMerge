@@ -9,6 +9,7 @@
 """
 import pytest
 from PyQt5.QtCore import Qt
+from PyQt5.QtGui import QTextCursor
 from PyQt5.QtTest import QTest
 from PyQt5.QtWidgets import QApplication
 
@@ -228,6 +229,86 @@ def test_text_widgets_keep_their_own_copy(dv):
     panel.path_edit.setSelection(0, 3)
     _press_copy(panel.path_edit)
     assert _clip() == "ABC"
+
+
+# ── 셀값란에서 고른 글자 ──────────────────────────────────────────────────────
+
+def _pick_in_cell_box(panel, start, length):
+    """셀값란에서 [start, start+length) 글자를 고른다(length=0 이면 고른 것 없음)."""
+    ce = panel.cell_edit
+    cur = ce.textCursor()
+    cur.setPosition(start)
+    cur.setPosition(start + length, QTextCursor.KeepAnchor)
+    ce.setTextCursor(cur)
+    QApplication.instance().processEvents()
+    return ce
+
+
+@pytest.mark.parametrize("side", ["a", "b"])
+def test_cell_box_copies_what_is_selected_there(dv, side):
+    """셀값란에서 고른 글자가 복사돼야 한다 — 예전엔 **파일 경로**가 복사됐다.
+
+    읽기전용 QPlainTextEdit 에는 Qt 가 Ctrl+C 의 ShortcutOverride 를 돌려주지 않는다
+    (QWidgetTextControl 은 Qt::TextEditable 일 때만 받아들인다). 그래서 패널에 걸린
+    Ctrl+C 단축키가 먼저 먹고, 값을 골라 놔도 경로가 복사됐다. 실제 키로 눌러야
+    이 경로를 탄다 — copy() 를 직접 부르면 그 버그를 영영 못 잡는다.
+    """
+    panel = dv.panels[side]
+    r = _body_rows(dv, 1)[0]
+    _select(dv, r, 4, r, 4, side)
+    full = panel.table.model().display_text(r, 4)
+    assert panel.cell_edit.toPlainText() == full, "전제: 셀값란에 값이 떠 있어야 한다"
+    assert len(full) >= 4, f"전제: 일부만 고를 만큼 길어야 한다 ({full!r})"
+
+    ce = _pick_in_cell_box(panel, 1, 3)
+    QApplication.instance().clipboard().setText("<이전 값>")
+    _press_copy(ce)
+    assert _clip() == full[1:4]
+    assert _clip() != panel.path_edit.text(), "경로가 복사됐다 — 회귀"
+
+
+def test_cell_box_copies_the_whole_value_when_all_of_it_is_selected(dv):
+    panel = dv.panel_a
+    r = _body_rows(dv, 1)[0]
+    _select(dv, r, 4, r, 4)
+    full = panel.table.model().display_text(r, 4)
+    _press_copy(_pick_in_cell_box(panel, 0, len(full)))
+    assert _clip() == full
+
+
+def test_cell_box_copies_the_value_verbatim_not_tsv_quoted(dv):
+    """셀값란은 '보이는 글자 그대로' 다 — 탭이 들어 있어도 따옴표로 감싸지 않는다.
+
+    표 복사(TSV)와 다른 규칙이다. 표는 칸을 가르지 않으려고 감싸지만, 여기서 고른 건
+    글자 그 자체라 가공하면 안 된다.
+    """
+    panel = dv.panel_a
+    raw = "탭	포함"
+    assert panel.table.model().display_text(2, 6) == raw, "전제: 이 칸에 탭이 심겨 있다"
+    _select(dv, 2, 6, 2, 6)
+    _press_copy(_pick_in_cell_box(panel, 0, len(raw)))
+    assert _clip() == raw
+
+
+def test_cell_box_without_a_selection_still_copies_the_path(dv):
+    """아무것도 안 골랐으면 예전 동작(경로 복사)이 그대로 남아야 한다."""
+    panel = dv.panel_a
+    r = _body_rows(dv, 1)[0]
+    _select(dv, r, 4, r, 4)
+    ce = _pick_in_cell_box(panel, 2, 0)
+    assert not ce.textCursor().hasSelection(), "전제: 고른 게 없어야 한다"
+    _press_copy(ce)
+    assert _clip() == panel.path_edit.text()
+
+
+def test_table_copy_still_works_after_the_cell_box_claims_ctrl_c(dv):
+    """셀값란이 Ctrl+C 를 가져가도 표 복사는 그대로여야 한다 — 포커스가 가른다."""
+    panel = dv.panel_a
+    r = _body_rows(dv, 1)[0]
+    tbl = _select(dv, r, 4, r, 4)
+    _pick_in_cell_box(panel, 0, 4)      # 셀값란에도 고른 글자를 남겨 둔다
+    _press_copy(tbl)                    # 그래도 포커스는 표
+    assert _clip() == tbl.model().display_text(r, 4)
 
 
 # ── 상태바 피드백 ─────────────────────────────────────────────────────────────

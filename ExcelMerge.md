@@ -76,6 +76,9 @@ main_window·folder_compare·folder_view·workers·xlsx_writer·theme·uasset_pa
   (display 행은 재정렬될 수 있어 원본 파일 행 번호로 지정된다.)
 - 셀 값 표시란(읽기전용) — 선택 셀의 **값** 표시(수식 셀도 계산값). 기본 4줄, 스플리터로 조절(A/B 동기).
   A/B 다르면 다른 구간 강조.
+- 복사(Ctrl+C) — **포커스가 가른다.** 표에서는 선택 영역을 TSV(칸=탭, 행=CRLF)로, 셀값란·경로칸
+  에서는 고른 글자만. 셀값란은 읽기전용이라 Qt 가 Ctrl+C 를 안 넘겨줘 `CellEditWidget.event`
+  가 직접 가로챈다(고른 게 없으면 경로 복사로 내려간다).
 - 양쪽 스크롤·선택 셀 동기화. 상태바에 비교 결과(행·열·변경 셀 수) 표시.
 
 ## 찾기
