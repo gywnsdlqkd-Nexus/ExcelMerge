@@ -133,6 +133,10 @@ class DiffView(QWidget):
         find_sc = QShortcut(QKeySequence("Ctrl+F"), self)
         find_sc.setContext(Qt.WidgetWithChildrenShortcut)
         find_sc.activated.connect(self._focus_find)
+        # Ctrl+S — 병합 준비된 쪽을 저장(패널의 "저장" 버튼과 같은 동작)
+        save_sc = QShortcut(QKeySequence("Ctrl+S"), self)
+        save_sc.setContext(Qt.WidgetWithChildrenShortcut)
+        save_sc.activated.connect(self._on_save_shortcut)
 
     def _build_ui(self):
         root = QVBoxLayout(self)
@@ -1477,6 +1481,31 @@ class DiffView(QWidget):
 
     # ── 저장 ─────────────────────────────────────────────────────────────────
 
+    def _on_save_shortcut(self):
+        """Ctrl+S — 병합 준비된 쪽을 저장한다(그 패널의 "저장"을 누른 것과 같다).
+
+        어느 쪽을 쓸지는 **준비된 셀의 방향**이 정한다. B→A 로 준비했으면 A 파일,
+        A→B 로 준비했으면 B 파일이다.
+
+        양쪽에 다 준비가 걸려 있으면 **아무 쪽도 쓰지 않는다.** 어느 파일을 바꿀지는
+        단축키가 임의로 정할 일이 아니고, 둘 다 쓰면 한 번의 Ctrl+S 가 파일 두 개를
+        건드린다. 대신 어떻게 해야 하는지 상태바로 알린다.
+
+        실제 저장은 _save_staged 가 한다 — 경로 없음·비엑셀·쓰기 불가 안내가 모두
+        거기 있다. 여기서 미리 걸러 내면 그 안내가 조용히 사라진다(비엑셀 파일에
+        준비해 두고 Ctrl+S 를 누르면 아무 일도 안 일어나는 것처럼 보인다).
+        """
+        if self._staged_merge_worker is not None and self._staged_merge_worker.isRunning():
+            return                      # 이미 저장 중 — 두 번째 워커를 띄우지 않는다
+        sides = self._sides_with_staged()
+        if not sides:
+            return                      # 준비된 셀 없음 — 버튼도 꺼져 있다
+        if len(sides) == 2:
+            self.status.showMessage(
+                "A·B 양쪽에 병합 준비가 있습니다 — 저장할 쪽의 '저장' 버튼을 눌러 주세요.")
+            return
+        self._save_staged(sides[0])
+
     def _save_staged(self, side: str):
         """side: 'a' 또는 'b' — 해당 파일만 저장. 병합 준비(staged)된 셀만 기록한다."""
         path = self.panels[side].get_path()
@@ -1783,10 +1812,22 @@ class DiffView(QWidget):
     def _count_changed(self) -> int:
         return count_changed_masked(self._row_masks_checked(), self._keep_mask())
 
+    def _sides_with_staged(self) -> list:
+        """병합 준비된 셀이 **쓰일 파일** 쪽 목록. b_to_a → A 파일, a_to_b → B 파일.
+
+        저장 버튼의 활성 상태와 Ctrl+S 가 같은 판정을 봐야 한다 — 따로 계산하면
+        버튼은 꺼져 있는데 단축키는 저장하는(또는 그 반대) 어긋남이 생긴다.
+        """
+        out = []
+        if any(v == DIR_B2A for v in self._staged.values()):
+            out.append("a")
+        if any(v == DIR_A2B for v in self._staged.values()):
+            out.append("b")
+        return out
+
     def _set_save_btn_state(self, enabled: bool = True):
-        # b_to_a staged → A 파일에 쓸 내용 / a_to_b staged → B 파일에 쓸 내용
-        has_a = any(v == DIR_B2A for v in self._staged.values())
-        has_b = any(v == DIR_A2B for v in self._staged.values())
+        sides = self._sides_with_staged()
+        has_a, has_b = "a" in sides, "b" in sides
 
         # JSON/uasset 등 비-xlsx 파일은 저장 미지원 → 버튼 강제 비활성화 + 툴팁 안내
         def _xlsx_ok(path: str) -> bool:
