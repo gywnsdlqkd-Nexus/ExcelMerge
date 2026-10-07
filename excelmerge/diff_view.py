@@ -1481,6 +1481,23 @@ class DiffView(QWidget):
 
     # ── 저장 ─────────────────────────────────────────────────────────────────
 
+    def _saving_now(self) -> bool:
+        """저장 워커가 지금 돌고 있는가.
+
+        끝난 워커는 deleteLater 로 C++ 객체가 사라지는데 파이썬 참조는 남는다. 그
+        상태로 isRunning() 을 부르면 RuntimeError 가 난다 — 실기에서 저장을 한 번
+        한 뒤 Ctrl+S 를 다시 누를 때마다 오류 창이 떴다. shutdown() 과 folder_view·
+        main_window 의 종료 처리도 같은 이유로 RuntimeError 를 삼킨다.
+        """
+        w = self._staged_merge_worker
+        if w is None:
+            return False
+        try:
+            return w.isRunning()
+        except RuntimeError:
+            self._staged_merge_worker = None   # 죽은 참조는 끊어 둔다
+            return False
+
     def _on_save_shortcut(self):
         """Ctrl+S — 병합 준비된 쪽을 저장한다(그 패널의 "저장"을 누른 것과 같다).
 
@@ -1495,7 +1512,7 @@ class DiffView(QWidget):
         거기 있다. 여기서 미리 걸러 내면 그 안내가 조용히 사라진다(비엑셀 파일에
         준비해 두고 Ctrl+S 를 누르면 아무 일도 안 일어나는 것처럼 보인다).
         """
-        if self._staged_merge_worker is not None and self._staged_merge_worker.isRunning():
+        if self._saving_now():
             return                      # 이미 저장 중 — 두 번째 워커를 띄우지 않는다
         sides = self._sides_with_staged()
         if not sides:

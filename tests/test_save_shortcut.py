@@ -143,6 +143,30 @@ def test_ctrl_s_does_not_start_a_second_save_while_one_is_running(view, monkeypa
         view._staged_merge_worker = None   # 정리는 뒷정리에 떠넘기지 않는다
 
 
+def test_ctrl_s_after_a_finished_save_does_not_blow_up(view, monkeypatch):
+    """끝난 저장 워커는 C++ 객체가 사라진다 — 그 참조로 isRunning() 을 부르면 터진다.
+
+    v220 실기에서 **저장을 한 번 한 뒤** Ctrl+S 를 다시 누르자 오류 창이 떴다:
+    'wrapped C/C++ object of type StagedMergeWorker has been deleted'. 유닛 테스트는
+    진짜 저장을 돌리지 않아 워커가 죽은 상태를 한 번도 만들지 않았고, 그래서 못 잡았다.
+
+    sip.delete 로 C++ 쪽만 없애면 deleteLater 가 끝난 그 상태를 그대로 재현한다.
+    """
+    from PyQt5 import sip
+    from PyQt5.QtCore import QThread
+
+    saved = _record_saves(view, monkeypatch)
+    dead = QThread()
+    sip.delete(dead)                       # deleteLater 가 끝난 뒤와 같은 상태
+    view._staged_merge_worker = dead
+    view._staged[CELL] = DIR_A2B
+
+    _press_save(view)
+
+    assert saved == ["b"], "죽은 워커 참조 때문에 저장이 막혔다"
+    assert view._staged_merge_worker is None, "죽은 참조를 끊지 않았다"
+
+
 # ── 안내는 _save_staged 가 한다 — 단축키가 미리 걸러 삼키지 않는다 ───────────
 
 def test_ctrl_s_on_a_non_excel_file_still_explains_why(view, monkeypatch, tmp_path):
