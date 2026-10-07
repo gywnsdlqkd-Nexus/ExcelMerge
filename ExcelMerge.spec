@@ -50,10 +50,35 @@ a = Analysis(
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],
-    excludes=[],
+    # 번들에 안 들어가야 할 것들 — 프로그램을 켤 때마다 이걸 다 푸느라 느렸다.
+    # (실측: 번들 157MB 중 77MB 가 쓰지 않는 것이었고, 빼니 exe 60.9→30.2MB,
+    #  켜는 시간 6.4→5.2초. numpy·PIL 을 막고 전체 테스트 820개 통과를 확인했다.)
+    #   numpy  — openpyxl 이 '있으면 쓰는' 선택적 의존. 우리 코드는 쓰지 않는다(29MB).
+    #   PIL    — openpyxl 의 이미지 지원. 우리는 값만 읽고 XML 만 고친다(12MB).
+    #   QtQuick/QtQml 등 — 순수 QtWidgets 앱이라 쓰지 않는다.
+    excludes=[
+        'numpy', 'PIL', 'pandas', 'scipy', 'matplotlib',
+        'PyQt5.QtQuick', 'PyQt5.QtQml', 'PyQt5.Qt3DCore',
+        'PyQt5.QtWebEngineWidgets', 'PyQt5.QtMultimedia',
+        'tkinter', 'pydoc_data',
+    ],
     noarchive=False,
     optimize=0,
 )
+# 쓰지 않는 Qt 바이너리 — hiddenimport 분석으로는 안 빠지고 바이너리로 딸려온다.
+# opengl32sw.dll 하나가 20MB 다. 순수 QtWidgets 앱은 래스터 엔진으로 그리므로
+# OpenGL 경로를 타지 않는다. (GPU 드라이버가 부실한 PC 를 만나면 이 줄을 되돌릴 것.)
+_DROP_BIN = {n.lower() for n in (
+    'opengl32sw.dll',        # 소프트웨어 OpenGL 폴백   20.0 MB
+    'd3dcompiler_47.dll',    # Direct3D 셰이더 컴파일러  4.0 MB
+    'libGLESv2.dll', 'libEGL.dll',   # ANGLE              3.2 MB
+    'Qt5Quick.dll', 'Qt5Qml.dll', 'Qt5QmlModels.dll',   # QML    7.4 MB
+    'Qt5Network.dll',        # 업데이트 확인은 urllib 를 쓴다
+    'Qt5WebSockets.dll', 'Qt5DBus.dll',
+)}
+a.binaries = [b for b in a.binaries
+              if os.path.basename(b[0]).lower() not in _DROP_BIN]
+
 pyz = PYZ(a.pure)
 
 exe = EXE(

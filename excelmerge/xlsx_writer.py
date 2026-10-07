@@ -8,7 +8,7 @@ from copy import deepcopy
 from collections import defaultdict
 
 from lxml import etree
-from openpyxl.utils import get_column_letter, column_index_from_string
+from .colref import get_column_letter, column_index_from_string
 
 from . import ooxml
 from .logutil import log
@@ -601,7 +601,8 @@ def _write_patches_to_file(
     patch_style_src    : {target_ref: source_ref}    — 덮어쓰기 셀의 소스 서식 좌표
     """
     if _is_file_locked(path_base):
-        raise PermissionError(f"파일이 열려 있어 저장할 수 없습니다:\n{path_base}")
+        # 이유를 단정하지 않는다 — 열려 있을 수도, 읽기 전용일 수도 있다.
+        raise PermissionError(f"파일을 저장할 수 없습니다.\n{path_base}")
 
     tmp = path_base + ".tmp_merge"
     try:

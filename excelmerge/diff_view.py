@@ -18,7 +18,7 @@ from PyQt5.QtWidgets import (
 )
 from PyQt5.QtCore import Qt, pyqtSignal, QThread
 from PyQt5.QtGui import QIcon, QKeySequence
-from openpyxl.utils import get_column_letter
+from .colref import get_column_letter
 
 from .diff_engine import (count_changed_masked, keep_mask, match_columns,
                           usable_col_meta,
@@ -1507,11 +1507,13 @@ class DiffView(QWidget):
             return
 
         if _is_file_locked(path):
+            # 쓸 수 없는 이유는 여럿이다 — 파일이 열려 있을 수도 있고, 읽기 전용일
+            # 수도 있다(P4V 체크아웃 전이 특히 흔하다). 예전 문구는 '열려 있으므로'
+            # 라고 단정해서, 권한 문제인데 파일을 찾아 닫게 만들었다. 단정하지 않는다.
             QMessageBox.warning(
-                self, "파일 열림",
-                f"변경하고자 하는 파일이 열려 있으므로 저장할 수 없습니다:\n\n"
-                f"{'A' if side == 'a' else 'B'} 파일: {os.path.basename(path)}"
-                "\n\n파일을 닫은 후 다시 시도하세요."
+                self, "저장할 수 없음",
+                f"파일을 저장할 수 없습니다.\n\n"
+                f"{'A' if side == 'a' else 'B'} 파일 : {path}"
             )
             return
 

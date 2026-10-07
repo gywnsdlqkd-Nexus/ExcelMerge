@@ -17,7 +17,7 @@ from PyQt5.QtGui import (
     QIcon, QPixmap, QFont, QPen, QColor,
 )
 from PyQt5 import sip
-from openpyxl.utils import get_column_letter
+from .colref import get_column_letter
 
 from .diff_model import DiffTableModel
 from .loaders import _SUPPORTED_EXTS

@@ -13,8 +13,6 @@ import zipfile
 import threading
 from collections import OrderedDict
 
-import openpyxl
-
 from . import ooxml
 from .constants import bool_to_str
 from .uasset_parser import load_uasset_as_matrix
@@ -121,7 +119,13 @@ def _safe_close(wb):
 
 def _open_workbook(path: str, data_only: bool):
     """openpyxl 워크북 로드 — 빈 fill 등으로 스타일 파싱이 실패하면 styles.xml을
-    정제한 사본으로 1회 재시도한다. 정상 파일은 예외 경로를 타지 않는다."""
+    정제한 사본으로 1회 재시도한다. 정상 파일은 예외 경로를 타지 않는다.
+
+    **import 를 함수 안에 둔다.** 모듈 수준에 두면 프로그램을 켤 때마다 openpyxl 전체가
+    딸려온다(실측 1.14초). 그런데 값 읽기의 주 경로는 calamine(Rust)이고 openpyxl 은
+    폴백이라, 보통은 **한 번도 부르지 않는다.**
+    """
+    import openpyxl
     try:
         return openpyxl.load_workbook(path, read_only=True, data_only=data_only)
     except TypeError:
@@ -514,3 +518,44 @@ def _sheet_names_from_zip(path: str):
     except Exception:
         return None
     return [html.unescape(n) for n in _WORKBOOK_SHEET_RE.findall(data)]
+
+_warm_started = False
+_warm_lock = threading.Lock()
+# 선로드가 **끝났는지** 알리는 신호. sys.modules 로는 알 수 없다 — 파이썬은 import 가
+# 시작되는 순간 모듈 객체를 거기 넣어 두기 때문에, 아직 실행 중인 모듈도 '있다'고 나온다.
+warm_done = threading.Event()
+
+
+def warm_fallback_readers() -> None:
+    """폴백용 무거운 모듈을 **백그라운드에서** 미리 올려 둔다. 창이 뜬 뒤 한 번 부른다.
+
+    openpyxl 은 평소엔 안 쓴다 — 값 읽기는 calamine(Rust)이 하고, 좌표 변환은
+    colref 가 한다. 그래서 모듈 수준 import 를 걷어내 시작을 1초 넘게 줄였다.
+
+    그런데 **안 쓰는 게 아니라 가끔 쓴다.** .xls/.xlsb/암호 걸린 .xlsx 를 열면 시트
+    이름을 얻으려고 openpyxl 로 폴백하는데(list_sheet_names), 그 호출은 GUI 스레드에서
+    난다. 거기서 처음 import 하면 창이 **0.9초 멈춘다**(실측 0.868s, 2회차는 0.003s).
+    저장 쪽도 같다 — 행 삭제가 섞인 공유 수식 저장은 openpyxl.formula.translate 를 쓴다.
+
+    시작 경로에서는 빼고, 창이 뜬 **뒤에** 따로 올린다. 사용자가 파일을 고르는 동안
+    끝나므로 멈춤이 사라진다. 실패해도 조용히 넘어간다 — 그때 가서 제자리에서
+    import 하면 되고, 지금 막아야 할 일이 아니다.
+    """
+    global _warm_started
+    with _warm_lock:
+        if _warm_started:
+            return
+        _warm_started = True
+
+    def _run():
+        try:
+            # formula.translate 를 올리면 openpyxl 패키지 전체가 함께 올라온다 —
+            # 읽기 폴백(load_workbook)과 저장 폴백(Translator)을 한 번에 덮는다.
+            import openpyxl.formula.translate  # noqa: F401
+        except Exception:
+            log.debug("openpyxl 선로드 실패 — 필요할 때 다시 시도한다", exc_info=True)
+        finally:
+            warm_done.set()
+
+    threading.Thread(target=_run, name="warm-openpyxl", daemon=True).start()
+

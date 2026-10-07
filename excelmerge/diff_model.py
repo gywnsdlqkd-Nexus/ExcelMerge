@@ -9,7 +9,7 @@ role 계산으로 옮긴 것으로, populate는 begin/endResetModel 한 번으�
 import difflib
 
 from PyQt5.QtCore import Qt, QAbstractTableModel, QModelIndex
-from openpyxl.utils import get_column_letter
+from .colref import get_column_letter
 
 from .theme import (
     DIFF_COLORS, EXCLUDED_CELL_BG, CELL_FORMULA_FG, ui_font,

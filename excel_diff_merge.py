@@ -77,6 +77,14 @@ def main():
 
     win.show()
 
+    # 창이 뜬 **뒤에** 폴백용 무거운 모듈을 백그라운드로 올린다. 시작 경로에 두면
+    # 1초 넘게 느려지고, 아예 안 올리면 .xls 를 처음 열 때 GUI 가 0.9초 멈춘다.
+    try:
+        from excelmerge.loaders import warm_fallback_readers
+        warm_fallback_readers()
+    except Exception:
+        pass
+
     # 시작할 때는 **버튼 표시만** 정하는 조용한 조회를 한다 — 받을 게 있으면 버튼을
     # 강조하고, 없으면 흐리게 둔다. 창을 띄우거나 설치하는 일은 절대 없다(강제
     # 업데이트가 불편하다는 피드백으로 v198 에서 없앤 정책 그대로). 받을지 말지는
