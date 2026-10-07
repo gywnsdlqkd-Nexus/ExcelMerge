@@ -324,7 +324,11 @@ def main():
          f"chore(release): v{args.version} — 버전 bump + CHANGELOG"])
 
     step("빌드")
-    run([sys.executable, "-m", "PyInstaller", "ExcelMerge.spec"], env=env)
+    # --noconfirm 이 없으면 dist/ExcelMerge 가 남아 있을 때 PyInstaller 가 지울지
+    # 물어본다. 릴리스는 파이프 뒤에서 돌아 그 물음에 답할 수 없고 그대로 실패한다 —
+    # onedir 로 바꾼 뒤 dist 를 비우지 않은 **두 번째 릴리스부터** 매번 걸린다.
+    run([sys.executable, "-m", "PyInstaller", "--noconfirm", "ExcelMerge.spec"],
+        env=env)
     # 앱 exe 를 먼저 서명한 뒤 설치 파일로 묶는다 — 순서가 바뀌면 설치 파일 안의 exe 가
     # 미서명 상태로 들어간다.
     run([sys.executable, "sign.py",

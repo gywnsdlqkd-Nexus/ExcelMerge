@@ -1,7 +1,8 @@
 @echo off
 cd /d "%~dp0"
 REM 버전 무관 단일 빌드 스크립트 — 버전은 ExcelMerge.spec 이 excelmerge/__init__.py 에서 읽는다.
-python -m PyInstaller ExcelMerge.spec
+REM --noconfirm: dist/ExcelMerge 가 남아 있어도 묻지 않고 덮어쓴다(onedir).
+python -m PyInstaller --noconfirm ExcelMerge.spec
 set BUILD_RC=%ERRORLEVEL%
 echo BUILD_EXIT_CODE=%BUILD_RC%
 if not "%BUILD_RC%"=="0" (

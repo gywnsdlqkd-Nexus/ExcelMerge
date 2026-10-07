@@ -91,6 +91,22 @@ def test_release_compiles_the_installer_after_building():
         "빌드 전에 설치 파일을 만들려 한다"
 
 
+def test_build_does_not_stop_to_ask_about_an_existing_dist():
+    """onedir 은 dist/ExcelMerge 를 남긴다 — 물어보면 릴리스가 거기서 멈춘다.
+
+    실제로 v219 릴리스가 이 자리에서 끊겼다. 빌드는 파이프 뒤에서 도는데
+    PyInstaller 가 "지울까요?" 를 물어 입력을 기다리다 실패한다. onefile 때는
+    출력이 파일 하나라 걸리지 않아, onedir 전환 뒤 첫 재빌드에서야 드러났다.
+    """
+    for name in ("release.py", "build.bat"):
+        calls = [ln for ln in _read(name).splitlines()
+                 if "PyInstaller" in ln and "ExcelMerge.spec" in ln]
+        assert calls, f"{name}: PyInstaller 호출을 찾지 못했다"
+        for ln in calls:
+            assert "--noconfirm" in ln, (
+                f"{name}: --noconfirm 없이 부른다 — {ln.strip()}")
+
+
 def test_release_signs_the_app_before_packing_it():
     """설치 파일로 묶은 뒤 앱 exe 를 서명하면 묶인 사본은 미서명으로 남는다."""
     rel = _read("release.py")
