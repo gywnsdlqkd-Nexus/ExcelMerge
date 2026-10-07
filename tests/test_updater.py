@@ -105,7 +105,7 @@ def test_build_update_bat_runs_the_installer_silently():
     폴더라 그 방법을 쓸 수 없고, 실행 중인 앱을 닫고 파일을 바꾸는 일은 설치 파일이
     대신한다(installer.iss 의 CloseApplications=force).
     """
-    bat = build_update_bat(r"C:\t\ExcelMerge_Setup_v217.exe", r"C:\app\ExcelMerge.exe")
+    bat = build_update_bat(r"C:\t\ExcelMerge_Setup.exe", r"C:\app\ExcelMerge.exe")
     for flag in ("/SILENT", "/NORESTART", "/SUPPRESSMSGBOXES"):
         assert flag in bat, f"{flag} 없음 — 설치 창이 사용자에게 튄다"
     assert "move /y" not in bat, "파일 덮어쓰기 방식이 남아 있다"
@@ -163,13 +163,13 @@ def test_apply_update_spawns_with_clean_env(monkeypatch):
     print("PASS test_apply_update_spawns_with_clean_env")
 
 
-def test_check_worker_file_url():
+def test_check_worker_file_url(tmp_path):
     """file:// 매니페스트를 UpdateCheckWorker가 읽어 파싱 결과를 방출."""
     from PyQt5.QtWidgets import QApplication
     from PyQt5.QtCore import QEventLoop, QTimer, QUrl
     app = QApplication.instance() or QApplication([])
 
-    d = tempfile.mkdtemp()
+    d = str(tmp_path)
     p = os.path.join(d, "latest.json")
     with open(p, "w", encoding="utf-8") as f:
         json.dump({"version": "999", "url": "https://x/e.exe"}, f)
@@ -193,8 +193,10 @@ def main():
     test_source_selection()
     test_gdrive_url_helpers()
     test_build_update_bat_quotes_paths()
-    test_build_update_bat_clears_bootloader_env()
-    test_check_worker_file_url()
+    test_build_update_bat_runs_the_installer_silently()
+    test_build_update_bat_restarts_the_app_even_if_setup_fails()
+    test_build_update_bat_cleans_up_after_itself()
+    # test_check_worker_file_url 은 tmp_path 픽스처가 필요해 pytest 로만 돈다.
     print("ALL UPDATER TESTS PASS")
 
 

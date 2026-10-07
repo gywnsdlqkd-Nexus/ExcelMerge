@@ -9,12 +9,8 @@ DiffTableModel의 DisplayRole/BackgroundRole이 모든 상태 조합에서 동�
 """
 import os
 import sys
-import tempfile
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
-# 키 위치 전역 저장(prefs.json)이 실제 %APPDATA%를 오염시키지 않도록 임시 폴더로 격리.
-# (컨트롤러 _on_key_col_changed/_on_key_row_changed 가 save_key_prefs 를 호출하므로 필수.)
-os.environ["APPDATA"] = tempfile.mkdtemp(prefix="em_test_appdata_")
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from PyQt5.QtCore import Qt
@@ -602,14 +598,13 @@ def test_row_header_multi_stage():
     print("PASS test_row_header_multi_stage")
 
 
-def test_sheet_path_absolute_target_saves():
+def test_sheet_path_absolute_target_saves(tmp_path):
     """절대경로 rel Target(openpyxl 등) 파일도 저장이 실제 적용되는지 + 시트 미해결 시 raise."""
-    import tempfile
     import zipfile
     import openpyxl
     from excelmerge import xlsx_writer
 
-    tmpdir = tempfile.mkdtemp()
+    tmpdir = str(tmp_path)
     p = os.path.join(tmpdir, "abs.xlsx")
     wb = openpyxl.Workbook(); ws = wb.active
     ws.append(["ID", "V"]); ws.append(["1", "a1"]); ws.append(["2", "a2"])
@@ -719,17 +714,16 @@ def test_goto_changed_focus_and_selection_color():
     print("PASS test_goto_changed_focus_and_selection_color")
 
 
-def test_load_xlsx_with_empty_fill():
+def test_load_xlsx_with_empty_fill(tmp_path):
     """styles.xml에 빈 <fill/>이 있는 파일도 로드되는지 회귀 테스트.
     openpyxl은 빈 fill에 'expected Fill' TypeError를 던진다 — 정제 후 재시도해야 함."""
     import re
     import zipfile
-    import tempfile
     import datetime
     import openpyxl
     from excelmerge.loaders import _load_values_pass_openpyxl, _open_workbook
 
-    tmpdir = tempfile.mkdtemp()
+    tmpdir = str(tmp_path)
     good = os.path.join(tmpdir, "good.xlsx")
     wb = openpyxl.Workbook(); ws = wb.active
     ws.append(["날짜", "값", "수식"])
@@ -801,7 +795,7 @@ def test_filter_keeps_merged_rows_visible():
     print("PASS test_filter_keeps_merged_rows_visible")
 
 
-def test_sheet_tabs_mark_changed():
+def test_sheet_tabs_mark_changed(tmp_path):
     """다중 시트 파일 비교 시, 서로 다른(또는 한쪽에만 있는) 시트 탭만 변경 표시(노랑)."""
     import tempfile, os
     import openpyxl
@@ -809,7 +803,7 @@ def test_sheet_tabs_mark_changed():
     from excelmerge.main_window import MainWindow
     app = QApplication.instance() or QApplication([])
 
-    d = tempfile.mkdtemp()
+    d = str(tmp_path)
     pa = os.path.join(d, "A.xlsx"); pb = os.path.join(d, "B.xlsx")
     wb = openpyxl.Workbook(); wb.active.title = "S1"; wb.active.append(["id", "v"]); wb.active.append([1, "x"])
     s2 = wb.create_sheet("S2"); s2.append(["id", "v"]); s2.append([1, "AAA"])

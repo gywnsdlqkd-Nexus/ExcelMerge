@@ -11,7 +11,7 @@
 (서명 안 된 exe는 SmartScreen 경고·백신 오탐 위험이 있으니 배포 전 서명 권장.)
 
 사용:
-    python sign.py [exe경로]     # 생략 시 dist/ExcelMerge_v<버전>.exe
+    python sign.py [exe경로]     # 생략 시 dist/ExcelMerge_Setup.exe
 """
 import glob
 import os
@@ -63,8 +63,9 @@ def build_sign_cmd(signtool: str, exe: str) -> list | None:
 
 
 def main():
+    # 기본 대상은 설치 파일. 앱 exe 는 release.py 가 경로를 명시해 따로 부른다.
     exe = sys.argv[1] if len(sys.argv) > 1 else os.path.join(
-        HERE, "dist", f"ExcelMerge_v{__version__}.exe")
+        HERE, "dist", "ExcelMerge_Setup.exe")
     if not os.path.isfile(exe):
         print(f"[서명] 대상 exe가 없습니다: {exe}")
         sys.exit(1)

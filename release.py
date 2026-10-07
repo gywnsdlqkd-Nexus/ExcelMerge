@@ -333,7 +333,7 @@ def main():
     step("설치 파일 만들기")
     run([iscc_path(), f"/DMyVersion={args.version}", "installer.iss"], env=env)
     run([sys.executable, "sign.py",
-         os.path.join("dist", f"ExcelMerge_Setup_v{args.version}.exe")], env=env)
+         os.path.join("dist", "ExcelMerge_Setup.exe")], env=env)
 
     step("exe 실행 스모크")
     exe_smoke(args.version)

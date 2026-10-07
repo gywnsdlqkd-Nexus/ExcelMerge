@@ -23,6 +23,7 @@
 하나라도 어긋나면 종료 코드 1. 저장 쪽을 고쳤다면 릴리스 전에 한 번 돌릴 것.
 """
 import argparse
+import atexit
 import os
 import shutil
 import stat
@@ -39,8 +40,12 @@ for _stream in (sys.stdout, sys.stderr):      # cp949 콘솔에서 진행 문구
     except (AttributeError, OSError):
         pass
 
-# 사용자 설정(키 기억·검사 제외 열)을 건드리지 않는다.
-os.environ["APPDATA"] = tempfile.mkdtemp(prefix="merge_check_")
+# 사용자 설정(키 기억·검사 제외 열)을 건드리지 않는다. 끝나면 치운다 —
+# 안 치우면 돌릴 때마다 %TEMP% 에 폴더가 하나씩 쌓인다(테스트 쪽에서 그렇게
+# 1,549개까지 쌓인 적이 있다).
+_APPDATA_TMP = tempfile.mkdtemp(prefix="merge_check_")
+os.environ["APPDATA"] = _APPDATA_TMP
+atexit.register(lambda: shutil.rmtree(_APPDATA_TMP, ignore_errors=True))
 
 from excelmerge.constants import DIR_A2B                       # noqa: E402
 from excelmerge.diff_engine import (compute_diff, match_columns,  # noqa: E402

@@ -5,7 +5,6 @@
 """
 import os
 import sys
-import tempfile
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -30,9 +29,9 @@ def _make_xlsx(path, rows, sheet="Sheet1"):
     wb.save(path)
 
 
-def test_save_roundtrip_no_bak():
+def test_save_roundtrip_no_bak(tmp_path):
     """값 패치 저장 → 재로드 시 반영. .bak 백업은 만들지 않는다(사용자 요청으로 제거)."""
-    d = tempfile.mkdtemp()
+    d = str(tmp_path)
     p = os.path.join(d, "t.xlsx")
     _make_xlsx(p, [["ID", "V"], ["1", "a1"], ["2", "a2"]], sheet="Data")
     _write_patches_to_file(p, {"B2": "PATCHED"}, sheet_name="Data")
@@ -42,9 +41,9 @@ def test_save_roundtrip_no_bak():
     print("PASS test_save_roundtrip_no_bak")
 
 
-def test_save_missing_sheet_raises():
+def test_save_missing_sheet_raises(tmp_path):
     """존재하지 않는 시트명으로 저장하면 조용히 다른 시트에 쓰지 않고 raise (A1)."""
-    d = tempfile.mkdtemp()
+    d = str(tmp_path)
     p = os.path.join(d, "t.xlsx")
     _make_xlsx(p, [["ID", "V"], ["1", "a1"]], sheet="Data")
     raised = False
@@ -81,9 +80,9 @@ def test_count_changed():
     print("PASS test_count_changed")
 
 
-def test_content_equal_xlsx():
+def test_content_equal_xlsx(tmp_path):
     """바이트가 달라도 셀 값이 같으면 content_equal True, 값이 다르면 False."""
-    d = tempfile.mkdtemp()
+    d = str(tmp_path)
     p1 = os.path.join(d, "a.xlsx")
     p2 = os.path.join(d, "b.xlsx")
     p3 = os.path.join(d, "c.xlsx")
@@ -95,9 +94,9 @@ def test_content_equal_xlsx():
     print("PASS test_content_equal_xlsx")
 
 
-def test_formula_flags_xml():
+def test_formula_flags_xml(tmp_path):
     """수식 셀 좌표를 시트 XML <f> 스캔으로 정확히 반환."""
-    d = tempfile.mkdtemp()
+    d = str(tmp_path)
     p = os.path.join(d, "f.xlsx")
     wb = openpyxl.Workbook()
     ws = wb.active
@@ -113,10 +112,10 @@ def test_formula_flags_xml():
     print("PASS test_formula_flags_xml")
 
 
-def test_json_wrapper_renders_as_table():
+def test_json_wrapper_renders_as_table(tmp_path):
     """래퍼 객체({"K":[{...}]})도 최상위 객체 배열([{...}])과 '동일한 표'로 로딩되고,
     비표형 JSON은 [path,value] 폴백을 유지한다."""
-    d = tempfile.mkdtemp()
+    d = str(tmp_path)
     records = [{"ID": 1, "Name": "a"}, {"ID": 2, "Name": "b"}]
     p_arr = os.path.join(d, "arr.json")     # 최상위 배열 (AbyssAttack 형)
     p_wrap = os.path.join(d, "wrap.json")   # 래퍼 객체 (TablePackage 형)
@@ -138,10 +137,10 @@ def test_json_wrapper_renders_as_table():
     print("PASS test_json_wrapper_renders_as_table")
 
 
-def test_json_preserves_newline_code():
+def test_json_preserves_newline_code(tmp_path):
     """JSON 문자열 값의 개행은 실제 줄바꿈이 아니라 리터럴 '\\n' 코드로 보존돼야 한다
     (게임 텍스트 제어 코드 보존). 표(records) 경로 + 폴백 경로 둘 다."""
-    d = tempfile.mkdtemp()
+    d = str(tmp_path)
     # 표 경로: 값에 개행/탭 포함
     p_tab = os.path.join(d, "tab.json")
     with open(p_tab, "w", encoding="utf-8") as f:

@@ -8,7 +8,7 @@
 ;
 ; 빌드:
 ;   python -m PyInstaller ExcelMerge.spec      → dist/ExcelMerge/
-;   ISCC.exe /DMyVersion=<N> installer.iss     → dist/ExcelMerge_Setup_v<N>.exe
+;   ISCC.exe /DMyVersion=<N> installer.iss     → dist/ExcelMerge_Setup.exe
 ; (release.py 가 두 단계를 묶어서 돌린다)
 
 #ifndef MyVersion
@@ -40,7 +40,9 @@ DefaultGroupName={#MyAppName}
 DisableProgramGroupPage=yes
 
 OutputDir=dist
-OutputBaseFilename=ExcelMerge_Setup_v{#MyVersion}
+; 파일 이름에 버전을 붙이지 않는다 — 받는 사람이 늘 같은 이름을 본다.
+; 버전은 설치 마법사 제목과 '앱 및 기능' 목록(AppVerName)에 나온다.
+OutputBaseFilename=ExcelMerge_Setup
 SetupIconFile=images\app_icon.ico
 UninstallDisplayIcon={app}\{#MyAppExeName}
 Compression=lzma2/max

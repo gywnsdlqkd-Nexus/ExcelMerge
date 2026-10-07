@@ -43,7 +43,7 @@ build.bat            REM PyInstaller ExcelMerge.spec → dist/ExcelMerge/ → (�
 `build.bat` 은 빌드 후 `sign.py`(코드 서명)를 호출한다 — 인증서 환경변수가 설정돼 있으면 서명하고,
 없으면 조용히 건너뛴다.
 
-배포물은 **설치 파일**이다(`ExcelMerge_Setup_v<버전>.exe`). `release.py` 가 빌드 결과 폴더를
+배포물은 **설치 파일**이다(`ExcelMerge_Setup.exe` — 이름은 버전과 무관하게 고정). `release.py` 가 빌드 결과 폴더를
 Inno Setup 으로 묶는다 — 받는 사람은 그 파일 하나만 실행하면 되고, 설치 위치는
 `%LOCALAPPDATA%\Programs\ExcelMerge` 로 고정이라 P4V 에 등록한 경로가 버전마다 바뀌지 않는다.
 관리자 권한은 필요 없다.

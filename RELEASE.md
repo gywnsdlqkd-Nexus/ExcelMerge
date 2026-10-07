@@ -67,7 +67,8 @@ python merge_check.py <A폴더> <B폴더> <출력폴더> --excel
    > 빌드 환경 전제는 아래 "빌드 환경 요구사항" 참고.
 
 4. **설치 파일 만들기** — `release.py` 가 ISCC(Inno Setup)로 `installer.iss` 를 컴파일해
-   `dist/ExcelMerge_Setup_v<버전>.exe` 를 만든다. 앱 exe 를 **먼저** 서명한 뒤 묶는다
+   `dist/ExcelMerge_Setup.exe` 를 만든다(이름에 버전을 붙이지 않는다 — 릴리스마다
+   태그가 달라 겹치지 않고, 받는 사람이 늘 같은 이름을 본다). 앱 exe 를 **먼저** 서명한 뒤 묶는다
    (순서가 바뀌면 설치 파일 안의 exe 가 미서명으로 들어간다).
    > ISCC 가 없으면 릴리스가 멈춘다. `winget install --id JRSoftware.InnoSetup`
 
@@ -84,7 +85,7 @@ python merge_check.py <A폴더> <B폴더> <출력폴더> --excel
    REM gh CLI 로 실제 태그+릴리스 생성:
    python make_release.py --publish --notes "이번 변경점 요약"
    ```
-   `--publish` 는 `gh release create v<버전> dist/ExcelMerge_Setup_v<버전>.exe -R <repo> ...`
+   `--publish` 는 `gh release create v<버전> dist/ExcelMerge_Setup.exe -R <repo> ...`
    를 실행한다(요구: `gh` CLI 로그인 상태). 자동 업데이트도 이 설치 파일을 받아
    `/SILENT` 로 돌린다 — 릴리스에 설치 파일 말고 다른 exe 를 같이 올리지 말 것.
 

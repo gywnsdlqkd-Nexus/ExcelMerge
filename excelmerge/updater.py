@@ -98,7 +98,7 @@ def _parse_github_release(data: bytes) -> dict:
         raise ValueError("릴리스에 tag_name이 없습니다.")
     version = tag[1:] if tag[:1] in ("v", "V") else tag
     url, sha = "", ""
-    # v217~ 배포물은 설치 파일(ExcelMerge_Setup_v<N>.exe)이다. 이름에 setup 이 든 것을
+    # v217~ 배포물은 설치 파일(ExcelMerge_Setup.exe)이다. 이름에 setup 이 든 것을
     # 먼저 고른다 — 한 릴리스에 exe 가 여럿 올라가도 엉뚱한 걸 받지 않도록.
     assets = [a for a in (j.get("assets") or [])
               if str(a.get("name", "")).lower().endswith(".exe")]

@@ -56,7 +56,8 @@ def main():
     args = ap.parse_args()
 
     # v217~ 배포물은 설치 파일이다(onedir + Inno Setup). 자동 업데이트도 이걸 받는다.
-    exe_name = f"ExcelMerge_Setup_v{__version__}.exe"
+    # 이름에 버전을 붙이지 않는다(v218~) — 릴리스마다 태그가 다르므로 겹치지 않는다.
+    exe_name = "ExcelMerge_Setup.exe"
     exe_path = os.path.join(HERE, "dist", exe_name)
     if not os.path.isfile(exe_path):
         print(f"[오류] 설치 파일이 없습니다: {exe_path}\n먼저 release.py 로 빌드하세요(PyInstaller + ISCC).")

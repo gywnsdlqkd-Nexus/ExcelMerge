@@ -14,10 +14,8 @@ _drag_row_at 이 목표를 데이터 범위(data_rows-1)로 clamp 해서 커서�
 """
 import os
 import sys
-import tempfile
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
-os.environ["APPDATA"] = tempfile.mkdtemp(prefix="em_rowdrag_")
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import pytest

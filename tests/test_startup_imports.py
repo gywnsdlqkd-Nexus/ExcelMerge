@@ -63,9 +63,11 @@ def test_reading_a_normal_file_does_not_need_openpyxl(tmp_path):
     wb.active.append(["TID", "NAME"])
     wb.active.append(["k1", "칼"])
     wb.save(str(p))
+    appdata = tmp_path / "appdata"
+    appdata.mkdir(exist_ok=True)
     got = _run(f"""
-        import sys, os, tempfile
-        os.environ['APPDATA'] = tempfile.mkdtemp()
+        import sys, os
+        os.environ['APPDATA'] = {str(appdata)!r}
         from excelmerge.loaders import load_values_any
         rows = load_values_any({str(p)!r})
         print(len(rows), 'openpyxl' in sys.modules)
@@ -145,9 +147,11 @@ def test_the_warm_up_removes_the_stall(tmp_path):
     """
     p = tmp_path / "fake.xls"
     p.write_bytes(bytes.fromhex("D0CF11E0A1B11AE1") + b"\x00" * 2048)
+    appdata = tmp_path / "appdata"
+    appdata.mkdir(exist_ok=True)
     got = _run(f"""
-        import os, sys, tempfile, time
-        os.environ['APPDATA'] = tempfile.mkdtemp()
+        import os, sys, time
+        os.environ['APPDATA'] = {str(appdata)!r}
         from excelmerge import loaders
         loaders.warm_fallback_readers()
         assert loaders.warm_done.wait(60), '선로드가 끝나지 않았다'

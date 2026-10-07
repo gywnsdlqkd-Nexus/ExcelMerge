@@ -73,10 +73,13 @@ def test_installer_packs_the_whole_folder():
 def test_installer_output_name_matches_what_release_publishes():
     """이름이 어긋나면 '빌드는 됐는데 올릴 자산이 없다'가 된다."""
     iss = _read("installer.iss")
-    assert "OutputBaseFilename=ExcelMerge_Setup_v{#MyVersion}" in iss
+    m = re.search(r"^OutputBaseFilename=(.+)$", iss, re.M)
+    assert m, "OutputBaseFilename 이 없다"
+    assert m.group(1).strip() == "ExcelMerge_Setup", \
+        f"설치 파일 이름에 버전이 붙었다: {m.group(1)!r}"
     assert "OutputDir=dist" in iss
     mk = _read("make_release.py")
-    assert 'f"ExcelMerge_Setup_v{__version__}.exe"' in mk
+    assert '"ExcelMerge_Setup.exe"' in mk
 
 
 # ── 3. 릴리스 절차가 그 둘을 이어 주는가 ───────────────────────────────────
@@ -122,13 +125,13 @@ def test_updater_prefers_the_setup_asset():
         "assets": [
             {"name": "ExcelMerge_debug.exe",
              "browser_download_url": "https://x/ExcelMerge_debug.exe"},
-            {"name": "ExcelMerge_Setup_v217.exe",
-             "browser_download_url": "https://x/ExcelMerge_Setup_v217.exe",
+            {"name": "ExcelMerge_Setup.exe",
+             "browser_download_url": "https://x/ExcelMerge_Setup.exe",
              "digest": "sha256:" + "a" * 64},
         ],
     }).encode("utf-8")
     m = _parse_github_release(data)
-    assert m["url"].endswith("ExcelMerge_Setup_v217.exe"), m["url"]
+    assert m["url"].endswith("ExcelMerge_Setup.exe"), m["url"]
     assert m["sha256"] == "a" * 64
     assert m["version"] == "217"
 
