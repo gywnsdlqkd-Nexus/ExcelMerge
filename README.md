@@ -37,11 +37,18 @@ Qt 위젯 테스트는 헤드리스에서 돌도록 `QT_QPA_PLATFORM=offscreen` 
 단일 파일이다:
 
 ```bat
-build.bat            REM PyInstaller ExcelMerge.spec → dist/ExcelMerge_v<버전>.exe → (설정 시) 코드 서명
+build.bat            REM PyInstaller ExcelMerge.spec → dist/ExcelMerge/ → (설정 시) 코드 서명
 ```
 
 `build.bat` 은 빌드 후 `sign.py`(코드 서명)를 호출한다 — 인증서 환경변수가 설정돼 있으면 서명하고,
-없으면 조용히 건너뛴다. 재현성·서명·상세 절차는 [`RELEASE.md`](RELEASE.md) 참고.
+없으면 조용히 건너뛴다.
+
+배포물은 **설치 파일**이다(`ExcelMerge_Setup_v<버전>.exe`). `release.py` 가 빌드 결과 폴더를
+Inno Setup 으로 묶는다 — 받는 사람은 그 파일 하나만 실행하면 되고, 설치 위치는
+`%LOCALAPPDATA%\Programs\ExcelMerge` 로 고정이라 P4V 에 등록한 경로가 버전마다 바뀌지 않는다.
+관리자 권한은 필요 없다.
+
+재현성·서명·상세 절차는 [`RELEASE.md`](RELEASE.md) 참고.
 
 > **빌드 전제(중요)**
 > - **Windows SDK(UCRT 재배포)** 필요 — UCRT DLL을 번들에 포함해 UCRT 미설치 PC의 "Failed to load

@@ -81,19 +81,25 @@ a.binaries = [b for b in a.binaries
 
 pyz = PYZ(a.pure)
 
+# ── onefile → onedir (v217~) ────────────────────────────────────────────────
+# onefile 은 **켤 때마다** 번들 전체를 %TEMP% 에 푼다. 그게 시작 시간의 가장 큰 몫이었다
+# (실측: 같은 코드로 onefile 4.6초 vs onedir 2.7초). 배포는 Inno Setup 설치 파일로 한다
+# (installer.iss) — 폴더를 그대로 두면 "압축 안 풀고 exe 만 실행" 사고가 나는데,
+# 설치 파일이 그 문제를 없앤다.
+#
+# exe 이름에 버전을 붙이지 않는다. 설치 경로가 고정돼야 P4V 에 등록한 diff 툴 경로가
+# 버전마다 바뀌지 않는다. 버전은 설치 파일 이름(ExcelMerge_Setup_v<N>.exe)에만 붙인다.
 exe = EXE(
     pyz,
     a.scripts,
-    a.binaries,
-    a.datas,
     [],
-    name=f'ExcelMerge_v{_VERSION}',
+    exclude_binaries=True,
+    name='ExcelMerge',
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,
-    upx=True,
+    upx=False,
     upx_exclude=[],
-    runtime_tmpdir=None,
     console=False,
     disable_windowed_traceback=False,
     argv_emulation=False,
@@ -101,4 +107,14 @@ exe = EXE(
     codesign_identity=None,
     entitlements_file=None,
     icon=['images/app_icon.ico'],
+)
+
+coll = COLLECT(
+    exe,
+    a.binaries,
+    a.datas,
+    strip=False,
+    upx=False,          # UPX 는 PATH 에 없어 어차피 적용되지 않았다(실측: 켜나 끄나 동일)
+    upx_exclude=[],
+    name='ExcelMerge',  # → dist/ExcelMerge/ExcelMerge.exe
 )

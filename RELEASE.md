@@ -57,7 +57,8 @@ python merge_check.py <A폴더> <B폴더> <출력폴더> --excel
    pytest
    ```
 
-3. **빌드** — 버전 무관 단일 스크립트. 결과물은 `dist/ExcelMerge_v<버전>.exe`.
+3. **빌드** — 버전 무관 단일 스크립트. 결과물은 **폴더** `dist/ExcelMerge/`
+   (v217~ onedir — 켤 때마다 번들을 %TEMP% 에 푸는 비용을 없앴다. 실측 4.6초 → 2.7초).
    빌드가 끝나면 `build.bat` 이 이어서 `sign.py`(코드 서명, 인증서 미설정이면 자동 건너뜀)를 호출한다.
    ```bat
    build.bat
@@ -65,8 +66,13 @@ python merge_check.py <A폴더> <B폴더> <출력폴더> --excel
    > 재현성을 위해 **클린 venv + `pip install -r requirements.lock`** 후 빌드하는 것을 권장.
    > 빌드 환경 전제는 아래 "빌드 환경 요구사항" 참고.
 
-4. **exe 스모크(필수)** — 결과 exe를 실제로 실행해 확인. 파일 생성만 확인하지 말 것.
-   - 직접 실행: `dist/ExcelMerge_v<버전>.exe` 더블클릭 → 파일 비교·폴더 비교 동작.
+4. **설치 파일 만들기** — `release.py` 가 ISCC(Inno Setup)로 `installer.iss` 를 컴파일해
+   `dist/ExcelMerge_Setup_v<버전>.exe` 를 만든다. 앱 exe 를 **먼저** 서명한 뒤 묶는다
+   (순서가 바뀌면 설치 파일 안의 exe 가 미서명으로 들어간다).
+   > ISCC 가 없으면 릴리스가 멈춘다. `winget install --id JRSoftware.InnoSetup`
+
+5. **exe 스모크(필수)** — 결과를 실제로 실행해 확인. 파일 생성만 확인하지 말 것.
+   - 직접 실행: `dist/ExcelMerge/ExcelMerge.exe` → 파일 비교·폴더 비교 동작.
    - **자동 업데이트 경로도 확인 권장**: 이전 버전 exe에서 이 릴리스로 업데이트 → 재실행까지 정상인지.
      (과거 이 경로에서 부트로더 환경변수 상속으로 재실행 실패한 사례가 있었음 — v183에서 수정.)
 
@@ -78,8 +84,9 @@ python merge_check.py <A폴더> <B폴더> <출력폴더> --excel
    REM gh CLI 로 실제 태그+릴리스 생성:
    python make_release.py --publish --notes "이번 변경점 요약"
    ```
-   `--publish` 는 `gh release create v<버전> dist/ExcelMerge_v<버전>.exe -R <repo> -t v<버전> -n <notes>`
-   를 실행한다(요구: `gh` CLI 로그인 상태).
+   `--publish` 는 `gh release create v<버전> dist/ExcelMerge_Setup_v<버전>.exe -R <repo> ...`
+   를 실행한다(요구: `gh` CLI 로그인 상태). 자동 업데이트도 이 설치 파일을 받아
+   `/SILENT` 로 돌린다 — 릴리스에 설치 파일 말고 다른 exe 를 같이 올리지 말 것.
 
 6. **CHANGELOG** — `CHANGELOG.md` 의 `[Unreleased]` 항목을 새 버전 절로 옮긴다.
 

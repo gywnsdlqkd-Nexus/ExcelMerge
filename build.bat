@@ -9,4 +9,5 @@ if not "%BUILD_RC%"=="0" (
     exit /b %BUILD_RC%
 )
 REM 코드 서명(인증서가 환경변수로 설정돼 있으면 서명, 없으면 건너뜀 — 빌드는 막지 않음).
-python sign.py
+python sign.py dist\ExcelMerge\ExcelMerge.exe
+REM 설치 파일은 release.py 가 만든다(ISCC + installer.iss). 여기서는 앱 폴더까지만.

@@ -27,6 +27,7 @@ from PyQt5.QtWidgets import QMessageBox, QProgressDialog
 
 from . import __version__
 from .constants import appdata_path
+from .logutil import log
 
 # 업데이트 소스 — 둘 중 하나를 설정(둘 다 비면 자동 업데이트 비활성 = 현재 수동 배포 그대로).
 #  1) GITHUB_REPO: 공개 repo "owner/name" — releases/latest API를 매니페스트로 사용(권장).
@@ -97,13 +98,17 @@ def _parse_github_release(data: bytes) -> dict:
         raise ValueError("릴리스에 tag_name이 없습니다.")
     version = tag[1:] if tag[:1] in ("v", "V") else tag
     url, sha = "", ""
-    for a in (j.get("assets") or []):
-        if str(a.get("name", "")).lower().endswith(".exe"):
-            url = (a.get("browser_download_url") or "").strip()
-            digest = (a.get("digest") or "")
-            if digest.lower().startswith("sha256:"):
-                sha = digest.split(":", 1)[1].strip().lower()
-            break
+    # v217~ 배포물은 설치 파일(ExcelMerge_Setup_v<N>.exe)이다. 이름에 setup 이 든 것을
+    # 먼저 고른다 — 한 릴리스에 exe 가 여럿 올라가도 엉뚱한 걸 받지 않도록.
+    assets = [a for a in (j.get("assets") or [])
+              if str(a.get("name", "")).lower().endswith(".exe")]
+    assets.sort(key=lambda a: 0 if "setup" in str(a.get("name", "")).lower() else 1)
+    for a in assets:
+        url = (a.get("browser_download_url") or "").strip()
+        digest = (a.get("digest") or "")
+        if digest.lower().startswith("sha256:"):
+            sha = digest.split(":", 1)[1].strip().lower()
+        break
     return {"version": version, "url": url, "sha256": sha,
             "notes": (j.get("body") or "").strip()}
 
@@ -116,31 +121,31 @@ def is_newer(remote: str, local: str) -> bool:
     return r > l
 
 
-def build_update_bat(new_exe: str, target_exe: str) -> str:
-    """실행 중 exe가 잠겨 있으므로, 잠금이 풀릴 때까지 move 재시도 후 교체·재실행하는 배치.
-    경로에 공백이 있어도 안전하도록 모두 따옴표로 감싼다."""
-    n = new_exe.replace('"', '')
-    t = target_exe.replace('"', '')
+def build_update_bat(setup_exe: str, app_exe: str) -> str:
+    """내려받은 **설치 파일**을 조용히 돌리고 앱을 다시 띄우는 배치.
+
+    v217 부터 배포물이 설치 파일이다(onedir + Inno Setup). 예전에는 단일 exe 를 move 로
+    자기 자신에 덮어썼는데, onedir 은 파일이 아니라 폴더라 그 방법을 쓸 수 없다 —
+    실행 중인 앱을 닫고 파일을 바꾸는 일은 설치 파일이 대신한다
+    (installer.iss 의 CloseApplications=force).
+
+    설치가 실패해도 앱은 **반드시 다시 띄운다.** 실패하면 이전 버전이 그대로 남아 있으니,
+    쓰던 사람이 아무것도 없이 남는 일은 없어야 한다.
+
+    경로에 공백이 있어도 안전하도록 모두 따옴표로 감싼다.
+    """
+    n = setup_exe.replace('"', '')
+    t = app_exe.replace('"', '')
     return (
         "@echo off\r\n"
         "setlocal\r\n"
-        "set /a tries=0\r\n"
-        ":loop\r\n"
-        "set /a tries+=1\r\n"
-        "ping -n 2 127.0.0.1 >nul\r\n"                 # ~1초 대기(timeout 대체, 무인환경 안전)
-        f'move /y "{n}" "{t}" >nul 2>&1\r\n'
-        f'if exist "{n}" (\r\n'
-        "  if %tries% lss 60 goto loop\r\n"            # 최대 ~60초 재시도
-        "  exit /b 1\r\n"
-        ")\r\n"
-        # PyInstaller 부트로더 변수를 비우고 재실행 — 상속된 값이 있으면 재실행 exe가
-        # 추출을 건너뛰어 python3xx.dll 로드에 실패한다. setlocal 범위라 부작용 없음.
-        'set "_MEIPASS2="\r\n'
-        'set "_MEIPASS="\r\n'
-        'set "_PYI_ARCHIVE_FILE="\r\n'
-        'set "_PYI_APPLICATION_HOME_DIR="\r\n'
-        'set "_PYI_PARENT_PROCESS_LEVEL="\r\n'
+        "ping -n 3 127.0.0.1 >nul\r\n"   # 앱이 끝날 틈을 준다(~2초)
+        # /SILENT: 창 없이, /NORESTART: 재부팅 묻지 않음, /SUPPRESSMSGBOXES: 대화상자 없음
+        f'"{n}" /SILENT /NORESTART /SUPPRESSMSGBOXES\r\n'
+        # 조용히 설치하면 설치 파일이 앱을 띄우지 않는다(installer.iss 의 skipifsilent).
+        # 설치가 실패했더라도 띄운다 — 그때는 이전 버전이 그대로 있다.
         f'start "" "{t}"\r\n'
+        f'del "{n}" >nul 2>&1\r\n'
         'del "%~f0" >nul 2>&1\r\n'
     )
 
@@ -284,15 +289,18 @@ def _clean_child_env() -> dict:
             if k not in _PYI_BOOT_ENV and not k.startswith("_PYI_")}
 
 
-def apply_update(new_exe: str) -> bool:
-    """새 exe로 자기 자신을 교체하고 재시작한다(frozen에서만). 성공 시 True(호출측이 앱 종료)."""
+def apply_update(setup_exe: str) -> bool:
+    """내려받은 설치 파일을 조용히 돌려 업데이트한다(frozen에서만).
+
+    성공 시 True — 호출측이 앱을 종료하면 배치가 설치하고 다시 띄운다.
+    """
     if not getattr(sys, "frozen", False):
         return False   # dev(python 실행)에서는 자기 교체 불가
     target = sys.executable
     bat = os.path.join(tempfile.gettempdir(), "ExcelMerge_apply_update.bat")
     try:
         with open(bat, "w", encoding="mbcs", errors="replace") as f:
-            f.write(build_update_bat(new_exe, target))
+            f.write(build_update_bat(setup_exe, target))
         # cmd 콘솔 창이 잠깐 떴다 사라지는 것 방지.
         # CREATE_NO_WINDOW 만 사용한다 — DETACHED_PROCESS 와는 상호 배타(동시 지정 시
         # Windows가 콘솔을 붙여 창이 번쩍인다). 추가로 STARTUPINFO 로 창을 숨긴다(벨트+멜빵).
@@ -306,6 +314,10 @@ def apply_update(new_exe: str) -> bool:
                          env=_clean_child_env())
         return True
     except Exception:
+        # 예전엔 조용히 False 만 돌려줬다. 그래서 인자 이름을 바꾸며 생긴 NameError 가
+        # '업데이트가 그냥 안 되네' 로만 보였다. 이유는 남긴다.
+        log.warning("업데이트 적용 실패 — 설치 파일을 실행하지 못했습니다",
+                    exc_info=True)
         return False
 
 

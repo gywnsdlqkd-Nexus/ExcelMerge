@@ -186,6 +186,27 @@ def _kill_tree(proc, extra_pids=()) -> None:
                            capture_output=True)
 
 
+def iscc_path() -> str:
+    """Inno Setup 컴파일러(ISCC.exe) 경로. 못 찾으면 멈춘다.
+
+    설치 파일 없이 릴리스하면 올릴 자산이 없다 — 조용히 넘어가면 안 된다.
+    winget 으로 깔면 사용자 폴더에 들어간다(관리자 설치가 아님).
+    """
+    import glob
+    cands = [
+        os.path.join(os.environ.get("LOCALAPPDATA", ""),
+                     "Programs", "Inno Setup 6", "ISCC.exe"),
+        r"C:\Program Files (x86)\Inno Setup 6\ISCC.exe",
+        r"C:\Program Files\Inno Setup 6\ISCC.exe",
+    ]
+    cands += glob.glob(r"C:\Program Files*\Inno Setup *\ISCC.exe")
+    for c in cands:
+        if c and os.path.isfile(c):
+            return c
+    fail("Inno Setup(ISCC.exe)을 찾지 못했습니다 — "
+         "winget install --id JRSoftware.InnoSetup 로 설치하세요.")
+
+
 def exe_smoke(version: str, timeout: int = 90) -> None:
     """빌드된 exe 를 띄워 '창이 뜨고 살아 있는지' 확인하고 닫는다(Windows 전용).
 
@@ -194,7 +215,7 @@ def exe_smoke(version: str, timeout: int = 90) -> None:
 
     끝나면 **띄운 것을 전부 거둔다** — _kill_tree 주석 참조.
     """
-    exe = os.path.join(HERE, "dist", f"ExcelMerge_v{version}.exe")
+    exe = os.path.join(HERE, "dist", "ExcelMerge", "ExcelMerge.exe")
     if not os.path.isfile(exe):
         fail(f"빌드 결과가 없습니다: {exe}")
     if os.name != "nt":
@@ -304,7 +325,15 @@ def main():
 
     step("빌드")
     run([sys.executable, "-m", "PyInstaller", "ExcelMerge.spec"], env=env)
-    run([sys.executable, "sign.py"], env=env)
+    # 앱 exe 를 먼저 서명한 뒤 설치 파일로 묶는다 — 순서가 바뀌면 설치 파일 안의 exe 가
+    # 미서명 상태로 들어간다.
+    run([sys.executable, "sign.py",
+         os.path.join("dist", "ExcelMerge", "ExcelMerge.exe")], env=env)
+
+    step("설치 파일 만들기")
+    run([iscc_path(), f"/DMyVersion={args.version}", "installer.iss"], env=env)
+    run([sys.executable, "sign.py",
+         os.path.join("dist", f"ExcelMerge_Setup_v{args.version}.exe")], env=env)
 
     step("exe 실행 스모크")
     exe_smoke(args.version)

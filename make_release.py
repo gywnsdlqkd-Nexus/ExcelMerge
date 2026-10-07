@@ -55,10 +55,11 @@ def main():
                     help="GitHub Releases 모드에서 명령을 '출력만' 하지 않고 실제로 gh 로 태그+릴리스 생성")
     args = ap.parse_args()
 
-    exe_name = f"ExcelMerge_v{__version__}.exe"
+    # v217~ 배포물은 설치 파일이다(onedir + Inno Setup). 자동 업데이트도 이걸 받는다.
+    exe_name = f"ExcelMerge_Setup_v{__version__}.exe"
     exe_path = os.path.join(HERE, "dist", exe_name)
     if not os.path.isfile(exe_path):
-        print(f"[오류] 빌드된 exe가 없습니다: {exe_path}\n먼저 PyInstaller로 빌드하세요.")
+        print(f"[오류] 설치 파일이 없습니다: {exe_path}\n먼저 release.py 로 빌드하세요(PyInstaller + ISCC).")
         sys.exit(1)
 
     # ── GitHub Releases 모드 ──

@@ -92,6 +92,6 @@ main_window·folder_compare·folder_view·workers·xlsx_writer·theme·uasset_pa
     `tag_name`=버전(v 접두 허용), `.exe` asset이 다운로드 대상, asset `digest`로 sha256.
   - `MANIFEST_URL`(범용 latest.json 직링크). Drive 대용량 확인페이지·공유링크→직링크 변환 지원.
   - 둘 다 `%APPDATA%/ExcelMerge/update.json`(`github_repo`/`manifest_url`)로 재빌드 없이 덮어쓰기 가능.
-- **릴리스(GitHub)**: 버전 bump→빌드→ `gh release create v<N> dist/ExcelMerge_v<N>.exe -R owner/name`
+- **릴리스(GitHub)**: 버전 bump→빌드(onedir)→설치 파일(ISCC)→ `gh release create v<N> dist/ExcelMerge_Setup_v<N>.exe -R owner/name`
   (또는 웹 UI로 태그 `v<N>` + exe 첨부). `make_release.py`가 sha256·명령을 출력. 첫 버전만 수동 배포.
 - 주의: GitHub는 **public repo**여야 미인증 다운로드 가능(private면 토큰 필요 → 미지원).
