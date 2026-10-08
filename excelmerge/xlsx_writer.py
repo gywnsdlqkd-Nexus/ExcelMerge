@@ -39,6 +39,7 @@ def _promote_empty_cols_to_delete(
     delete_row_nums: set[int],
     path: str | None,
     sheet_name=None,
+    insert_rows=None,
 ) -> tuple[dict[str, str], set[int], set[str]]:
     """
     1단계: 패치 적용 후 모든 셀이 빈값인 행 → delete_row_nums로 승격 (patches에서 제거)
@@ -53,6 +54,12 @@ def _promote_empty_cols_to_delete(
 
     2단계(열 삭제)는 그대로 수식 원문을 값으로 본다 — 지금 결과가 비어 있다고 해서
     수식이 든 열을 통째로 지우면 안 되기 때문이다.
+
+    ★ 2단계는 **새로 넣는 행(insert_rows)까지** 본다. 기존 행에서만 비었다고 열을
+    지우면, 그 열에 값이 있는 새 행과 모순된다. 실제로 저장이 거부됐다 —
+    모델은 "새 행은 그 값을 갖는다" 로 계산하는데(_expected_after 는 열을 비운 **뒤**
+    새 행을 붙인다) 쓰기는 새 행을 붙인 **뒤** 열을 지워 그 값을 걷어냈다.
+    원인은 순서가 아니라 판단이다 — 그 열은 애초에 '빈 열' 이 아니다.
     """
     if not path:
         return patches, delete_row_nums, set()
@@ -135,8 +142,17 @@ def _promote_empty_cols_to_delete(
             continue
         col_vals[m.group(1)].append(val)
 
+    # 새로 넣는 행이 값을 채우는 열은 '빈 열' 이 아니다.
+    filled_by_inserts: set[str] = set()
+    for cells in (insert_rows or ()):
+        for cell in cells:
+            if len(cell) >= 2 and (cell[1] or "") != "":
+                filled_by_inserts.add(get_column_letter(cell[0] + 1))
+
     delete_col_letters: set[str] = set()
     for col_letter, vals in col_vals.items():
+        if col_letter in filled_by_inserts:
+            continue
         if all(v == "" for v in vals):
             delete_col_letters.add(col_letter)
 

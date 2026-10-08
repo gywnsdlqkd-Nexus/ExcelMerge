@@ -351,8 +351,12 @@ class StagedMergeWorker(QThread):
                     self.col_meta)
                 delete_rows: set[int] = set()   # 1-based 행 번호(빈행 승격 결과)
                 if (patches or insert_rows) and path:
+                    # insert_rows 도 넘긴다 — 새 행이 값을 채우는 열은 '빈 열' 이
+                    # 아니다. 안 넘기면 그 열을 지워 놓고 새 행은 값을 갖는 꼴이 돼
+                    # 저장 검증이 막는다.
                     patches, delete_rows, del_cols = _promote_empty_cols_to_delete(
-                        patches, delete_rows, path, self.sheet_name)
+                        patches, delete_rows, path, self.sheet_name,
+                        insert_rows=list(insert_rows.values()))
                     # 삭제 승격으로 사라진 patch 키의 서식 매핑 제거
                     style_src = {k: v for k, v in style_src.items() if k in patches}
                     if patches or insert_rows or delete_rows or del_cols:

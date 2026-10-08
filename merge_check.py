@@ -97,7 +97,7 @@ def merge_one(name, a_dir, b_dir, out_dir):
         return None
 
     patches, del_rows, del_cols = _promote_empty_cols_to_delete(
-        patches, set(), dst, None)
+        patches, set(), dst, None, insert_rows=list(insert_rows.values()))
     style_src = {k: v for k, v in style_src.items() if k in patches}
     _write_patches_to_file(dst, patches, list(insert_rows.values()),
                            del_rows, del_cols, None,
