@@ -1708,9 +1708,15 @@ def _patch_sheet_xml(
     shared = _shared_groups(sheetdata)
     deleted = _delete_rows(sheetdata, row_map, delete_row_nums)
     _apply_patches(sheetdata, existing, row_map, patches, patch_styles)
+    # 당기기를 **삽입보다 먼저** 한다. _append_rows 는 살아남은 마지막 행 다음에
+    # 번호를 붙이는데, 그 번호가 아직 '지우기 전' 공간이라 뒤이어 당기면 같이 밀린다.
+    # 지운 행이 시트 **끝**에 있으면 그 밀림이 행마다 달라 번호가 겹친다 — 1..276 에서
+    # 275·276 을 지우고 2행을 넣으면 275,276 이 붙은 뒤 275,275 가 됐다(실측:
+    # Data_MailBox_CS.xlsx, 엑셀이 거부). 가운데를 지울 때는 밀림이 모두 같아 우연히
+    # 맞아떨어졌던 것이라 오래 드러나지 않았다.
+    _renumber_after_delete(sheetdata, deleted)
     _append_rows(sheetdata, insert_rows)
     _delete_columns(sheetdata, delete_col_letters)
-    _renumber_after_delete(sheetdata, deleted)
     # 좌표가 다 정해진 뒤에 고친다 — ref 는 **당긴 뒤** 좌표로 써야 한다.
     # 구조를 먼저 되돌린다 — 주인이 지워진 그룹은 여기서 본문이 되살아나고, 그
     # 되살린 본문도 행 삭제에 맞춰 다시 써야 한다(반대 순서면 그 그룹만 옛 참조로 남는다).

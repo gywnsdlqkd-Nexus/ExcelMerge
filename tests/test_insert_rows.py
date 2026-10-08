@@ -179,6 +179,70 @@ def test_inserting_nothing_changes_nothing(blank_tail):
 # 좌표가 겹쳐도 같은 값이 나온다. 그래서 순서·중복 검사를 넣었다. 버그를 되살려
 # 그게 실제로 막는지 본다.
 
+# ── 4. 같은 저장에서 행을 지우면서 넣을 때 ─────────────────────────────────
+#
+# 실기에서 드러났다(Data_MailBox_CS.xlsx, 367쌍 전수 머지). 1~276 행에서 **끝의**
+# 275·276 을 지우고 2행을 넣으면 저장이 거부됐다 — "275행이 두 번 들어 있습니다".
+#
+# 왜: 번호 당기기(_renumber_after_delete)가 삽입 **뒤**에 돌았다. _append_rows 는
+# 살아남은 마지막 행 다음 번호를 붙이는데 그건 아직 '지우기 전' 번호 공간이고,
+# 뒤이어 당기면 새 행도 같이 밀린다. 당기는 양은 '자기보다 작은 삭제 행 수'라
+# 275 는 0칸, 276 은 1칸 밀려 **둘 다 275** 가 됐다.
+#
+# 가운데를 지울 때는 새 행 번호가 삭제 행보다 전부 위라 밀림이 모두 같아
+# 우연히 맞아떨어졌다. 그래서 삽입·삭제를 각각 시험한 테스트로는 오래 안 보였다.
+
+
+def _save(path, inserts, delete_rows=None):
+    clear_values_cache()
+    _write_patches_to_file(str(path), {}, inserts, set(delete_rows or ()))
+
+
+def test_deleting_the_last_rows_while_inserting_keeps_numbers_unique(tmp_path):
+    """끝 2행을 지우고 2행을 넣는다 — 번호가 겹치면 엑셀이 파일을 거부한다."""
+    p = _make(tmp_path, _data_rows(10))
+    _save(p, NEW, {9, 10})
+    nums = [n for n, _ in _rows(p)]
+    assert len(nums) == len(set(nums)), f"번호 중복: {nums}"
+    assert nums == sorted(nums), f"순서가 뒤집혔다: {nums}"
+    assert _sheet_order_mismatches(str(p)) == []
+
+
+def test_deleting_the_last_rows_while_inserting_keeps_them_contiguous(tmp_path):
+    """8행이 남고 2행이 붙으니 1~10 이 빈틈없이 이어져야 한다."""
+    p = _make(tmp_path, _data_rows(10))
+    _save(p, NEW, {9, 10})
+    assert [n for n, _ in _rows(p)] == list(range(1, 11))
+
+
+def test_the_inserted_values_land_after_the_survivors(tmp_path):
+    """번호만 맞고 값이 엉뚱한 자리에 가면 소용이 없다."""
+    p = _make(tmp_path, _data_rows(10))
+    _save(p, NEW, {9, 10})
+    clear_values_cache()
+    grid = load_values_any(str(p))
+    assert [r[0] for r in grid[:8]] == [f"k{i}" for i in range(1, 9)]
+    assert [r[0] for r in grid[8:10]] == ["새키1", "새키2"]
+
+
+@pytest.mark.parametrize("dead", [{5, 6}, {1, 2}, {9, 10}, {1, 10}, {4, 7}])
+def test_insert_with_deletion_anywhere_is_sound(tmp_path, dead):
+    """지운 자리가 앞이든 가운데든 끝이든 결과는 같은 모양이어야 한다.
+
+    가운데만 맞고 끝에서 틀렸던 것이 이 버그였다 — 자리를 바꿔 가며 못 박는다.
+    """
+    p = _make(tmp_path, _data_rows(10), name=f"d{min(dead)}_{max(dead)}.xlsx")
+    _save(p, NEW, dead)
+    nums = [n for n, _ in _rows(p)]
+    assert nums == list(range(1, 11)), f"{sorted(dead)} 삭제 후: {nums}"
+    assert _sheet_order_mismatches(str(p)) == []
+    clear_values_cache()
+    grid = load_values_any(str(p))
+    kept = [f"k{i}" for i in range(1, 11) if i not in dead]
+    assert [r[0] for r in grid[:8]] == kept
+    assert [r[0] for r in grid[8:10]] == ["새키1", "새키2"]
+
+
 def _buggy_append(sheetdata, insert_rows):
     """예전 _append_rows — 빈 <row> 를 무시하고 새로 만든다."""
     from excelmerge.xlsx_writer import _TAG_C, _TAG_ROW, _cell_ref, _set_cell_value
