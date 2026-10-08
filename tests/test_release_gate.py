@@ -154,3 +154,91 @@ def test_the_gate_runs_after_the_version_bump():
     src = open(os.path.join(ROOT, "release.py"), encoding="utf-8").read()
     body = src[src.index("def main("):]
     assert body.index('step("버전 bump') < body.index("merge_check_gate(")
+
+
+# ── 실기 동작 확인(uicheck) 게이트 ──────────────────────────────────────────
+#
+# exe_smoke 는 창이 뜨는지만 본다 — 파일도 안 열고 아무것도 안 눌러 본다. v221(저장 뒤
+# Ctrl+S 오류 창)은 그걸 통과하고 게시된 뒤 실기에서야 드러났다. 그 확인을 게시 앞으로
+# 당긴다. 이 단계는 **실제 키보드·마우스**를 쓰므로, 건너뛸 때 말하는 것이 특히 중요하다.
+
+def _clear_ui(monkeypatch):
+    monkeypatch.delenv("EXCELMERGE_UICHECK_A", raising=False)
+    monkeypatch.delenv("EXCELMERGE_UICHECK_B", raising=False)
+
+
+def test_ui_files_are_optional(monkeypatch):
+    _clear_ui(monkeypatch)
+    assert release.uicheck_files() is None
+
+
+def test_ui_only_one_side_stops_the_release(monkeypatch, tmp_path):
+    _clear_ui(monkeypatch)
+    f = tmp_path / "a.xlsx"; f.write_text("x", encoding="utf-8")
+    monkeypatch.setenv("EXCELMERGE_UICHECK_A", str(f))
+    with pytest.raises(SystemExit):
+        release.uicheck_files()
+
+
+def test_ui_a_missing_file_stops_the_release(monkeypatch, tmp_path):
+    _clear_ui(monkeypatch)
+    f = tmp_path / "a.xlsx"; f.write_text("x", encoding="utf-8")
+    monkeypatch.setenv("EXCELMERGE_UICHECK_A", str(f))
+    monkeypatch.setenv("EXCELMERGE_UICHECK_B", str(tmp_path / "없음.xlsx"))
+    with pytest.raises(SystemExit):
+        release.uicheck_files()
+
+
+def test_ui_skipping_is_announced(monkeypatch, capsys):
+    """조용히 넘어가면 '돌렸겠거니' 가 된다 — merge_check 에서 이미 겪었다."""
+    _clear_ui(monkeypatch)
+    release.uicheck_gate("999", False, os.environ.copy())
+    said = capsys.readouterr().out
+    assert "건너뜀" in said and "EXCELMERGE_UICHECK_A" in said
+
+
+def test_ui_explicit_skip_is_announced(monkeypatch, capsys):
+    _clear_ui(monkeypatch)
+    release.uicheck_gate("999", True, os.environ.copy())
+    said = capsys.readouterr().out
+    assert "건너뜀" in said and "skip-ui-check" in said
+
+
+def test_ui_runs_against_the_built_exe_not_the_installed_one(monkeypatch, tmp_path, capsys):
+    """설치본이 아니라 **방금 빌드한** exe 를 봐야 한다 — 그게 나갈 물건이다."""
+    _clear_ui(monkeypatch)
+    a = tmp_path / "a.xlsx"; b = tmp_path / "b.xlsx"
+    a.write_text("x", encoding="utf-8"); b.write_text("y", encoding="utf-8")
+    monkeypatch.setenv("EXCELMERGE_UICHECK_A", str(a))
+    monkeypatch.setenv("EXCELMERGE_UICHECK_B", str(b))
+    seen = []
+    monkeypatch.setattr(release, "run", lambda cmd, **k: seen.append(cmd))
+    release.uicheck_gate("225", False, os.environ.copy())
+    assert len(seen) == 1, seen
+    cmd = seen[0]
+    assert "uicheck.py" in cmd
+    assert os.path.join("dist", "ExcelMerge", "ExcelMerge.exe") in cmd
+    assert "--expect-version" in cmd and "225" in cmd
+
+
+def test_ui_warns_that_it_takes_over_the_machine(monkeypatch, tmp_path, capsys):
+    """실제 키보드·마우스를 쓴다 — 모르고 다른 창을 건드리면 이 단계만 실패한다."""
+    _clear_ui(monkeypatch)
+    a = tmp_path / "a.xlsx"; b = tmp_path / "b.xlsx"
+    a.write_text("x", encoding="utf-8"); b.write_text("y", encoding="utf-8")
+    monkeypatch.setenv("EXCELMERGE_UICHECK_A", str(a))
+    monkeypatch.setenv("EXCELMERGE_UICHECK_B", str(b))
+    monkeypatch.setattr(release, "run", lambda cmd, **k: None)
+    release.uicheck_gate("225", False, os.environ.copy())
+    said = capsys.readouterr().out
+    assert "키보드" in said and "마우스" in said
+
+
+def test_ui_check_runs_after_the_smoke_and_before_publishing():
+    """스모크가 통과한 exe 를 몰아 보고, 그 뒤에야 올린다."""
+    src = open(os.path.join(ROOT, "release.py"), encoding="utf-8").read()
+    body = src[src.index("def main("):]
+    assert body.index("exe_smoke(args.version)") < body.index("uicheck_gate("), \
+        "스모크보다 먼저 몰아 본다"
+    assert body.index("uicheck_gate(") < body.index('step("푸시")'), \
+        "게시한 뒤에 확인한다 — 늦다"

@@ -462,8 +462,12 @@ def main():
     ap.add_argument("--expect-version", default="", help="창 제목에서 확인할 버전(예: 224)")
     args = ap.parse_args()
 
-    exe = args.exe or installed_exe()
-    for p in (args.a_file, args.b_file, exe):
+    # 상대 경로를 그대로 넘기면 CreateProcess 가 WinError 2 로 떨어진다(실측:
+    # 'dist/ExcelMerge/ExcelMerge.exe'). 앱의 작업 폴더와도 무관해지도록 절대로 푼다.
+    exe = os.path.abspath(args.exe or installed_exe())
+    a_file = os.path.abspath(args.a_file)
+    b_file = os.path.abspath(args.b_file)
+    for p in (a_file, b_file, exe):
         if not os.path.isfile(p):
             print(f"✖ 없는 경로: {p}")
             return 1
@@ -472,7 +476,7 @@ def main():
     atexit.register(shutil.rmtree, outdir, True)
     print(f"작업 폴더: {outdir}   (원본은 읽기만 한다)")
 
-    fails = run(args.a_file, args.b_file, exe, args.expect_version, outdir)
+    fails = run(a_file, b_file, exe, args.expect_version, outdir)
     print()
     if fails:
         print(f"✖ 어긋남 {len(fails)}건: {', '.join(fails)}")

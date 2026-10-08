@@ -240,6 +240,54 @@ def merge_check_gate(skip: bool, env):
         shutil.rmtree(out_dir, ignore_errors=True)
 
 
+def uicheck_files():
+    """실기 확인에 쓸 A/B **파일** 한 쌍 — 환경변수로 받는다.
+
+    merge_check 는 폴더를 받지만 이건 파일 한 쌍이다. 폴더에서 자동으로 고르지 않는다 —
+    크기가 달라도 내용이 같은 쌍이 흔하고(실측: Data_MiniGameRoulette_CS.xlsx 는 크기가
+    다른데 변경 셀 0개), 그런 쌍을 집으면 병합·저장 검사가 할 일이 없어진다.
+    """
+    a = os.environ.get("EXCELMERGE_UICHECK_A", "").strip().strip('"')
+    b = os.environ.get("EXCELMERGE_UICHECK_B", "").strip().strip('"')
+    if not a and not b:
+        return None
+    if not a or not b:
+        fail("EXCELMERGE_UICHECK_A 와 EXCELMERGE_UICHECK_B 는 **둘 다** 설정해야 합니다.")
+    for p in (a, b):
+        if not os.path.isfile(p):
+            fail(f"EXCELMERGE_UICHECK_* 가 가리키는 파일이 없습니다: {p}")
+    return a, b
+
+
+def uicheck_gate(version: str, skip: bool, env):
+    """빌드된 exe 를 **실제로 몰아 본다** — 창이 뜨는지만 보는 스모크의 다음 단계.
+
+    exe_smoke 는 파일도 안 열고 아무것도 안 눌러 본다. 그걸로는 못 잡는 게 있다.
+    v221(저장 뒤 Ctrl+S 오류 창)은 게시한 **뒤** 실기에서야 드러났다 — 그 확인을
+    여기로 당긴다. 설치 없이 dist 의 exe 를 그대로 쓴다.
+
+    ※ 이 단계는 **실제 키보드·마우스**를 쓴다. 40초쯤 기계를 점유하므로 그동안 다른
+      창을 건드리면 안 된다(건드리면 uicheck 의 포그라운드 가드가 입력을 막고 이
+      단계만 실패한다 — 다른 앱에 키가 들어가지는 않는다).
+    """
+    step("실기 동작 확인 (빌드된 exe 를 몰아 본다)")
+    if skip:
+        print("  건너뜀 — --skip-ui-check")
+        return
+    files = uicheck_files()
+    if files is None:
+        print("  건너뜀 — EXCELMERGE_UICHECK_A / EXCELMERGE_UICHECK_B 가 설정돼 있지 않습니다.")
+        print("    변경점이 있는 파일 한 쌍을 가리키게 두면 릴리스마다 자동으로 돌립니다:")
+        print("      set EXCELMERGE_UICHECK_A=D:/.../36_Build/.../Data_MailBox_CS.xlsx")
+        print("      set EXCELMERGE_UICHECK_B=D:/.../40_Build/.../Data_MailBox_CS.xlsx")
+        return
+    a, b = files
+    exe = os.path.join("dist", "ExcelMerge", "ExcelMerge.exe")
+    print("  !! 40초쯤 키보드·마우스를 씁니다 — 그동안 다른 창을 건드리지 마세요.")
+    run([sys.executable, "uicheck.py", a, b, "--exe", exe,
+         "--expect-version", version], env=env)
+
+
 def iscc_path() -> str:
     """Inno Setup 컴파일러(ISCC.exe) 경로. 못 찾으면 멈춘다.
 
@@ -324,6 +372,8 @@ def main():
                     help="로컬 커밋·빌드·스모크까지만 — 푸시/게시는 하지 않는다")
     ap.add_argument("--skip-merge-check", action="store_true",
                     help="전수 머지 검사를 건너뛴다(저장 쪽을 안 건드렸을 때만)")
+    ap.add_argument("--skip-ui-check", action="store_true",
+                    help="실기 동작 확인을 건너뛴다(키보드·마우스를 쓸 수 없을 때)")
     args = ap.parse_args()
 
     if not args.version.isdigit():
@@ -362,6 +412,11 @@ def main():
         print("  4) 커밋: chore(release): v{0} — 버전 bump + CHANGELOG".format(args.version))
         print("  5) PyInstaller 빌드 + 서명 시도")
         print("  6) exe 실행 스모크(창 확인)")
+        _u = uicheck_files()
+        print("  6b) 실기 동작 확인: "
+              + ("건너뜀(--skip-ui-check)" if args.skip_ui_check
+                 else (f"{os.path.basename(_u[0])} <-> {os.path.basename(_u[1])}" if _u
+                       else "건너뜀(EXCELMERGE_UICHECK_A/B 미설정)")))
         if not args.no_publish:
             print("  7) 푸시 + GitHub Release 게시(노트는 CHANGELOG 절 그대로)")
         print("\n릴리스 노트 미리보기 —")
@@ -404,6 +459,8 @@ def main():
 
     step("exe 실행 스모크")
     exe_smoke(args.version)
+
+    uicheck_gate(args.version, args.skip_ui_check, env)
 
     if args.no_publish:
         print(f"\n✔ v{args.version} 로컬 준비 완료 — 푸시/게시는 하지 않았습니다.")

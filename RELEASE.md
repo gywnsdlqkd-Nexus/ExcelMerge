@@ -7,10 +7,12 @@ python release.py <버전>              # 예: python release.py 203
 python release.py <버전> --dry-run    # 무엇을 할지만 보여주고 아무것도 바꾸지 않음
 python release.py <버전> --no-publish # 로컬 커밋·빌드·스모크까지만
 python release.py <버전> --skip-merge-check   # 전수 머지 검사만 건너뜀
+python release.py <버전> --skip-ui-check      # 실기 동작 확인만 건너뜀
 ```
 
 아래 "순서"를 그대로 돌린다: 사전 점검 → 버전 bump → CHANGELOG 승격 → **테스트** →
-**전수 머지 검사** → 커밋 → 빌드 → 서명 → **exe 실행 스모크** → 푸시 → 게시. 릴리스 노트는 CHANGELOG 의
+**전수 머지 검사** → 커밋 → 빌드 → 서명 → **exe 실행 스모크** → **실기 동작 확인** →
+푸시 → 게시. 릴리스 노트는 CHANGELOG 의
 해당 절을 그대로 쓰므로, **배포 전에 `## [미배포]` 에 변경점을 적어 두면 된다**.
 
 스크립트가 막는 것:
@@ -21,13 +23,31 @@ python release.py <버전> --skip-merge-check   # 전수 머지 검사만 건너
    옛 순서(bump 전 테스트)로는 못 잡는다(v200 때 실제로 그렇게 깨졌다).
  - 푸시·게시는 빌드와 exe 실행 스모크를 통과한 뒤에만 한다.
  - **전수 머지 검사는 커밋 앞에서** 돌린다 — 실패해도 되돌릴 커밋이 없다.
+ - **실기 동작 확인은 게시 앞에서** 돌린다 — v221 은 이 자리를 통과하고 게시된 뒤에야
+   드러났다. 설치하지 않고 `dist` 의 exe 를 그대로 몰아 본다.
  - 그 검사를 **건너뛸 때는 반드시 그렇게 말한다.** 조용히 넘어가면 "돌렸겠거니" 가
    되고, 실제로 v219~v221 이 그렇게 나갔다(v222 의 버그는 그 셋보다 앞서 있었다).
 
 ## 실기 확인 — uicheck.py
 
+**릴리스가 알아서 돌린다.** 변경점이 있는 파일 **한 쌍**을 가리켜 두면 된다. 폴더에서
+자동으로 고르지 않는다 — 크기가 달라도 내용이 같은 쌍이 흔하고(실측:
+`Data_MiniGameRoulette_CS.xlsx` 는 크기가 다른데 변경 셀 0개), 그런 쌍을 집으면 병합·저장
+검사가 할 일이 없어진다.
+
 ```
-python uicheck.py <A.xlsx> <B.xlsx> --expect-version <버전>
+setx EXCELMERGE_UICHECK_A "D:/HyoJun-Park-36_Build/GameData/ExcelData/Data_MailBox_CS.xlsx"
+setx EXCELMERGE_UICHECK_B "D:/HyoJun-Park-40_Build/GameData/ExcelData/Data_MailBox_CS.xlsx"
+```
+
+> 이 단계는 **실제 키보드·마우스**를 쓴다. 40초쯤 기계를 점유하므로 그동안 다른 창을
+> 건드리지 말 것. 건드리면 포그라운드 가드가 입력을 막아 이 단계만 실패한다 — 다른
+> 앱에 키가 들어가지는 않는다.
+
+손으로 돌리려면:
+
+```
+python uicheck.py <A.xlsx> <B.xlsx> --expect-version <버전> [--exe 경로]
 ```
 
 **설치본을 실제로 몰아 본다** — 창 제목의 버전, 셀값란 Ctrl+C, 병합 준비 → Ctrl+S 저장,

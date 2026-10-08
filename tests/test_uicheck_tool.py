@@ -126,3 +126,16 @@ def test_it_fails_loudly(src):
     i = src.index("def main(")
     body = src[i:]
     assert "return 1" in body and "sys.exit(main())" in src
+
+
+def test_paths_are_made_absolute(src):
+    """상대 경로를 그대로 넘기면 CreateProcess 가 WinError 2 로 떨어진다.
+
+    릴리스 게이트는 `dist/ExcelMerge/ExcelMerge.exe` 를 상대로 넘긴다 — 실제로 그렇게
+    터졌다. 앱의 작업 폴더와도 무관해지도록 절대 경로로 푼다.
+    """
+    i = src.index("def main(")
+    body = src[i:]
+    assert "os.path.abspath(args.exe" in body, "--exe 를 절대 경로로 풀지 않는다"
+    assert "os.path.abspath(args.a_file)" in body and \
+           "os.path.abspath(args.b_file)" in body, "입력 파일을 절대 경로로 풀지 않는다"
