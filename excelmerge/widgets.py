@@ -639,6 +639,7 @@ class FreezeController(QObject):
         # left 오버레이의 행 숨김이 본체와 일치하는지. False 면 다음 미러를 전 행으로
         # 돌린다(델타 미러의 전제 조건). 모델 리셋/freeze 해제로 무너진다.
         self._rows_synced = False
+        self._fixing = False      # 밴드 어긋남 보정 중 재진입 방지
         self.corner = self._make_view(headers=True)
         self.top = self._make_view(headers=False)
         self.left = self._make_view(headers=False)
@@ -1017,6 +1018,12 @@ class FreezeController(QObject):
         finally:
             vh.blockSignals(prev_blocked)
             left.setVerticalScrollMode(prev_vmode)
+            # 위에서 헤더 시그널을 막고 스크롤 모드를 바꿔 뒀기 때문에 Qt 가 이 뷰의
+            # **스크롤 범위를 다시 계산하지 않는다.** 범위가 옛값(짧은 쪽)으로 남으면
+            # _sync_left_v 의 setValue 가 거기서 잘려(clamp) 고정 열이 본체를 못 따라가고
+            # 화면 위쪽에 붙박인다 — 아래로 스크롤할수록 키 값이 밀려 보인다.
+            # 실측: 전체 행 표시에서 본체는 4460 까지 가는데 오버레이 최댓값이 82 였다.
+            left.doItemsLayout()
 
     def _sync_scroll(self):
         if not self._alive():
@@ -1046,6 +1053,43 @@ class FreezeController(QObject):
         if not self._alive():
             return
         self.left.verticalScrollBar().setValue(self.host.verticalHeader().offset())
+        self._fix_left_drift()
+
+    def _fix_left_drift(self):
+        """밴드가 **그려지는 위치**로도 본체와 맞는지 보고, 어긋나면 자리를 다시 잡는다.
+
+        오프셋만 맞추는 것으로는 부족하다. 밴드는 별도 위젯이고 그 y 는 reposition()
+        이 `fr + hdrH + fh` 로 정하는데, reposition 은 **크기 변경 때만** 돈다. 그 뒤
+        가로 헤더 높이나 고정 행 높이(fh)가 바뀌면 밴드만 몇 픽셀 어긋난 채 남는다.
+        그래도 오프셋은 서로 같으니 동기화는 "맞다"고 보고 넘어간다 — 그래서 **스크롤을
+        아무리 해도 안 고쳐지고** 창 크기를 바꿔야 돌아왔다.
+
+        실측(36↔40 빌드 Data_MailBox_CS.xlsx): 키 열이 반 행 아래로 밀린 채 유지됐고,
+        행 번호·본문은 서로 맞아서 "키 값만 아래로 밀린다" 로 보였다. 창을 조금만
+        키웠다 줄이면 즉시 정상으로 돌아왔다.
+
+        한 행의 화면 위치만 비교하므로 스크롤 1회당 비용은 무시할 만하다.
+        """
+        if self._fixing or not self._active or not self._alive():
+            return
+        host, left = self.host, self.left
+        if not left.isVisible():
+            return
+        r = host.rowAt(0)          # 화면 맨 위에 걸린 행 — 양쪽이 같은 행을 그려야 한다
+        # left.isRowHidden 은 **부르지 않는다.** 행 미러링이 델타로 도는지 세는 테스트가
+        # 오버레이 접근 횟수를 보고 있어, 여기서 한 번만 더 봐도 그 보장이 깨진 것처럼
+        # 보인다. 높이로 판정해도 충분하다(숨긴 행은 높이가 0).
+        if r < 0 or left.rowHeight(r) == 0:
+            return
+        hy = host.viewport().mapToGlobal(QPoint(0, host.rowViewportPosition(r))).y()
+        ly = left.viewport().mapToGlobal(QPoint(0, left.rowViewportPosition(r))).y()
+        if hy == ly:
+            return
+        self._fixing = True
+        try:
+            self.reposition()      # 처음부터 다시 계산 — 창 크기 변경이 하던 일
+        finally:
+            self._fixing = False
 
     def reposition(self):
         """헬퍼 3개의 위치/크기를 본체 헤더·고정 크기 기준으로 재계산. updateGeometries에서 호출."""
