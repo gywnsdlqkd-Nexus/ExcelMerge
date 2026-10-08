@@ -19,6 +19,54 @@ if _ROOT not in sys.path:
 import pytest
 
 
+def pytest_configure(config):
+    """Qt 슬롯에서 조용히 사라지는 예외를 모아 둔다 — 아래 픽스처가 실패로 바꾼다.
+
+    C++ 가 부른 슬롯(closeEvent·타이머·시그널) 안에서 예외가 처리되지 않으면,
+    PyQt5 는 sys.excepthook 을 부르고 **그대로 지나간다.** 트레이스백은 pytest 가
+    가로챈 출력에 담겼다가 테스트가 통과하면 버려지고, 그 테스트는 **초록색으로
+    끝난다.** 즉 앱 안에서 실제로 터진 예외가 테스트에서는 아무 표시도 남기지 않는다.
+
+    실제로 v220 의 회귀(저장이 끝난 워커 참조로 isRunning() 호출)가 이 구멍으로
+    빠져나가 실기에서야 오류 창으로 드러났다.
+
+    여기서는 모으기만 하고, 판정은 no_unhandled_qt_exceptions 가 한다 — 어느
+    테스트가 터뜨렸는지 짚어 줘야 쓸모가 있기 때문이다.
+    """
+    import traceback
+
+    config._qt_slot_errors = []
+    prev = sys.excepthook
+
+    def _hook(exc_type, exc, tb):
+        config._qt_slot_errors.append(
+            "".join(traceback.format_exception(exc_type, exc, tb)))
+        prev(exc_type, exc, tb)
+
+    sys.excepthook = _hook
+    config.add_cleanup(lambda: setattr(sys, "excepthook", prev))
+
+
+@pytest.fixture(autouse=True)
+def no_unhandled_qt_exceptions(request):
+    """그 테스트가 도는 동안 Qt 슬롯에서 예외가 샜으면 **실패시킨다.**
+
+    자기 구간에 새로 쌓인 것만 본다 — 앞 테스트가 흘린 것까지 뒤집어쓰면 범인이
+    엉뚱해진다.
+    """
+    errs = getattr(request.config, "_qt_slot_errors", None)
+    if errs is None:
+        yield
+        return
+    start = len(errs)
+    yield
+    new = errs[start:]
+    if new:
+        pytest.fail("Qt 슬롯에서 처리되지 않은 예외 "
+                    f"{len(new)}건 — 앱에서는 조용히 지나간다:\n\n"
+                    + "\n".join(new))
+
+
 @pytest.fixture(scope="session")
 def qapp():
     """세션 1회 QApplication. Qt 위젯/모델을 다루는 테스트에서 인자로 받아 쓴다."""

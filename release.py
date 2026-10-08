@@ -22,8 +22,10 @@ import argparse
 import datetime
 import os
 import re
+import shutil
 import subprocess
 import sys
+import tempfile
 
 # 콘솔이 cp949 여도 진행 문구 때문에 죽지 않게 한다. '—'(—)·'▶'·'✖' 는 cp949 로
 # 인코딩되지 않아, v206 릴리스가 **버전 bump 직후** UnicodeEncodeError 로 끊긴 적이 있다
@@ -186,6 +188,58 @@ def _kill_tree(proc, extra_pids=()) -> None:
                            capture_output=True)
 
 
+def merge_check_dirs():
+    """전수 머지 검사에 쓸 A/B 빌드 폴더 — 환경변수로 받는다.
+
+    경로는 머신마다 달라 저장소에 적을 수 없다. sign.py 가 인증서를 환경변수로 받는
+    방식과 같다. 둘 중 하나만 설정돼 있으면 설정 실수로 보고 멈춘다.
+    """
+    a = os.environ.get("EXCELMERGE_CHECK_A", "").strip().strip('"')
+    b = os.environ.get("EXCELMERGE_CHECK_B", "").strip().strip('"')
+    if not a and not b:
+        return None
+    if not a or not b:
+        fail("EXCELMERGE_CHECK_A 와 EXCELMERGE_CHECK_B 는 **둘 다** 설정해야 합니다.")
+    for d in (a, b):
+        if not os.path.isdir(d):
+            fail(f"EXCELMERGE_CHECK_* 가 가리키는 폴더가 없습니다: {d}")
+    return a, b
+
+
+def merge_check_gate(skip: bool, env):
+    """실제 빌드 데이터로 머지를 **전부** 돌려 본다 — 저장 쪽 회귀를 여기서 막는다.
+
+    pytest 로는 부족하다. 합성 조작("셀 하나 고치기", "행 몇 개 지우기")은 실제 머지가
+    밟는 경로(열 매칭 · 빈 열/행 삭제 승격 · 행 삽입 · 서식 병합)를 안 밟는다.
+    v215 에서 터진 셋도, v222 의 '끝 행 삭제 + 삽입' 도 이 검사에서만 나왔다.
+
+    설정이 없으면 건너뛰되 **그 사실을 반드시 출력한다.** 조용히 넘어가면 '돌렸겠거니'
+    가 되고, 실제로 v219~v221 이 그렇게 나갔다. v222 의 버그는 그 셋보다 앞서 있었다.
+
+    원본은 읽기만 한다 — merge_check.py 가 B 를 출력 폴더로 복사해 거기에만 쓴다.
+    """
+    step("전수 머지 검사 (실제 빌드 데이터)")
+    if skip:
+        print("  건너뜀 — --skip-merge-check")
+        print("    저장 쪽(xlsx_writer/merge_build/staging)을 건드렸다면 반드시 돌릴 것.")
+        return
+    dirs = merge_check_dirs()
+    if dirs is None:
+        print("  건너뜀 — EXCELMERGE_CHECK_A / EXCELMERGE_CHECK_B 가 설정돼 있지 않습니다.")
+        print("    두 빌드 폴더를 가리키게 두면 릴리스마다 자동으로 돌립니다:")
+        print("      set EXCELMERGE_CHECK_A=D:/HyoJun-Park-38_Build/GameData/ExcelData")
+        print("      set EXCELMERGE_CHECK_B=D:/HyoJun-Park-40_Build/GameData/ExcelData")
+        return
+    a, b = dirs
+    out_dir = tempfile.mkdtemp(prefix="release_merge_check_")
+    print(f"  A {a}")
+    print(f"  B {b}")
+    try:
+        run([sys.executable, "merge_check.py", a, b, out_dir, "--excel"], env=env)
+    finally:
+        shutil.rmtree(out_dir, ignore_errors=True)
+
+
 def iscc_path() -> str:
     """Inno Setup 컴파일러(ISCC.exe) 경로. 못 찾으면 멈춘다.
 
@@ -268,6 +322,8 @@ def main():
                     help="검사만 하고 아무것도 바꾸지 않는다")
     ap.add_argument("--no-publish", action="store_true",
                     help="로컬 커밋·빌드·스모크까지만 — 푸시/게시는 하지 않는다")
+    ap.add_argument("--skip-merge-check", action="store_true",
+                    help="전수 머지 검사를 건너뛴다(저장 쪽을 안 건드렸을 때만)")
     args = ap.parse_args()
 
     if not args.version.isdigit():
@@ -298,6 +354,11 @@ def main():
         print(f"  1) __version__ = \"{args.version}\"")
         print(f"  2) CHANGELOG: [미배포] → [{args.version}] - {date}")
         print("  3) pytest (버전 올린 뒤에 돌린다)")
+        _d = merge_check_dirs()
+        print("  3b) 전수 머지 검사: "
+              + ("건너뜀(--skip-merge-check)" if args.skip_merge_check
+                 else (f"{_d[0]} <-> {_d[1]}" if _d
+                       else "건너뜀(EXCELMERGE_CHECK_A/B 미설정)")))
         print("  4) 커밋: chore(release): v{0} — 버전 bump + CHANGELOG".format(args.version))
         print("  5) PyInstaller 빌드 + 서명 시도")
         print("  6) exe 실행 스모크(창 확인)")
@@ -317,6 +378,8 @@ def main():
     env = dict(os.environ, PYTHONIOENCODING="utf-8")
     run([sys.executable, "-m", "pytest", "tests/", "-q"], env=env)
     run([sys.executable, "tests/smoke_test.py"], env=env)
+
+    merge_check_gate(args.skip_merge_check, env)
 
     step("커밋")
     run(["git", "add", "excelmerge/__init__.py", "CHANGELOG.md"])
