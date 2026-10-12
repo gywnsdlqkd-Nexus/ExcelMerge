@@ -29,6 +29,11 @@ MAX_FNAME_NUMBER = 1024  # RowName FName Number 필드 상한
 ROW_SCORE_CAP = 64  # RowMap 후보 검증 시 시도할 최대 row 수
 ROW_PROP_SAFETY_LIMIT = 1000  # row 1개당 property 파싱 루프 상한
 MAX_ROW_PROP_SIZE = 1024 * 1024  # RowMap 첫 PropertyTag size 상한 (1MB)
+MAX_SOFT_PATHS = 1_000_000  # PackageSummary SoftObjectPathsCount 상한
+
+# UE5 패키지 버전 중 소프트 경로 직렬화가 바뀐 두 지점 (EUnrealEngineObjectUE5Version)
+UE5_SOFTPATH_TOP_LEVEL = 1007  # FSOFTOBJECTPATH_REMOVE_ASSET_PATH_FNAMES: 경로 = 패키지 FName + 에셋 FName
+UE5_SOFTPATH_LIST = 1008       # ADD_SOFTOBJECTPATH_LIST: 값에는 헤더 테이블의 int32 인덱스만 쓴다
 
 
 def _read_fstring(buf: bytes, offset: int) -> tuple[str, int]:
@@ -140,8 +145,9 @@ def _parse_package_summary(buf: bytes) -> dict | None:
         # legacy_ue3_version (항상 존재, -7 이전엔 없지만 보통은 있음)
         off += 4  # legacy_ue3_version
         off += 4  # file_version_ue4
+        file_version_ue5 = 0
         if legacy <= -8:
-            off += 4  # file_version_ue5
+            file_version_ue5 = struct.unpack_from("<i", buf, off)[0]; off += 4
         off += 4  # file_version_licensee_ue4
         # CustomVersions Array (count + count * 20bytes)
         custom_count = struct.unpack_from("<i", buf, off)[0]; off += 4
@@ -173,11 +179,21 @@ def _parse_package_summary(buf: bytes) -> dict | None:
             return None
         if name_offset <= 0 or name_offset >= len(buf):
             return None
+        soft_count, soft_offset = 0, 0
+        if file_version_ue5 >= UE5_SOFTPATH_LIST:
+            if off + 8 > len(buf):
+                return None
+            soft_count, soft_offset = struct.unpack_from("<ii", buf, off); off += 8
+            if soft_count < 0 or soft_count > MAX_SOFT_PATHS:
+                return None
         return {
             "name_count": name_count,
             "name_offset": name_offset,
             "total_header_size": total_header_size,
             "legacy": legacy,
+            "file_version_ue5": file_version_ue5,
+            "soft_count": soft_count,
+            "soft_offset": soft_offset,
         }
     except Exception:
         return None
@@ -235,6 +251,89 @@ def _read_fname(buf: bytes, off: int, names: list[str]) -> tuple[str, int]:
     if num > 0:
         name = f"{name}_{num - 1}"
     return name, off + 8
+
+
+class _NameTable(list):
+    """이름 테이블 + 같은 패키지의 소프트 경로 테이블.
+
+    값 디코드 함수들은 모두 `names` 하나만 받아 내려간다. 소프트 경로는 UE5 1008
+    부터 이름처럼 헤더의 테이블을 가리키는 인덱스로 저장되므로, 그 테이블을 같은
+    통로로 넘긴다(스레드마다 다른 파일을 읽으므로 모듈 전역에 둘 수 없다).
+
+      soft_paths  None  — 값에 경로가 그대로 들어 있다(1008 이전, 또는 테이블이 빈 패키지)
+                  list  — 값은 이 테이블의 int32 인덱스
+      ue5         FileVersionUE5 — 인라인 경로가 FName 1개(1007 이전)인지 2개인지 가른다
+    """
+    soft_paths: list[str] | None = None
+    ue5: int = 0
+
+
+def _fmt_soft_path(pkg: str, asset: str, sub: str) -> str:
+    """FSoftObjectPath → 언리얼의 레퍼런스 표기 `/Game/Dir/Pkg.Asset[:Sub]`. 빈 경로는 None."""
+    if pkg == "None":
+        return "None"
+    out = f"{pkg}.{asset}" if asset and asset != "None" else pkg
+    return f"{out}:{sub}" if sub else out
+
+
+def _read_soft_path_table(buf: bytes, names: list[str], count: int, offset: int) -> list[str]:
+    """헤더의 SoftObjectPaths 테이블. 항목 = 패키지 FName + 에셋 FName + SubPath FString."""
+    if offset <= 0 or offset >= len(buf):
+        raise _UAssetParseError(f"soft path table offset out of range: {offset}")
+    out: list[str] = []
+    off = offset
+    for _ in range(count):
+        pkg, off = _read_fname(buf, off, names)
+        asset, off = _read_fname(buf, off, names)
+        sub, off = _read_fstring(buf, off)
+        out.append(_fmt_soft_path(pkg, asset, sub))
+    return out
+
+
+def _attach_soft_paths(buf: bytes, names: list[str], summary: dict | None) -> _NameTable:
+    """이름 테이블에 소프트 경로 테이블을 붙인다.
+
+    테이블이 있어야 하는데 못 읽으면 빈 리스트로 둔다 — 그러면 소프트 값은 인덱스
+    조회에 실패해 `soft(4B)` 로 드러난다. 인라인으로 잘못 읽어 **그럴듯한 엉뚱한
+    경로**를 보여 주는 것(v226 까지의 버그)보다 낫다.
+    """
+    table = _NameTable(names)
+    if not summary:
+        return table
+    table.ue5 = summary.get("file_version_ue5", 0)
+    count = summary.get("soft_count", 0)
+    if table.ue5 >= UE5_SOFTPATH_LIST and count > 0:
+        try:
+            table.soft_paths = _read_soft_path_table(buf, names, count, summary["soft_offset"])
+        except Exception:
+            log.warning("uasset 소프트 경로 테이블 디코드 실패", exc_info=True)
+            table.soft_paths = []
+    return table
+
+
+def _read_soft_path(buf: bytes, off: int, names: list[str]) -> tuple[str, int]:
+    """SoftObjectProperty 값 1개 → (표기, 다음 offset).
+
+    UE5 1008 이상은 값이 헤더 테이블의 int32 인덱스 4바이트다. 이를 FName(8바이트)
+    으로 읽으면 이름 테이블의 엉뚱한 경로 + 다음 프로퍼티의 이름 번호가 `_N`
+    접미사로 붙어 나온다(실측: DT_ContentsList 의 ContentsBGM 전 행).
+    """
+    soft = getattr(names, "soft_paths", None)
+    if soft is not None:
+        if off + 4 > len(buf):
+            raise _UAssetParseError("soft path index truncated")
+        idx = struct.unpack_from("<i", buf, off)[0]
+        if not 0 <= idx < len(soft):
+            raise _UAssetParseError(f"soft path index out of range: {idx}")
+        return soft[idx], off + 4
+    if getattr(names, "ue5", 0) >= UE5_SOFTPATH_TOP_LEVEL:
+        pkg, off = _read_fname(buf, off, names)
+        asset, off = _read_fname(buf, off, names)
+        sub, off = _read_fstring(buf, off)
+        return _fmt_soft_path(pkg, asset, sub), off
+    path, off = _read_fname(buf, off, names)
+    sub, off = _read_fstring(buf, off)
+    return (f"{path}:{sub}" if sub else path), off
 
 
 def _read_property_tag(
@@ -367,6 +466,9 @@ def _read_array_value(buf, off, end, tag, names) -> str:
             elif inner == "ObjectProperty":
                 if cur + 4 > end: break
                 items.append(f"Obj({struct.unpack_from('<i', buf, cur)[0]})"); cur += 4
+            elif inner == "SoftObjectProperty":
+                p, cur = _read_soft_path(buf, cur, names)
+                items.append(p)
             else:
                 break
         suffix = ", …" if count > len(items) else ""
@@ -430,9 +532,7 @@ def _read_property_value(buf, value_off, value_end, tag, names) -> str:
             return f"Obj({idx})"
         if t == "SoftObjectProperty":
             try:
-                name, off2 = _read_fname(buf, value_off, names)
-                sub, _ = _read_fstring(buf, off2)
-                return f"{name}{':' + sub if sub else ''}"
+                return _read_soft_path(buf, value_off, names)[0]
             except Exception:
                 return f"soft({value_end - value_off}B)"
         if t == "StructProperty":
@@ -654,6 +754,7 @@ def load_uasset_as_matrix(path: str) -> list[list[str]]:
     try:
         names, _, name_end = _scan_name_table(buf)
         summary = _parse_package_summary(buf)
+        names = _attach_soft_paths(buf, names, summary)
         scan_from = summary["total_header_size"] if summary else name_end
         hit = _find_row_map_start(buf, scan_from, names)
         if hit is None:
