@@ -64,6 +64,20 @@ def test_installer_app_id_is_fixed():
     assert "{#MyVersion}" not in m.group(0), "AppId 에 버전이 섞였다"
 
 
+def test_desktop_shortcut_is_checked_by_default():
+    """바탕 화면 바로 가기는 기본으로 체크돼 있어야 한다(v227 요청).
+
+    Inno 는 `Flags: unchecked` 가 붙으면 기본 해제다. 바로 가기 자체(Icons)도 그 작업에
+    묶여 있어야 체크를 풀면 안 만든다.
+    """
+    iss = _read("installer.iss")
+    task = re.search(r'^Name:\s*"desktopicon".*?(?=^\S|\Z)', iss, re.M | re.S)
+    assert task, "바탕 화면 바로 가기 작업이 없다"
+    assert "unchecked" not in task.group(0), "기본으로 꺼져 있다"
+    assert re.search(r'^Name:\s*"\{autodesktop\}.*Tasks:\s*desktopicon', iss, re.M), \
+        "바로 가기가 작업 선택과 묶여 있지 않다"
+
+
 def test_installer_packs_the_whole_folder():
     iss = _read("installer.iss")
     assert "recursesubdirs" in iss, "_internal 하위가 안 들어간다"

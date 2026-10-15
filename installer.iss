@@ -59,8 +59,11 @@ RestartApplications=no
 Name: "korean"; MessagesFile: "compiler:Languages\Korean.isl"
 
 [Tasks]
+; 바탕 화면 바로 가기는 **기본으로 체크**한다(v227~, 요청).
+; 업데이트(같은 AppId 로 덮어 설치)는 지난번 선택을 그대로 쓴다(UsePreviousTasks 기본값) —
+; 예전에 체크하지 않고 설치한 사람은 자동 업데이트가 바로 가기를 새로 만들지 않는다.
 Name: "desktopicon"; Description: "바탕 화면에 바로 가기 만들기"; \
-    GroupDescription: "추가 작업:"; Flags: unchecked
+    GroupDescription: "추가 작업:"
 
 [Files]
 ; dist/ExcelMerge/ 통째로. recursesubdirs 로 _internal 까지 따라간다.
