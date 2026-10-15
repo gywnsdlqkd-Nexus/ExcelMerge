@@ -1017,7 +1017,7 @@ def test_freeze_bulk_guard():
     print("PASS test_freeze_bulk_guard")
 
 
-def test_freeze_corner_menu_nonmodal():
+def test_freeze_corner_menu_nonmodal(monkeypatch):
     """크래시 회귀 방지: 고정(corner) 헤더 우클릭 메뉴는 비모달 popup으로 키 열/행 신호를 emit해야
     하고, 모달 exec_는 쓰면 안 된다(자식 오버레이 헤더에서 exec_ 시 access violation 크래시)."""
     from PyQt5.QtWidgets import QMenu
@@ -1037,8 +1037,10 @@ def test_freeze_corner_menu_nonmodal():
     ch.logicalIndexAt = lambda pos: 0     # 오프스크린 레이아웃 무관하게 섹션 0 지정
     cv.logicalIndexAt = lambda pos: 0
     exec_calls = []
-    orig_exec, orig_popup = QMenu.exec_, QMenu.popup
-    QMenu.exec_ = lambda self, *a, **k: (exec_calls.append(1), None)[1]
+    # monkeypatch 로 바꾼다 — `orig = QMenu.popup` 으로 저장했다 되돌리면 원래의 메서드
+    # 디스크립터가 아니라 바인딩되지 않는 함수가 들어가, 이후 **모든** menu.popup(pos) 가
+    # pos 를 self 로 받아 깨진다(진짜 popup 을 부르는 test_selfcheck 가 처음 밟았다).
+    monkeypatch.setattr(QMenu, "exec_", lambda self, *a, **k: (exec_calls.append(1), None)[1])
 
     # 코너 메뉴엔 이제 '병합 준비' 항목도 섞일 수 있으므로(키 열/행에서도 노출), 첫 항목이 아니라
     # '키 …' 항목을 텍스트로 찾아 트리거해 키 신호를 검증한다.
@@ -1047,15 +1049,12 @@ def test_freeze_corner_menu_nonmodal():
             if "키 " in act.text():
                 act.trigger()
                 return
-    QMenu.popup = _trigger_key
+    monkeypatch.setattr(QMenu, "popup", _trigger_key)
     col_sig, row_sig = [], []
     t.key_col_changed.connect(col_sig.append)
     t.key_row_changed.connect(row_sig.append)
-    try:
-        fc._corner_row_menu(QPoint(1, 1))   # 원본 행0(≠key_row1) → 키 행으로 설정 → emit 0
-        fc._corner_col_menu(QPoint(1, 1))   # 열0(≠key_col1) → 키 열로 설정 → emit 0
-    finally:
-        QMenu.exec_, QMenu.popup = orig_exec, orig_popup
+    fc._corner_row_menu(QPoint(1, 1))   # 원본 행0(≠key_row1) → 키 행으로 설정 → emit 0
+    fc._corner_col_menu(QPoint(1, 1))   # 열0(≠key_col1) → 키 열로 설정 → emit 0
     assert row_sig == [0], f"corner 키 행 신호 오류: {row_sig}"
     assert col_sig == [0], f"corner 키 열 신호 오류: {col_sig}"
     assert exec_calls == [], "corner 메뉴가 모달 exec_ 사용 — 크래시 회귀 위험"
@@ -1063,7 +1062,7 @@ def test_freeze_corner_menu_nonmodal():
     print("PASS test_freeze_corner_menu_nonmodal")
 
 
-def test_freeze_corner_menu_has_merge_items():
+def test_freeze_corner_menu_has_merge_items(monkeypatch):
     """키 열/행(틀 고정 corner) 헤더 우클릭에도 변경 셀이 있으면 A/B 병합 준비 항목이 노출되고,
     트리거 시 stage_requested 가 emit 된다(비모달 popup)."""
     from PyQt5.QtWidgets import QMenu
@@ -1081,18 +1080,14 @@ def test_freeze_corner_menu_has_merge_items():
     ch.logicalIndexAt = lambda pos: 0     # 키 열(A, col0)
     stage_sig = []
     t.stage_requested.connect(stage_sig.append)
-    orig_popup = QMenu.popup
 
     def _trigger_a2b(self, *a_, **k):
         for act in self.actions():
             if "A → B" in act.text():
                 act.trigger()
                 return
-    QMenu.popup = _trigger_a2b
-    try:
-        fc._corner_col_menu(QPoint(1, 1))   # 키 열에도 신규 행 때문에 '병합 준비' 노출
-    finally:
-        QMenu.popup = orig_popup
+    monkeypatch.setattr(QMenu, "popup", _trigger_a2b)   # 복원 방식은 위 테스트 주석 참조
+    fc._corner_col_menu(QPoint(1, 1))   # 키 열에도 신규 행 때문에 '병합 준비' 노출
     assert stage_sig == ["a_to_b"], f"키 열 corner 병합 준비 미동작: {stage_sig}"
     win.close()
     print("PASS test_freeze_corner_menu_has_merge_items")
