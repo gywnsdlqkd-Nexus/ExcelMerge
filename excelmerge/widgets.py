@@ -519,6 +519,12 @@ class _TintHeaderView(QHeaderView):
         painter.restore()
 
 
+def _plain_shift(event) -> bool:
+    """Ctrl 없이 Shift 만 누른 클릭인가 — 범위 확장을 직접 처리하는 조건(ExcelTableView._shift_click_to)."""
+    m = event.modifiers()
+    return bool(m & Qt.ShiftModifier) and not (m & Qt.ControlModifier)
+
+
 class _FrozenView(QTableView):
     """틀 고정 헬퍼 뷰 — 본체 모델/선택모델을 공유한다. 자체 스크롤바 없음.
     휠 이벤트는 본체로 전달해 본체가 스크롤되고 컨트롤러가 헬퍼를 되동기하게 한다.
@@ -529,6 +535,7 @@ class _FrozenView(QTableView):
         self._host = host
         self._drag_anchor = None   # (row, col) 모델 좌표 — 오버레이↔본체 경계를 넘는 드래그 선택 앵커
         self._drag_custom = False  # 이번 드래그에서 _extend_drag로 직접 선택을 만들었는가
+        self._shift_consumed = False  # 이번 누름을 Shift+클릭 범위 확장으로 직접 처리했는가
 
     def wheelEvent(self, event):
         self._host.wheelEvent(event)
@@ -546,6 +553,13 @@ class _FrozenView(QTableView):
     def mousePressEvent(self, event):
         if event.button() == Qt.LeftButton:
             idx = self.indexAt(event.pos())
+            # Shift+클릭은 본체와 공유하는 기준 셀로 직접 넓힌다(이유: ExcelTableView._note_click_anchor).
+            if _plain_shift(event) and self._host._shift_click_to(idx):
+                self._shift_consumed = True
+                event.accept()
+                return
+            if not (event.modifiers() & Qt.ShiftModifier):
+                self._host._note_click_anchor(idx)
             self._drag_anchor = (idx.row(), idx.column()) if idx.isValid() else None
             self._drag_custom = False
             # 오버레이 드래그 중에도 A↔B 미러를 억제한다(본체와 선택 모델을 공유하므로
@@ -554,6 +568,12 @@ class _FrozenView(QTableView):
         super().mousePressEvent(event)
 
     def mouseMoveEvent(self, event):
+        # 직접 처리한 Shift+클릭 뒤의 이동(손떨림 포함)은 같은 기준으로 계속 넓힌다 — Qt 기본에
+        # 넘기면 이 뷰의 낡은 누름 위치에서 사각형을 다시 그려 방금 선택을 덮어쓴다.
+        if self._shift_consumed and (event.buttons() & Qt.LeftButton):
+            self._host._shift_click_to(self.indexAt(event.pos()))
+            event.accept()
+            return
         # Ctrl/Shift 드래그는 Qt 기본(ExtendedSelection)에 맡긴다 — 다중 영역 누적/확장 시맨틱을
         # 보존한다. 그러지 않으면 _extend_drag의 ClearAndSelect가 기존 선택을 지운다(Ctrl+클릭에
         # 1px 지터가 섞여도 마찬가지). 평범한 좌드래그만 경계 넘는 사각형 선택으로 처리한다.
@@ -570,8 +590,9 @@ class _FrozenView(QTableView):
         # super()의 릴리즈가 이를 '클릭'으로 보고 선택을 릴리즈 셀 하나로 리셋(고정 셀이면 0으로
         # 붕괴)해 방금 만든 다중 선택을 지운다(A열 키+ A1,B1 선택 시 풀림 버그). 커스텀 드래그였다면
         # super()를 건너뛰고 상태만 정리해 선택을 보존한다.
-        if self._drag_custom:
+        if self._drag_custom or self._shift_consumed:
             self._drag_custom = False
+            self._shift_consumed = False
             self._drag_anchor = None
             self.setState(QAbstractItemView.NoState)
             event.accept()
@@ -1294,6 +1315,11 @@ class ExcelTableView(QTableView):
         # 본체에서 시작한 드래그가 왼쪽 고정 열 밴드로 넘어갈 때의 앵커 (row, col) 모델 좌표.
         self._body_drag_anchor = None
         self._body_drag_custom = False   # 이번 드래그에서 경계 넘기 커스텀 선택을 만들었는가
+        # Shift+클릭의 기준 셀 (row, col) 모델 좌표 — 본체·고정 오버레이가 함께 쓴다.
+        # _shift_last_target 는 마지막으로 이 경로가 옮긴 현재 셀(키보드로 옮겨졌는지 판정용).
+        self._shift_anchor_cell = None
+        self._shift_last_target = None
+        self._shift_click_consumed = False
         # 헤더 드래그 선택(경계 넘기): 이벤트 필터를 건 헤더 → 축('col'/'row'), 진행 중 축.
         self._header_axis = {}
         self._header_drag_axis = None
@@ -1418,15 +1444,62 @@ class ExcelTableView(QTableView):
             self._drag_selecting = False
             self.drag_selection_finished.emit()
 
+    def _note_click_anchor(self, idx):
+        """Shift 없이 누른 셀을 Shift+클릭의 기준으로 기억한다 — 본체·고정 오버레이 공용.
+
+        Qt 는 Shift+클릭의 기준(앵커)을 **뷰마다 따로** 기억하고, 그 셀의 화면 위치에서
+        사각형을 그려 선택한다. 키 열/행은 본체에서 숨긴 채 오버레이가 그리므로 둘 다 틀어졌다.
+          ① 키 열 클릭은 오버레이가 받아 본체의 앵커가 안 바뀐다 → 본체 Shift+클릭이
+             **예전에 본체에서 누른 셀**부터 선택한다(실측: 9~12행 × C~D, 기대 5~9행 × A~C).
+          ② 앵커가 맞아도 본체에서 숨은 열의 화면 위치는 빈 사각형이다 → 보이는 첫 칸부터
+             선택한다(실측: 1~9행 × B~C).
+        그래서 기준은 모델 좌표로 공유하고, 범위도 모델 좌표로 직접 만든다.
+        """
+        if idx.isValid():
+            self._shift_anchor_cell = (idx.row(), idx.column())
+            self._shift_last_target = self._shift_anchor_cell
+
+    def _shift_click_to(self, idx) -> bool:
+        """기준 셀~idx 사각형을 선택하고 idx 를 현재 셀로 → 처리했으면 True.
+
+        마지막 클릭 뒤 키보드로 현재 셀이 옮겨졌으면 기준을 다시 잡는다 — 선택 사각형에서
+        현재 셀의 반대 모서리(Shift+방향키와 같은 규칙, _shift_anchor). 같은 기준으로 Shift+
+        클릭을 이어 하면 엑셀처럼 범위만 바뀐다.
+        """
+        if not idx.isValid():
+            return False
+        cur = self.currentIndex()
+        cur_rc = (cur.row(), cur.column()) if cur.isValid() else None
+        if self._shift_anchor_cell is None or cur_rc != self._shift_last_target:
+            self._shift_anchor_cell = (self._shift_anchor(*cur_rc) if cur_rc
+                                       else (idx.row(), idx.column()))
+        ar, ac = self._shift_anchor_cell
+        r, c = idx.row(), idx.column()
+        self._select_range(ar, ac, r, c)
+        self._set_current_cell_no_update(r, c)
+        self._shift_last_target = (r, c)
+        return True
+
     def mousePressEvent(self, event):
         if event.button() == Qt.LeftButton:
             idx = self.indexAt(event.pos())
+            if _plain_shift(event) and self._shift_click_to(idx):
+                self._shift_click_consumed = True
+                event.accept()
+                return
+            if not (event.modifiers() & Qt.ShiftModifier):
+                self._note_click_anchor(idx)
             self._body_drag_anchor = (idx.row(), idx.column()) if idx.isValid() else None
             self._body_drag_custom = False
             self._drag_selecting = True   # 드래그 중 미러 억제(종료 시 1회)
         super().mousePressEvent(event)
 
     def mouseMoveEvent(self, event):
+        # 직접 처리한 Shift+클릭 뒤의 이동은 같은 기준으로 넓힌다(_FrozenView 와 같은 이유).
+        if self._shift_click_consumed and (event.buttons() & Qt.LeftButton):
+            self._shift_click_to(self.indexAt(event.pos()))
+            event.accept()
+            return
         # Ctrl/Shift 드래그는 Qt 기본에 맡겨 다중 영역/확장 시맨틱을 보존한다(_FrozenView와 동일).
         if (self._body_drag_anchor is not None and (event.buttons() & Qt.LeftButton)
                 and not (event.modifiers() & (Qt.ControlModifier | Qt.ShiftModifier))):
@@ -1449,8 +1522,9 @@ class ExcelTableView(QTableView):
         # 커스텀 경계-넘기 드래그로 이동을 소비했으면 Qt는 드래그 상태로 진입하지 못한 채라,
         # super()의 릴리즈가 이를 '클릭'으로 보고 선택을 리셋해 방금 만든 선택을 지운다
         # (_FrozenView와 동일 이유). 커스텀 드래그였다면 super()를 건너뛰고 상태만 정리한다.
-        if self._body_drag_custom:
+        if self._body_drag_custom or self._shift_click_consumed:
             self._body_drag_custom = False
+            self._shift_click_consumed = False
             self._body_drag_anchor = None
             self.setState(QAbstractItemView.NoState)
             event.accept()
