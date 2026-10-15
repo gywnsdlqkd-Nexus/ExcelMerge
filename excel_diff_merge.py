@@ -4,7 +4,13 @@ import sys
 
 from PyQt5.QtWidgets import QApplication
 
-from excelmerge.main_window import MainWindow
+# 자체 점검(--selfcheck)은 사용자의 설정·로그를 건드리면 안 된다. 진단 로그 경로는
+# excelmerge 를 import 하는 **순간** 정해지므로 격리는 그 import 보다 앞에서 한다.
+from excelmerge import selfcheck as _selfcheck
+if _selfcheck.requested():
+    _selfcheck.isolate_environment()
+
+from excelmerge.main_window import MainWindow  # noqa: E402
 from excelmerge.theme import load_app_icon
 
 
@@ -49,6 +55,9 @@ def _set_windows_app_user_model_id():
 
 
 def main():
+    # 릴리스 게이트의 자체 점검 — 화면 없이 돌고 결과를 JSON 으로 남긴 뒤 끝난다.
+    if _selfcheck.requested():
+        sys.exit(_selfcheck.main())
     # 크래시/미처리 예외를 %APPDATA%/ExcelMerge/crash.log 에 기록(재현 어려운 버그 진단용).
     try:
         from excelmerge.crashlog import install as _install_crashlog

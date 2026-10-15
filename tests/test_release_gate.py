@@ -14,7 +14,9 @@ pytest 로는 저장 쪽 회귀를 다 못 잡는다. 합성 조작("셀 하나 
 않는 것**이 이 파일이 지키는 핵심이다 — 조용하면 '돌렸겠거니' 가 되고, 그게 처음에
 빠뜨린 이유였다.
 """
+import json
 import os
+import subprocess
 
 import pytest
 
@@ -156,89 +158,157 @@ def test_the_gate_runs_after_the_version_bump():
     assert body.index('step("버전 bump') < body.index("merge_check_gate(")
 
 
-# ── 실기 동작 확인(uicheck) 게이트 ──────────────────────────────────────────
+# ── 자체 점검(--selfcheck) 게이트 ───────────────────────────────────────────
 #
-# exe_smoke 는 창이 뜨는지만 본다 — 파일도 안 열고 아무것도 안 눌러 본다. v221(저장 뒤
-# Ctrl+S 오류 창)은 그걸 통과하고 게시된 뒤 실기에서야 드러났다. 그 확인을 게시 앞으로
-# 당긴다. 이 단계는 **실제 키보드·마우스**를 쓰므로, 건너뛸 때 말하는 것이 특히 중요하다.
+# exe_smoke 는 창이 뜨는지만 본다. v221(저장 뒤 Ctrl+S 오류 창)은 그걸 통과하고 게시된
+# 뒤 실기에서야 드러났다. 그 확인을 게시 앞으로 당긴다. 예전엔 uicheck.py 가 실제
+# 키보드·마우스로 했는데, 사용자의 마우스를 가져갔고 같은 exe 가 통과했다 실패했다 했다.
+# 이제 빌드된 exe 가 화면 없이 스스로 돌고 JSON 으로 답한다.
 
-def _clear_ui(monkeypatch):
-    monkeypatch.delenv("EXCELMERGE_UICHECK_A", raising=False)
-    monkeypatch.delenv("EXCELMERGE_UICHECK_B", raising=False)
-
-
-def test_ui_files_are_optional(monkeypatch):
-    _clear_ui(monkeypatch)
-    assert release.uicheck_files() is None
+def _clear_sc(monkeypatch):
+    monkeypatch.delenv("EXCELMERGE_SELFCHECK_A", raising=False)
+    monkeypatch.delenv("EXCELMERGE_SELFCHECK_B", raising=False)
 
 
-def test_ui_only_one_side_stops_the_release(monkeypatch, tmp_path):
-    _clear_ui(monkeypatch)
+def _set_sc(monkeypatch, tmp_path):
+    _clear_sc(monkeypatch)
+    a = tmp_path / "a.xlsx"; b = tmp_path / "b.xlsx"
+    a.write_text("x", encoding="utf-8"); b.write_text("y", encoding="utf-8")
+    monkeypatch.setenv("EXCELMERGE_SELFCHECK_A", str(a))
+    monkeypatch.setenv("EXCELMERGE_SELFCHECK_B", str(b))
+    return str(a), str(b)
+
+
+def _result(ok=True, version="225"):
+    return {"version": version, "seconds": 4.0, "ok": ok,
+            "checks": [{"name": "비교 완료", "ok": True, "detail": ""},
+                       {"name": "B 가 저장됨", "ok": ok, "detail": ""}]}
+
+
+def _fake_exe(monkeypatch, result, code=0, seen=None, raise_exc=None):
+    """빌드된 exe 대신 — 마지막 인자(결과 경로)에 JSON 을 쓰고 종료 코드를 돌려준다."""
+    def fake(cmd, **kw):
+        if seen is not None:
+            seen.append((cmd, kw))
+        if raise_exc is not None:
+            raise raise_exc
+        if result is not None:
+            with open(cmd[-1], "w", encoding="utf-8") as f:
+                json.dump(result, f, ensure_ascii=False)
+        return subprocess.CompletedProcess(cmd, code)
+    monkeypatch.setattr(release.subprocess, "run", fake)
+
+
+def test_sc_files_are_optional(monkeypatch):
+    _clear_sc(monkeypatch)
+    assert release.selfcheck_files() is None
+
+
+def test_sc_only_one_side_stops_the_release(monkeypatch, tmp_path):
+    _clear_sc(monkeypatch)
     f = tmp_path / "a.xlsx"; f.write_text("x", encoding="utf-8")
-    monkeypatch.setenv("EXCELMERGE_UICHECK_A", str(f))
+    monkeypatch.setenv("EXCELMERGE_SELFCHECK_A", str(f))
     with pytest.raises(SystemExit):
-        release.uicheck_files()
+        release.selfcheck_files()
 
 
-def test_ui_a_missing_file_stops_the_release(monkeypatch, tmp_path):
-    _clear_ui(monkeypatch)
+def test_sc_a_missing_file_stops_the_release(monkeypatch, tmp_path):
+    _clear_sc(monkeypatch)
     f = tmp_path / "a.xlsx"; f.write_text("x", encoding="utf-8")
-    monkeypatch.setenv("EXCELMERGE_UICHECK_A", str(f))
-    monkeypatch.setenv("EXCELMERGE_UICHECK_B", str(tmp_path / "없음.xlsx"))
+    monkeypatch.setenv("EXCELMERGE_SELFCHECK_A", str(f))
+    monkeypatch.setenv("EXCELMERGE_SELFCHECK_B", str(tmp_path / "없음.xlsx"))
     with pytest.raises(SystemExit):
-        release.uicheck_files()
+        release.selfcheck_files()
 
 
-def test_ui_skipping_is_announced(monkeypatch, capsys):
+def test_sc_skipping_is_announced(monkeypatch, capsys):
     """조용히 넘어가면 '돌렸겠거니' 가 된다 — merge_check 에서 이미 겪었다."""
-    _clear_ui(monkeypatch)
-    release.uicheck_gate("999", False, os.environ.copy())
+    _clear_sc(monkeypatch)
+    release.selfcheck_gate("999", False, os.environ.copy())
     said = capsys.readouterr().out
-    assert "건너뜀" in said and "EXCELMERGE_UICHECK_A" in said
+    assert "건너뜀" in said and "EXCELMERGE_SELFCHECK_A" in said
 
 
-def test_ui_explicit_skip_is_announced(monkeypatch, capsys):
-    _clear_ui(monkeypatch)
-    release.uicheck_gate("999", True, os.environ.copy())
+def test_sc_explicit_skip_is_announced(monkeypatch, capsys):
+    _clear_sc(monkeypatch)
+    release.selfcheck_gate("999", True, os.environ.copy())
     said = capsys.readouterr().out
-    assert "건너뜀" in said and "skip-ui-check" in said
+    assert "건너뜀" in said and "skip-selfcheck" in said
 
 
-def test_ui_runs_against_the_built_exe_not_the_installed_one(monkeypatch, tmp_path, capsys):
-    """설치본이 아니라 **방금 빌드한** exe 를 봐야 한다 — 그게 나갈 물건이다."""
-    _clear_ui(monkeypatch)
-    a = tmp_path / "a.xlsx"; b = tmp_path / "b.xlsx"
-    a.write_text("x", encoding="utf-8"); b.write_text("y", encoding="utf-8")
-    monkeypatch.setenv("EXCELMERGE_UICHECK_A", str(a))
-    monkeypatch.setenv("EXCELMERGE_UICHECK_B", str(b))
+def test_sc_runs_the_built_exe_in_selfcheck_mode(monkeypatch, tmp_path):
+    """설치본이 아니라 **방금 빌드한** exe 를 — 그게 나갈 물건이다."""
+    a, b = _set_sc(monkeypatch, tmp_path)
     seen = []
-    monkeypatch.setattr(release, "run", lambda cmd, **k: seen.append(cmd))
-    release.uicheck_gate("225", False, os.environ.copy())
-    assert len(seen) == 1, seen
-    cmd = seen[0]
-    assert "uicheck.py" in cmd
-    assert os.path.join("dist", "ExcelMerge", "ExcelMerge.exe") in cmd
-    assert "--expect-version" in cmd and "225" in cmd
+    _fake_exe(monkeypatch, _result(), seen=seen)
+    release.selfcheck_gate("225", False, os.environ.copy())
+    (cmd, kw), = seen
+    assert cmd[0].endswith(os.path.join("dist", "ExcelMerge", "ExcelMerge.exe"))
+    assert cmd[1:4] == ["--selfcheck", a, b]
+    assert kw.get("timeout"), "멈춘 exe 에 릴리스가 매달린다"
 
 
-def test_ui_warns_that_it_takes_over_the_machine(monkeypatch, tmp_path, capsys):
-    """실제 키보드·마우스를 쓴다 — 모르고 다른 창을 건드리면 이 단계만 실패한다."""
-    _clear_ui(monkeypatch)
-    a = tmp_path / "a.xlsx"; b = tmp_path / "b.xlsx"
-    a.write_text("x", encoding="utf-8"); b.write_text("y", encoding="utf-8")
-    monkeypatch.setenv("EXCELMERGE_UICHECK_A", str(a))
-    monkeypatch.setenv("EXCELMERGE_UICHECK_B", str(b))
-    monkeypatch.setattr(release, "run", lambda cmd, **k: None)
-    release.uicheck_gate("225", False, os.environ.copy())
-    said = capsys.readouterr().out
-    assert "키보드" in said and "마우스" in said
+def test_sc_does_not_take_over_the_keyboard_and_mouse(monkeypatch, tmp_path, capsys):
+    """사용자의 입력 장치를 쓰는 도구(uicheck.py)를 부르지 않는다."""
+    _set_sc(monkeypatch, tmp_path)
+    seen = []
+    _fake_exe(monkeypatch, _result(), seen=seen)
+    release.selfcheck_gate("225", False, os.environ.copy())
+    assert not any("uicheck" in str(part) for cmd, _ in seen for part in cmd)
+    assert "마우스 사용 없음" in capsys.readouterr().out
 
 
-def test_ui_check_runs_after_the_smoke_and_before_publishing():
+def test_sc_a_failing_check_stops_the_release(monkeypatch, tmp_path):
+    _set_sc(monkeypatch, tmp_path)
+    _fake_exe(monkeypatch, _result(ok=False), code=1)
+    with pytest.raises(SystemExit):
+        release.selfcheck_gate("225", False, os.environ.copy())
+
+
+def test_sc_an_exit_code_alone_stops_the_release(monkeypatch, tmp_path):
+    """JSON 이 ok 라고 해도 종료 코드가 0 이 아니면 믿지 않는다."""
+    _set_sc(monkeypatch, tmp_path)
+    _fake_exe(monkeypatch, _result(ok=True), code=1)
+    with pytest.raises(SystemExit):
+        release.selfcheck_gate("225", False, os.environ.copy())
+
+
+def test_sc_a_missing_result_stops_the_release(monkeypatch, tmp_path):
+    """exe 가 점검 모드로 못 뜨면(번들 누락 등) 결과 파일이 비어 있다 — 통과로 보면 안 된다."""
+    _set_sc(monkeypatch, tmp_path)
+    _fake_exe(monkeypatch, None, code=0)
+    with pytest.raises(SystemExit):
+        release.selfcheck_gate("225", False, os.environ.copy())
+
+
+def test_sc_the_wrong_build_stops_the_release(monkeypatch, tmp_path):
+    """dist 에 옛 빌드가 남아 있으면 그걸 점검하게 된다 — 버전으로 막는다."""
+    _set_sc(monkeypatch, tmp_path)
+    _fake_exe(monkeypatch, _result(version="224"))
+    with pytest.raises(SystemExit):
+        release.selfcheck_gate("225", False, os.environ.copy())
+
+
+def test_sc_a_hung_exe_stops_the_release(monkeypatch, tmp_path):
+    _set_sc(monkeypatch, tmp_path)
+    _fake_exe(monkeypatch, None, raise_exc=subprocess.TimeoutExpired("exe", 300))
+    with pytest.raises(SystemExit):
+        release.selfcheck_gate("225", False, os.environ.copy())
+
+
+def test_sc_the_result_file_is_cleaned(monkeypatch, tmp_path):
+    _set_sc(monkeypatch, tmp_path)
+    seen = []
+    _fake_exe(monkeypatch, _result(), seen=seen)
+    release.selfcheck_gate("225", False, os.environ.copy())
+    assert not os.path.exists(seen[0][0][-1])
+
+
+def test_sc_runs_after_the_smoke_and_before_publishing():
     """스모크가 통과한 exe 를 몰아 보고, 그 뒤에야 올린다."""
     src = open(os.path.join(ROOT, "release.py"), encoding="utf-8").read()
     body = src[src.index("def main("):]
-    assert body.index("exe_smoke(args.version)") < body.index("uicheck_gate("), \
+    assert body.index("exe_smoke(args.version)") < body.index("selfcheck_gate("), \
         "스모크보다 먼저 몰아 본다"
-    assert body.index("uicheck_gate(") < body.index('step("푸시")'), \
+    assert body.index("selfcheck_gate(") < body.index('step("푸시")'), \
         "게시한 뒤에 확인한다 — 늦다"
