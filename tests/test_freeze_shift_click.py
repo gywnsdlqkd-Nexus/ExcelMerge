@@ -64,6 +64,17 @@ def _click(view, r, c, mod=Qt.NoModifier):
     QApplication.instance().processEvents()
 
 
+def _move_event(vp, lp, mods):
+    """누른 채 움직임 — 실제 이벤트처럼 로컬·창·전역 좌표를 모두 채운다.
+
+    위치 하나만 주는 생성자는 전역 좌표를 **로컬 값으로** 채운다. 선택 엔진은 경계를 넘는
+    드래그를 전역 좌표로 판정하므로, 그렇게 만든 이벤트는 엉뚱한 칸을 가리킨다.
+    """
+    from PyQt5.QtCore import QPointF
+    return QMouseEvent(QEvent.MouseMove, QPointF(lp), QPointF(vp.mapTo(vp.window(), lp)),
+                       QPointF(vp.mapToGlobal(lp)), Qt.NoButton, Qt.LeftButton, mods)
+
+
 def _box(table):
     sel = table.selectionModel().selection()
     if not sel:
@@ -146,8 +157,7 @@ def test_a_jittery_shift_click_keeps_its_selection(dv):
     _click(fc.left, 5, 0)
     vp, p = t.viewport(), _pos(t, 9, 2)
     QTest.mousePress(vp, Qt.LeftButton, Qt.ShiftModifier, p)
-    QApplication.sendEvent(vp, QMouseEvent(QEvent.MouseMove, p + QPoint(2, 1),
-                                           Qt.NoButton, Qt.LeftButton, Qt.ShiftModifier))
+    QApplication.sendEvent(vp, _move_event(vp, p + QPoint(2, 1), Qt.ShiftModifier))
     QTest.mouseRelease(vp, Qt.LeftButton, Qt.ShiftModifier, p + QPoint(2, 1))
     QApplication.instance().processEvents()
     assert _box(t) == (5, 0, 9, 2)
