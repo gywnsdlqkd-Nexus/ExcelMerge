@@ -10,7 +10,7 @@ from PyQt5.QtGui import QKeySequence
 
 from .theme import CELL_DIFF_HL, DROP_HIGHLIGHT_QSS, ui_font
 from .widgets import (
-    AX_COL, AX_ROW, CellEditWidget, DropLineEdit, ExcelTableView,
+    AX_COL, AX_ROW, CellEditWidget, DropLineEdit, ExcelTableView, PathHistoryDropdown,
     _extract_supported_path, _extract_folder_path,
 )
 
@@ -58,6 +58,8 @@ class FilePanel(QWidget):
         # 컨텍스트 메뉴(붙여넣기)를 쓰도록 CustomContextMenu는 지정하지 않는다.
         self.path_edit.file_dropped.connect(self._on_file_dropped)
         self.path_edit.returnPressed.connect(self._on_path_entered)
+        # ▼ 최근에 연 경로 — 고르면 Enter 를 친 것과 같은 길로 불러온다(파일/폴더 모두)
+        self.history = PathHistoryDropdown(self.path_edit, side, self._on_history_pick)
         browse_btn = QPushButton()
         browse_btn.setIcon(self.style().standardIcon(QStyle.SP_DirOpenIcon))
         browse_btn.setFixedSize(32, 32)
@@ -249,6 +251,10 @@ class FilePanel(QWidget):
     # 폴더 선택용 센티넬 파일명 — 네이티브 파일 대화상자에서 이 이름으로 '열기'하면
     # 해당 폴더를 폴더 비교로 처리한다(Windows엔 파일+폴더 동시 선택 대화상자가 없어 우회).
     _FOLDER_SENTINEL = "폴더 선택."
+
+    def _on_history_pick(self, path: str):
+        self.path_edit.setText(path)
+        self._on_path_entered()
 
     def _on_path_entered(self):
         """경로칸에 직접 입력한 경로를 파일/폴더로 판별해 로드 (Enter)."""

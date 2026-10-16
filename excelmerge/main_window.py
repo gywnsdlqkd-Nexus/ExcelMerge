@@ -227,8 +227,10 @@ class MainWindow(QMainWindow):
         view.folder_requested.connect(
             lambda side, p, v=view: self._convert_to_folder(v, side, p))
 
-    def open_file_compare(self, path_a: str = "", path_b: str = "") -> DiffView:
-        """파일 비교 탭을 연다. 동일 (A, B) 경로 탭이 이미 있으면 그 탭으로 전환한다."""
+    def open_file_compare(self, path_a: str = "", path_b: str = "",
+                          record: bool = True) -> DiffView:
+        """파일 비교 탭을 연다. 동일 (A, B) 경로 탭이 이미 있으면 그 탭으로 전환한다.
+        record=False: 경로칸 히스토리에 남기지 않는다(폴더 비교 안에서 연 파일)."""
         existing = self._find_file_tab(path_a, path_b)
         if existing is not None:
             self.tabs.setCurrentWidget(existing)
@@ -240,7 +242,7 @@ class MainWindow(QMainWindow):
             cur = self.tabs.currentWidget()
             if (isinstance(cur, DiffView)
                     and not cur.panel_a.get_path() and not cur.panel_b.get_path()):
-                cur.load_pair(path_a, path_b)
+                cur.load_pair(path_a, path_b, record=record)
                 self._update_tab_title(cur)
                 return cur
 
@@ -248,7 +250,7 @@ class MainWindow(QMainWindow):
         self._wire_diff_view(view)
         self._add_tab(view, view.tab_title())
         if path_a or path_b:
-            view.load_pair(path_a, path_b)
+            view.load_pair(path_a, path_b, record=record)
             self._update_tab_title(view)
         return view
 
@@ -259,7 +261,7 @@ class MainWindow(QMainWindow):
         if idx < 0:
             return
         fv = FolderCompareView(self.status)
-        fv.open_file_pair.connect(lambda a, b, _t: self.open_file_compare(a, b))
+        fv.open_file_pair.connect(lambda a, b, _t: self.open_file_compare(a, b, record=False))
         fv.title_changed.connect(lambda v=fv: self._update_tab_title(v))
         self.tabs.removeTab(idx)
         self.tabs.insertTab(idx, fv, fv.tab_title())
@@ -283,7 +285,7 @@ class MainWindow(QMainWindow):
         view = FolderCompareView(self.status)
         # 폴더 뷰에서 파일 더블클릭 → 파일 비교 탭 열기(중복 시 재사용).
         view.open_file_pair.connect(
-            lambda a, b, _title: self.open_file_compare(a, b))
+            lambda a, b, _title: self.open_file_compare(a, b, record=False))
         view.title_changed.connect(lambda v=view: self._update_tab_title(v))
         self._add_tab(view, view.tab_title())
         if path_a or path_b:

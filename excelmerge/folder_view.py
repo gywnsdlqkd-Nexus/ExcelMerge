@@ -27,7 +27,8 @@ from .theme import (
     APP_QSS, ui_font, FOLDER_STATUS_COLORS, DIFF_COLORS, MENU_QSS,
     DROP_HIGHLIGHT_QSS, force_active_highlight,
 )
-from .widgets import _extract_folder_path, draw_diagonal_hatch
+from .prefs import add_path_history
+from .widgets import PathHistoryDropdown, _extract_folder_path, draw_diagonal_hatch
 from .compare_toolbar import build_find_box, add_legend
 
 _ROLE_PAIR = Qt.UserRole         # 이 항목의 (item_a, item_b) 쌍 인덱스 → self._pairs
@@ -290,6 +291,9 @@ class FolderCompareView(QWidget):
         pe.setFont(ui_font(10))
         pe.folder_dropped.connect(lambda p, s=side: self._on_folder_chosen(s, p))
         pe.returnPressed.connect(lambda s=side, e=pe: self._on_path_entered(s, e))
+        # ▼ 최근에 연 경로 — 이 화면은 폴더만 다룬다
+        hist = PathHistoryDropdown(pe, side, lambda p, s=side, e=pe: self._on_history_pick(s, e, p),
+                                   want=("dir",))
         browse_btn = QPushButton()
         browse_btn.setIcon(self.style().standardIcon(QStyle.SP_DirOpenIcon))
         browse_btn.setFixedSize(32, 32)
@@ -324,10 +328,12 @@ class FolderCompareView(QWidget):
             self.path_a = pe
             self.tree_a = tree
             self.merge_btn_a = merge_btn
+            self.history_a = hist
         else:
             self.path_b = pe
             self.tree_b = tree
             self.merge_btn_b = merge_btn
+            self.history_b = hist
         return w
 
     def _make_tree(self) -> QTreeWidget:
@@ -361,6 +367,10 @@ class FolderCompareView(QWidget):
         self._set_side(side, path)
         self._rescan()
 
+    def _on_history_pick(self, side: str, edit, path: str):
+        edit.setText(path)
+        self._on_path_entered(side, edit)
+
     def _on_path_entered(self, side: str, edit):
         """경로칸에 직접 입력한 폴더 경로 로드 (Enter). 폴더가 아니면 무시."""
         p = edit.text().strip().strip('"')
@@ -374,6 +384,7 @@ class FolderCompareView(QWidget):
 
     def _set_side(self, side: str, path: str):
         path = os.path.abspath(path)
+        add_path_history(side, path)
         # 폴더가 바뀌면 이전 병합 완료 표시는 의미가 없으므로 초기화.
         self._merged_files = set()
         if side == "a":

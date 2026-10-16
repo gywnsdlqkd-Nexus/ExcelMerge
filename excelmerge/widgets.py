@@ -1,6 +1,7 @@
 """테이블/스크롤/입력 위젯 (excel_diff_merge.py에서 분리)."""
 import os
 import re
+import time
 
 from PyQt5.QtWidgets import (
     QApplication, QTableView, QAbstractItemView, QLineEdit, QPlainTextEdit,
@@ -3088,6 +3089,103 @@ class DropLineEdit(QLineEdit):
         if path:
             self.file_dropped.emit(path)
             event.acceptProposedAction()
+
+
+class PathHistoryDropdown(QObject):
+    """경로칸 끝의 ▼ — 그 쪽(A/B)에서 최근에 연 경로를 펼쳐 고르게 한다.
+
+    파일 비교(FilePanel)와 폴더 비교(FolderCompareView)의 경로칸에 붙인다. 목록은
+    prefs 의 쪽별 히스토리를 **펼 때마다** 읽는다 — 다른 탭에서 연 경로도 바로 보인다.
+    지금 없는 경로는 숨기고(지우지는 않는다 — 드라이브가 잠시 빠졌을 수 있다), 이 칸이
+    다룰 수 있는 종류(want: 'file'/'dir')만 보인다.
+
+    열기: ▼ 클릭, F4, Alt+↓ (콤보박스 관례). Alt+↓ 는 비교 화면의 '다음 변경' 단축키이기도
+    해서, 경로칸에 커서가 있을 때만 ShortcutOverride 로 이 칸이 가져간다.
+    고르면 on_pick(path) — 경로칸에 Enter 를 친 것과 같은 길로 불러온다.
+    """
+
+    def __init__(self, edit: QLineEdit, side: str, on_pick, want=("file", "dir")):
+        super().__init__(edit)
+        self._edit = edit
+        self._side = side
+        self._on_pick = on_pick
+        self._want = tuple(want)
+        self.menu = None
+        self.action = edit.addAction(edit.style().standardIcon(QStyle.SP_ArrowDown),
+                                     QLineEdit.TrailingPosition)
+        self.action.setToolTip("최근에 연 경로 (F4 · Alt+↓)")
+        self.action.triggered.connect(self._on_arrow)
+        self._hidden_at = -1.0
+        edit.installEventFilter(self)
+
+    @property
+    def _kinds(self) -> tuple:
+        return tuple(k for k, w in (("f", "file"), ("d", "dir")) if w in self._want)
+
+    def _on_arrow(self):
+        """▼ 클릭. 메뉴가 열린 채 ▼ 를 누르면 Qt 는 메뉴를 닫고 **그 클릭을 ▼ 에 다시
+        전달**해 곧바로 또 연다 — 콤보박스처럼 닫히게, 방금 닫힌 직후의 클릭은 무시한다."""
+        if time.monotonic() - self._hidden_at < 0.3:
+            return
+        self.show_menu()
+
+    def _on_menu_hidden(self):
+        self._hidden_at = time.monotonic()
+
+    def entries(self) -> list:
+        """펼칠 경로 — 최신순, 지금 있는 것 중 이 칸이 다루는 종류만."""
+        from .prefs import load_path_history
+        return [p for p in load_path_history(self._side, self._kinds)
+                if os.path.isdir(p) or os.path.isfile(p)]
+
+    def show_menu(self):
+        if self.menu is not None:
+            try:
+                self.menu.close()
+            except RuntimeError:
+                pass
+        m = QMenu(self._edit)
+        m.setStyleSheet(MENU_QSS)
+        m.setAttribute(Qt.WA_DeleteOnClose)
+        m.aboutToHide.connect(self._on_menu_hidden)
+        items = self.entries()
+        st = self._edit.style()
+        if not items:
+            empty = m.addAction("최근에 연 경로가 없습니다")
+            empty.setEnabled(False)
+        for p in items:
+            icon = st.standardIcon(QStyle.SP_DirIcon if os.path.isdir(p) else QStyle.SP_FileIcon)
+            act = m.addAction(icon, p.replace("&", "&&"))   # & 는 메뉴에서 단축 글자 표시다
+            act.setToolTip(p)
+            act.triggered.connect(lambda _=False, p=p: self._on_pick(p))
+        if items:
+            m.addSeparator()
+            m.addAction("목록 지우기").triggered.connect(self._clear)
+            m.setActiveAction(m.actions()[0])   # 펼치자마자 Enter = 가장 최근 경로
+        m.setMinimumWidth(self._edit.width())
+        self.menu = m
+        # ★ popup()(비모달). 표 오버레이에서 exec_ 중첩 루프가 크래시를 낸 전례가 있어
+        #   앱의 다른 메뉴와 같은 방식을 쓴다.
+        m.popup(self._edit.mapToGlobal(QPoint(0, self._edit.height())))
+
+    def _clear(self):
+        from .prefs import clear_path_history
+        clear_path_history(self._side, self._kinds)   # 이 칸이 보여 주는 종류만
+
+    @staticmethod
+    def _is_open_key(ev) -> bool:
+        mods = ev.modifiers() & ~Qt.KeypadModifier
+        return ((ev.key() == Qt.Key_F4 and mods == Qt.NoModifier)
+                or (ev.key() == Qt.Key_Down and mods == Qt.AltModifier))
+
+    def eventFilter(self, obj, ev):
+        if obj is self._edit and ev.type() in (QEvent.ShortcutOverride, QEvent.KeyPress):
+            if self._is_open_key(ev):
+                ev.accept()                       # 앱 단축키(Alt+↓ = 다음 변경)보다 먼저
+                if ev.type() == QEvent.KeyPress:
+                    self.show_menu()
+                return True
+        return False
 
 
 class CellEditWidget(QPlainTextEdit):

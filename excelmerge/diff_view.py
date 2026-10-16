@@ -27,7 +27,7 @@ from .loaders import _EXCEL_EXTS, list_sheet_names, clear_values_cache
 from .panels import FilePanel
 from .prefs import (load_key_prefs, save_key_prefs, load_last_key, save_last_key,
                     load_last_key_name, load_last_excluded, save_last_excluded,
-                    load_last_sheet, save_last_sheet)
+                    load_last_sheet, save_last_sheet, add_path_history)
 from .theme import APP_QSS, DIFF_COLORS, ui_font, ext_tab_icon
 from . import staging
 from .constants import STATUS_SAME, DIR_A2B, DIR_B2A
@@ -314,13 +314,20 @@ class DiffView(QWidget):
 
     # ── MainWindow 진입점 ──────────────────────────────────────────────────────
 
-    def load_pair(self, path_a: str = "", path_b: str = ""):
+    def load_pair(self, path_a: str = "", path_b: str = "", record: bool = True):
         """MainWindow가 이 뷰에 파일 쌍을 로드한다(경로 세팅 + 비교/미리보기).
-        _on_file_loaded 와 동일한 판단 로직을 한곳에 모은 공개 진입점."""
+        _on_file_loaded 와 동일한 판단 로직을 한곳에 모은 공개 진입점.
+
+        record=False 면 경로칸 히스토리에 남기지 않는다 — 폴더 비교 안에서 파일을 열 때.
+        그걸 남기면 폴더를 훑으며 연 파일들이 사용자가 직접 연 파일을 밀어낸다."""
         if path_a:
             self.panel_a.set_path(path_a)
+            if record:
+                add_path_history("a", path_a)
         if path_b:
             self.panel_b.set_path(path_b)
+            if record:
+                add_path_history("b", path_b)
         pa = self.panel_a.get_path()
         pb = self.panel_b.get_path()
         self.refresh_btn.setEnabled(bool(pa) or bool(pb))
@@ -1866,6 +1873,7 @@ class DiffView(QWidget):
         )
 
     def _on_file_loaded(self, side: str, path: str):
+        add_path_history(side, path)
         either = bool(self.panel_a.get_path()) or bool(self.panel_b.get_path())
         self.refresh_btn.setEnabled(either)
         # 시트 탭을 먼저 재구성해 self._current_sheet를 확정한 뒤 비교/미리보기 실행.
