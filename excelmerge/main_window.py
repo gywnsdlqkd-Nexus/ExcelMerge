@@ -143,7 +143,26 @@ class MainWindow(QMainWindow):
         self.tabs.setTabIcon(idx, icon)
 
     def _install_close_button(self, view: QWidget):
-        """탭에 표준 느낌의 커스텀 닫기 버튼(✕)을 단다."""
+        """탭에 표준 느낌의 커스텀 닫기 버튼(✕)을 단다 — 탭이 하나뿐이면 달지 않는다."""
+        self._sync_close_buttons()
+
+    def _sync_close_buttons(self):
+        """탭이 하나뿐이면 ✕ 를 떼고, 둘 이상이면 없는 탭에 단다 — 마지막 탭을 닫으면 빈 탭을
+        새로 만드는 동작이라 닫을 이유가 없고, 누르면 엉뚱한 창이 잠깐 떴다(사용자 제보)."""
+        bar = self.tabs.tabBar()
+        n = self.tabs.count()
+        for i in range(n):
+            if bar.tabButton(i, QTabBar.RightSide) is None:
+                self._make_close_button(self.tabs.widget(i))
+            btn = bar.tabButton(i, QTabBar.RightSide)
+            if btn is not None and btn.isHidden() == (n > 1):
+                # 숨김은 지웠다 다시 달지 않고 크기만 0 으로 — 떼고 다는 것을 되풀이하면 다른 화면에서
+                # Qt 예외가 샜다(전체 테스트 실측). 크기를 줄여야 탭 폭에 빈자리가 남지 않는다.
+                btn.setFixedSize(QSize(18, 18) if n > 1 else QSize(0, 0))
+                btn.setVisible(n > 1)
+                bar.setTabText(i, bar.tabText(i))      # 탭 폭 다시 계산
+
+    def _make_close_button(self, view: QWidget):
         idx = self.tabs.indexOf(view)
         if idx < 0:
             return
@@ -381,6 +400,9 @@ class MainWindow(QMainWindow):
     # ── 탭 닫기/제목 ──────────────────────────────────────────────────────────
 
     def _close_tab(self, index: int):
+        # 탭이 하나뿐이면 닫지 않는다(✕ 도 숨김) — Ctrl+W 도 같다
+        if self.tabs.count() <= 1:
+            return
         w = self.tabs.widget(index)
         self.tabs.removeTab(index)
         if w is not None:
@@ -390,6 +412,7 @@ class MainWindow(QMainWindow):
         # 항상 최소 1개 유지 — 빈 화면 방지(기존엔 창=단일 뷰였음)
         if self.tabs.count() == 0:
             self._new_tab()
+        self._sync_close_buttons()
 
     def closeEvent(self, event):
         """앱 종료 시 모든 탭의 실행 중 워커를 정리한 뒤 닫는다(QThread 파괴 크래시 방지)."""
