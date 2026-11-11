@@ -92,6 +92,8 @@ class DiffView(QWidget):
         #   재계산되면 같은 (r, c) 가 다른 셀을 뜻하므로 그 경로들에서 반드시 함께 비운다
         #   (그러지 않으면 사용자가 건드린 적 없는 셀의 준비가 조용히 풀린다).
         self._undo_stack: list = []
+        # 저장 뒤 다시 비교할 때 되살릴 것(_post_save_carry 참고). None 이면 평소 비교.
+        self._post_save_carry = None
         self._raw_data: dict = {"a": [], "b": []}   # 키 열/행 변경 시 재계산용 캐시
         # 키 헤더 앵커 = (키 행, 키 열). 전역 저장값을 기본으로 로드(없으면 A1 = 0,0).
         self._key_row, self._key_col = load_key_prefs()
@@ -482,6 +484,17 @@ class DiffView(QWidget):
         """시트 탭 클릭 — 선택 시트로 비교/미리보기를 재실행한다."""
         if index < 0 or index >= len(self._sheet_names):
             return
+        if self._saving_now():
+            # 저장이 끝나면 저장한 칸을 '병합됨'으로 옮기는데, 그 좌표는 저장을 시작한 시트의
+            # 것이다 — 그 사이 시트를 옮기면 다른 시트에 병합 표시가 붙었다(검토 실측).
+            blocked = self.sheet_tabs.blockSignals(True)
+            try:
+                if self._current_sheet in self._sheet_names:
+                    self.sheet_tabs.setCurrentIndex(self._sheet_names.index(self._current_sheet))
+            finally:
+                self.sheet_tabs.blockSignals(blocked)
+            self.status.showMessage("저장하는 중입니다 — 끝난 뒤에 시트를 옮기세요.")
+            return
         self._current_sheet = self._sheet_names[index]
         path_a = self.panel_a.get_path()
         path_b = self.panel_b.get_path()
@@ -614,6 +627,16 @@ class DiffView(QWidget):
             self._run_preview("b", path_b)
 
     def _run_compare(self):
+        # 저장이 도는 중이면 **끝난 뒤에** 비교한다 — 저장 전 파일을 읽은 비교가 저장 결과와 섞이면,
+        # 지운 행 기준 좌표로 다음 저장이 다른 행을 덮었다(검토 실측). 그 자리에서 기다리면 남은
+        # 저장 시간 동안 화면 전체가 멈췄다(검토 실측: 3만 행 31초). 비교마다 세대를 매겨, 저장 완료
+        # 처리가 자기가 시작된 비교에만 반영되게 한다(_on_staged_saved).
+        self._compare_gen = getattr(self, "_compare_gen", 0) + 1
+        if getattr(self, "_save_in_flight", False):
+            self._compare_after_save = True
+            self.status.showMessage("저장하는 중입니다 — 끝나면 비교합니다.")
+            return
+        self._compare_after_save = False
         path_a = self.panel_a.get_path()
         path_b = self.panel_b.get_path()
         if not path_a and not path_b:
@@ -651,6 +674,10 @@ class DiffView(QWidget):
             return
         self._raw_data["a"] = a_data
         self._raw_data["b"] = b_data
+        # 실제로 비교한 두 파일 — 저장·저장 뒤 다시 읽기는 경로칸 글자가 아니라 이것을 기준으로 한다
+        # (경로칸을 고쳐 두기만 하고 Enter 를 안 누르면 글자와 화면이 다른 파일을 가리킨다).
+        self._compared_paths = (ctx[0], ctx[1]) if ctx is not None else None
+        self._stale_after_save = False
         # 이 파일에 기억해 둔 키가 있으면 먼저 적용한다 — 전역 키 하나로 모든 파일을
         # 비교하다 중복 키로 수천 행이 조용히 빠지던 문제를 막는다.
         self._apply_remembered_key()
@@ -716,6 +743,14 @@ class DiffView(QWidget):
         self._diff_col_meta = col_meta
         self.panel_a._row_meta = row_meta
         self.panel_b._row_meta = row_meta
+        # 저장 뒤 다시 비교한 결과에만 건다. 어떤 결과든 도착하면 carry 는 소비한다 — 남겨 두면
+        # 다음에 오는 다른 시트·파일의 비교에 붙는다.
+        carry = self._post_save_carry
+        if carry is not None and not (mode == "load" and carry.get("ctx") == self._carry_ctx()):
+            self._post_save_carry = carry = None
+        carry_note = self._apply_post_save_carry() if carry is not None else ""
+        if carry is not None:
+            changed = self._count_changed()   # 제외 열을 되살렸으니 다시 센다
         self._refresh_tables()   # populate + 수식플래그 + _apply_diff_filter
         self._set_buttons_enabled(True)
         rows = len(matrix)
@@ -723,10 +758,12 @@ class DiffView(QWidget):
         if mode == "load":
             # 비교 완료 시 디폴트로 "변경 행만 보기" ON.
             # 이미 ON이면 toggled가 안 나오므로 _apply_diff_filter를 직접 호출.
-            if self.diff_only_btn.isChecked():
+            # 저장 뒤 다시 비교한 것이면 사용자가 보던 필터 상태를 그대로 둔다.
+            want = carry["diff_only"] if carry is not None else True
+            if self.diff_only_btn.isChecked() == want:
                 self._apply_diff_filter()
             else:
-                self.diff_only_btn.setChecked(True)
+                self.diff_only_btn.setChecked(want)
             warn = f"  | ⚠ {dropped}개 행이 키 중복/공백으로 비교에서 제외됨" if dropped else ""
             # 기억해 둔 제외 열이 되살아나면 변경 셀 수가 줄어 보인다 — 왜 줄었는지
             # 말해 주지 않으면 회색 열이 조용히 결과를 바꾼 꼴이 된다.
@@ -734,7 +771,7 @@ class DiffView(QWidget):
             matched = self._matched_cols_label()
             self.status.showMessage(
                 f"비교 완료 — {rows}행 × {cols}열 | 변경된 셀: {changed}개"
-                f"{warn}{matched}{excl}  "
+                f"{warn}{matched}{excl}{carry_note}  "
                 "| 셀 선택 후 우클릭 → 병합 준비 → 선택 병합 저장"
             )
             self._focus_grid()
@@ -1532,7 +1569,25 @@ class DiffView(QWidget):
 
     def _save_staged(self, side: str):
         """side: 'a' 또는 'b' — 해당 파일만 저장. 병합 준비(staged)된 셀만 기록한다."""
+        if getattr(self, "_save_in_flight", False) or self._saving_now():
+            # 두 번째 저장이 첫 저장과 겹쳐 돌면, 첫 저장 전 좌표로 써서 다른 행을 지우고 덮었다
+            # (검토 실측 — 저장 중에 Alt+→ 로 준비하면 버튼이 다시 켜져서 눌렸다).
+            self.status.showMessage("저장하는 중입니다 — 끝난 뒤에 다시 저장하세요.")
+            return
         path = self.panels[side].get_path()
+        compared = getattr(self, "_compared_paths", None)
+        if compared is not None and (self.panel_a.get_path(), self.panel_b.get_path()) != compared:
+            QMessageBox.warning(
+                self, "저장하지 않음",
+                "경로칸이 지금 비교한 파일과 다릅니다 — 다른 파일에 쓰게 될 수 있어 저장하지 "
+                "않았습니다.\n경로칸에서 Enter 로 다시 비교하거나 경로를 되돌린 뒤 저장하세요.")
+            return
+        if getattr(self, "_stale_after_save", False):
+            QMessageBox.warning(
+                self, "저장하지 않음",
+                "지난 저장 뒤 파일을 다시 비교하지 못했습니다 — 화면의 행 위치가 파일과 다를 수 "
+                "있어 저장하지 않았습니다.\n새로고침(F5)으로 다시 비교한 뒤 저장하세요.")
+            return
 
         # JSON/uasset 등 비-xlsx 는 저장 미지원 — 사용자에게 안내 후 중단
         if path and os.path.splitext(path)[1].lower() not in _EXCEL_EXTS:
@@ -1575,6 +1630,12 @@ class DiffView(QWidget):
         path_b = path if side == "b" else ""
 
         self._saving_side = side
+        # 이번 저장이 실제로 쓰는 준비 — 끝나면 **이것만** 병합됨으로 옮긴다. 저장이 도는 동안
+        # 표의 Alt+→/우클릭은 그대로 살아 있어서, 그 사이에 건 준비까지 옮기면 파일에 없는
+        # 칸이 파랑으로 보이고 다시 저장할 수도 없었다(검토 실측 — 3파일과 같은 결함).
+        self._saving_staged = dict(staged_for_side)
+        self._saving_ctx = self._carry_ctx()
+        self._saving_gen = getattr(self, "_compare_gen", 0)
         self._set_buttons_enabled(False)
         self.status.showMessage("저장 중...")
         self.status.begin_busy()   # 저장은 진행 숫자가 없어 불확정 표시
@@ -1591,21 +1652,53 @@ class DiffView(QWidget):
             src_path, self._current_sheet,
             self._diff_col_meta,
         )
+        self._save_in_flight = True
         self._staged_merge_worker.done.connect(self._on_staged_saved)
-        self._staged_merge_worker.error.connect(self._on_error)
+        self._staged_merge_worker.error.connect(self._on_save_error)
         self._staged_merge_worker.finished.connect(self._staged_merge_worker.deleteLater)
         self._staged_merge_worker.start()
 
+    def _on_save_error(self, msg: str):
+        self._save_in_flight = False
+        self._on_error(msg)
+        if getattr(self, "_compare_after_save", False):
+            self._run_compare()
+
     def _on_staged_saved(self, count: int):
+        self._save_in_flight = False
         self.status.end_progress()
         # 저장으로 대상 파일이 바뀌었으니 값 캐시를 무효화(다음 로드가 새 내용을 읽도록).
         # mtime 키만으로도 자동 무효화되지만, 정확성을 위한 명시적 방어.
         clear_values_cache()
         side = getattr(self, "_saving_side", None)
+        ctx, self._saving_ctx = getattr(self, "_saving_ctx", None), None
+        gen, self._saving_gen = getattr(self, "_saving_gen", None), None
+        if gen is not None and gen != getattr(self, "_compare_gen", 0):
+            # 저장 중에 새 비교가 시작됐다(파일을 새로 넣음 등) — 그 비교는 저장이 끝난 뒤 파일을
+            # 읽는다(_run_compare 가 기다린다). 옛 좌표를 지금 화면에 옮기지 않는다.
+            self._saving_staged = None
+            self.status.showMessage(f"저장 완료 — {count}개 셀 저장됨(그 사이 새로 비교함)")
+            if getattr(self, "_compare_after_save", False):
+                self._run_compare()          # 저장 중에 미뤄 둔 비교 — 이제 저장된 파일을 읽는다
+            QMessageBox.information(self, "저장 완료", f"{count}개 셀이 파일에 저장됐습니다.")
+            return
+        if ctx is not None and ctx != self._carry_ctx():
+            # 저장을 시작한 시트·파일·키가 아니다 — 저장한 칸 좌표를 지금 화면에 옮기면 다른
+            # 칸에 '병합됨'이 붙는다. 옮기지 않고 지금 화면을 파일에서 다시 읽는다.
+            self._saving_staged = None
+            self._set_buttons_enabled(True)
+            if self._reload_after_save():
+                self.status.showMessage(
+                    f"저장 완료 — {count}개 셀 저장됨(저장을 시작한 화면과 달라 다시 비교함)")
+            QMessageBox.information(self, "저장 완료", f"{count}개 셀이 파일에 저장됐습니다.")
+            return
 
         # ── 저장한 side에 해당하는 staged만 확정 반영 ────────────────────────
         relevant_direction = DIR_B2A if side == "a" else DIR_A2B
-        saved_staged = {k: v for k, v in self._staged.items() if v == relevant_direction}
+        saved_staged = getattr(self, "_saving_staged", None)
+        self._saving_staged = None
+        if saved_staged is None:     # 저장 경로를 거치지 않고 부른 경우(테스트) — 지금 준비
+            saved_staged = {k: v for k, v in self._staged.items() if v == relevant_direction}
         staged_cells = set(saved_staged.keys())
 
         # staged 방향대로 diff_matrix 확정 반영
@@ -1618,9 +1711,9 @@ class DiffView(QWidget):
                     a_val = b_val
                 self._set_matrix_cell(r, c, (STATUS_SAME, a_val, b_val))
 
-        # 저장한 side의 staged 제거 (나머지 side는 유지)
-        for k in list(self._staged.keys()):
-            if self._staged[k] == relevant_direction:
+        # 저장한 칸의 staged 제거 — 저장 중에 새로 건 준비는 남긴다(아직 파일에 없다)
+        for k, d in saved_staged.items():
+            if self._staged.get(k) == d:
                 del self._staged[k]
         self._merged_cells |= staged_cells
         # 확정 저장은 되돌릴 수 없다. 남겨 두면 Ctrl+Z 가 이미 사라진 staged 를
@@ -1632,9 +1725,139 @@ class DiffView(QWidget):
         self._silent_clear_selection()
         self._set_buttons_enabled(True)
         self.status.showMessage(f"저장 완료 — {count}개 셀 저장됨")
+        # ★ 파일이 바뀌었으니 좌표(row_meta·원본 데이터)를 새로 잡는다. 화면 값만 '같음'으로
+        #   고치고 좌표를 그대로 두면, 같은 화면에서 한 번 더 저장할 때 옛 행 번호로 써서
+        #   엉뚱한 행에 값이 들어갔다(실측: B 의 2행을 지운 뒤 ID=3 저장 → 사라진 4행 자리에
+        #   ['', 'a3-new'] 가 새로 생김). 저장 검증은 '계획대로 썼나' 만 봐서 통과했다.
+        #   병합 표시와 다른 쪽 병합 준비는 키·열로 다시 찾아 되살린다.
+        self._reload_after_save()
         QMessageBox.information(self, "저장 완료", f"{count}개 셀이 파일에 저장됐습니다.")
 
+    # ── 저장 뒤 다시 비교 ─────────────────────────────────────────────────────
+
+    def _cell_identity(self, r: int, c: int):
+        """다시 비교한 뒤에도 같은 칸을 찾을 수 있는 이름 (행 이름, 열 이름). 못 정하면 None.
+
+        행은 키 값(헤더·프리앰블 행은 위치), 열은 열 대응 (A 열, B 열). 키가 없는 행 순서
+        모드는 저장으로 행이 지워지거나 붙으면 위치가 밀리므로 이름을 정하지 않는다.
+        """
+        kc, kr = self._key_col, (self._key_row or 0)
+        if kc < 0 or not (0 <= r < len(self._diff_matrix)):
+            return None
+        cm = self._diff_col_meta
+        col_id = (tuple(cm[c]) if (cm and 0 <= c < len(cm)) else ("pos", c))
+        if r <= kr:
+            return (("head", r), col_id)
+        row = self._diff_matrix[r]
+        if not (0 <= kc < len(row)):
+            return None
+        _, av, bv = row[kc]
+        key = av or bv
+        return (("key", key), col_id) if key else None
+
+    def _col_identity(self, c: int):
+        cm = self._diff_col_meta
+        return tuple(cm[c]) if (cm and 0 <= c < len(cm)) else ("pos", c)
+
+    def _carry_ctx(self) -> tuple:
+        pa, pb = (getattr(self, "_compared_paths", None)
+                  or (self.panel_a.get_path(), self.panel_b.get_path()))
+        return (pa, pb, self._current_sheet, self._key_col, self._key_row)
+
+    def _reload_after_save(self) -> bool:
+        """저장한 파일을 다시 읽어 다시 비교한다 → 시작했으면 True.
+
+        못 하면(경로칸 글자가 비교한 파일과 다르거나, 비교한 파일이 없어짐) 조용히 넘어가지 않는다 —
+        좌표가 낡은 채로 남아 다음 저장이 엉뚱한 행을 덮거나 지웠다(검토 실측). 남은 준비를 풀고,
+        다시 비교할 때까지 저장을 막는다."""
+        compared = getattr(self, "_compared_paths", None)
+        if compared is None:
+            # 실제 비교 없이 저장 완료 처리만 흉내 내는 테스트(가짜 경로) — 예전 동작 그대로
+            return False
+        texts = (self.panel_a.get_path(), self.panel_b.get_path())
+        if texts != compared or not all(os.path.isfile(p) for p in compared):
+            self._staged.clear()
+            for p in (self.panel_a, self.panel_b):
+                p._staged_display.clear()
+            self._undo_stack.clear()
+            self._stale_after_save = True
+            self._notify_cells(set())
+            self._set_buttons_enabled(True)
+            self.panel_a.table.viewport().update()
+            self.panel_b.table.viewport().update()
+            self.status.showMessage(
+                "저장했지만 다시 비교하지 못했습니다(경로칸이 바뀌었거나 파일이 없습니다) — "
+                "남은 병합 준비를 풀었습니다. 새로고침(F5)으로 다시 비교한 뒤 계속하세요.")
+            return False
+        merged = {self._cell_identity(r, c) for (r, c) in self._merged_cells}
+        staged = [(self._cell_identity(r, c), d) for (r, c), d in self._staged.items()]
+        self._post_save_carry = {
+            # 이 비교(파일·시트·키)에서 잡은 것 — 다시 비교가 끝나기 전에 시트·파일·키가 바뀌면
+            # 버린다. 확인 없이 다음 비교에 걸면 다른 시트의 같은 키 칸에 준비가 붙었다(검토 실측).
+            "ctx": self._carry_ctx(),
+            # 제외 열도 열 식별자로 — 다시 비교는 제외 열을 파일별 기억으로 다시 잡는데, 기억이
+            # 지금 화면과 같다는 보장이 없다(키를 바꾸면 화면의 제외는 풀려도 기억은 남는다).
+            # 저장 직전 화면을 그대로 잇는다. (예전엔 기억이 이름뿐이라 같은 이름 열('#' 여럿)에서
+            # 다른 열이 제외되고 이름 없는 열은 풀렸다 — 검토 실측. 기억은 이제 열 식별자다.)
+            "excluded": {self._col_identity(c) for c in self._excluded_cols},
+            "merged": {i for i in merged if i is not None},
+            "staged": [(i, d) for i, d in staged if i is not None],
+            "lost": sum(1 for i, _d in staged if i is None),
+            "diff_only": self.diff_only_btn.isChecked(),
+        }
+        clear_values_cache()
+        self._run_compare()
+        return True
+
+    def _apply_post_save_carry(self) -> str:
+        """다시 비교한 매트릭스에 병합 표시·병합 준비를 되살린다 → 상태바에 덧붙일 말."""
+        carry, self._post_save_carry = self._post_save_carry, None
+        kc, kr = self._key_col, (self._key_row or 0)
+        rows: dict = {}
+        for r, row in enumerate(self._diff_matrix):
+            if r <= kr:
+                rows[("head", r)] = r
+            elif 0 <= kc < len(row):
+                _, av, bv = row[kc]
+                if (av or bv) and ("key", av or bv) not in rows:
+                    rows[("key", av or bv)] = r
+        cm = self._diff_col_meta
+        ncols = len(self._diff_matrix[0]) if self._diff_matrix else 0
+        cols = {(tuple(cm[c]) if (cm and c < len(cm)) else ("pos", c)): c for c in range(ncols)}
+
+        def where(ident):
+            r, c = rows.get(ident[0]), cols.get(ident[1])
+            return None if (r is None or c is None) else (r, c)
+
+        for ident in carry["merged"]:
+            rc = where(ident)
+            if rc is not None:
+                self._merged_cells.add(rc)
+        if "excluded" in carry:
+            self._excluded_cols.clear()
+            self._excluded_cols.update(cols[i] for i in carry["excluded"]
+                                       if i in cols and cols[i] != self._key_col)
+            self.panel_a.table.set_excluded_cols(self._excluded_cols)
+            self.panel_b.table.set_excluded_cols(self._excluded_cols)
+        # 셀값란 표시값은 옛 좌표 것이다 — 행이 지워지거나 붙으면 다른 칸의 값을 보여 준다
+        # (검토 실측). 비우고 되살린 준비만 새 좌표로 다시 만든다(병합 칸은 지금 값이 곧 결과).
+        for p in (self.panel_a, self.panel_b):
+            p._staged_display.clear()
+        lost = carry["lost"]
+        for ident, d in carry["staged"]:
+            rc = where(ident)
+            if rc is None or self._diff_matrix[rc[0]][rc[1]][0] == STATUS_SAME:
+                lost += 1
+                continue
+            self._staged[rc] = d
+            shown = staging.staged_display_value(self._diff_matrix, rc[0], rc[1], d)
+            self.panel_a._staged_display[rc] = shown
+            self.panel_b._staged_display[rc] = shown
+        return (f"  | 저장한 뒤 다시 비교함 — 병합 준비 {lost}개는 다시 찾지 못해 해제됨"
+                if lost else "  | 저장한 뒤 다시 비교함")
+
     def _on_error(self, msg: str):
+        self._post_save_carry = None   # 다시 읽기가 실패했다 — 다음 비교에 옛 결정을 걸지 않는다
         self.status.end_progress()
         self._set_buttons_enabled(True)
         self.status.showMessage(f"오류: {msg}")
@@ -1850,6 +2073,8 @@ class DiffView(QWidget):
         return out
 
     def _set_save_btn_state(self, enabled: bool = True):
+        # 저장 중엔 켜지 않는다 — 준비(Alt+→)가 버튼을 다시 켜서 두 번째 저장이 겹쳐 돌았다(검토 실측).
+        enabled = enabled and not getattr(self, "_save_in_flight", False)
         sides = self._sides_with_staged()
         has_a, has_b = "a" in sides, "b" in sides
 

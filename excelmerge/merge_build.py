@@ -54,7 +54,9 @@ def build_side_patches(direction: str, diff_matrix: list, row_meta: list,
     insert_rows: dict[int, list[tuple]] = {}
     style_src: dict[str, str] = {}
 
-    for r in {rr for (rr, _c) in cells}:
+    # 화면 순서대로 — insert_rows 의 순서가 곧 파일 끝에 붙는 순서다. 집합 순서로 돌면
+    # 표시 행 {3, 10, 4097, 5000} 이 k5000, k4097, k10, k3 순으로 붙었다(검토 실측).
+    for r in sorted({rr for (rr, _c) in cells}):
         row = diff_matrix[r]
         a_orig, b_orig = row_meta[r] if r < len(row_meta) else (None, None)
         tgt_orig = b_orig if a2b else a_orig   # 쓸 대상 원본 행
