@@ -61,8 +61,12 @@ def child_run(tmp_path_factory):
                PYTHONIOENCODING="utf-8")
     # 자식은 UTF-8 로 쓴다(PYTHONIOENCODING). text=True 는 로케일(cp949)로 읽어
     # 한글 트레이스백에서 UnicodeDecodeError 가 난다 — 인코딩을 명시한다.
-    return subprocess.run([sys.executable, "-m", "pytest", str(d), "-q"],
-                          capture_output=True, env=env, timeout=600,
+    # 자식은 그 임시 폴더 안에서, 그 폴더를 rootdir 로 돈다 — 저장소에서 돌리면 저장소 설정
+    # (pyproject) 의 rootdir 과 임시 폴더의 공통 조상(사용자 폴더)부터 훑다가, 그 사이 %TEMP% 에서
+    # 다른 프로그램이 만들었다 지운 파일에 걸려 'ERROR ..\..\..' 로 실패했다(릴리스 게이트 실측).
+    return subprocess.run([sys.executable, "-m", "pytest", str(d), "-q", "--rootdir", str(d),
+                           "-p", "no:cacheprovider"],
+                          capture_output=True, env=env, timeout=600, cwd=str(d),
                           encoding="utf-8", errors="replace")
 
 
