@@ -21,6 +21,15 @@ python excel_diff_merge.py -s <A경로> -d <B경로>
 
 파일이면 셀 비교, 폴더면 폴더 비교로 진입한다.
 
+3파일 병합(P4V `Merge` 도구 — 인자 `-b %b -s %1 -d %2 -r %r`):
+
+```bat
+python excel_diff_merge.py -b <기준> -s <theirs> -d <yours> -r <결과>
+python excel_diff_merge.py <왼쪽> <가운데(기준)> <오른쪽>
+```
+
+왼쪽 · 가운데(기준) · 오른쪽 세 패널로 열고, 병합 결과를 결과 파일(없으면 가운데 파일)에 쓴다.
+
 ## 테스트
 
 ```bat

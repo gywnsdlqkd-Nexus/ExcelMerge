@@ -31,7 +31,10 @@ class FilePanel(QWidget):
     status_message = pyqtSignal(str)   # 복사 결과 등 → 상위(DiffView) 상태바
     folder_loaded = pyqtSignal(str)   # 폴더가 드롭/선택됨 → 상위(탭)가 폴더 모드로 전환
 
-    def __init__(self, label: str, side: str, parent=None):
+    def __init__(self, label: str, side: str, parent=None, model=None,
+                 history_side: str | None = None, drop_hint: bool = True):
+        """model: 표에 넣을 모델(3파일 화면). history_side: 경로 히스토리 쪽(기본 = side).
+        drop_hint: 제목 옆 '끌어다 놓으세요' 안내 — 패널이 셋이면 폭을 넓혀 빼는 편이 낫다."""
         super().__init__(parent)
         self.side = side
         self.setAcceptDrops(True)
@@ -43,11 +46,13 @@ class FilePanel(QWidget):
         header = QHBoxLayout()
         title = QLabel(label)
         title.setFont(ui_font(10, bold=True))
+        self.title_label = title
         header.addWidget(title)
         self._drop_hint = QLabel("  엑셀/CSV/JSON/uasset 파일 또는 폴더를 여기에 끌어다 놓으세요")
         self._drop_hint.setStyleSheet("color: #888; font-size: 9pt;")
         self._drop_hint.setFont(ui_font(9))
         header.addWidget(self._drop_hint)
+        self._drop_hint.setVisible(drop_hint)
         header.addStretch()
         layout.addLayout(header)
 
@@ -59,7 +64,8 @@ class FilePanel(QWidget):
         self.path_edit.file_dropped.connect(self._on_file_dropped)
         self.path_edit.returnPressed.connect(self._on_path_entered)
         # ▼ 최근에 연 경로 — 고르면 Enter 를 친 것과 같은 길로 불러온다(파일/폴더 모두)
-        self.history = PathHistoryDropdown(self.path_edit, side, self._on_history_pick)
+        self.history = PathHistoryDropdown(self.path_edit, history_side or side,
+                                           self._on_history_pick)
         browse_btn = QPushButton()
         browse_btn.setIcon(self.style().standardIcon(QStyle.SP_DirOpenIcon))
         browse_btn.setFixedSize(32, 32)
@@ -91,7 +97,7 @@ class FilePanel(QWidget):
         self._row_meta: list = []   # [(orig_a_row, orig_b_row), ...]
         self._staged_display: dict[tuple, str] = {}   # (r,c) → 병합 준비 셀의 셀값란 표시 문자열
 
-        self.table = ExcelTableView(side)
+        self.table = ExcelTableView(side, model=model)
         # QTableView에는 itemSelectionChanged가 없다 — selectionModel은 ctor에서
         # 1회 생성 후 교체되지 않으므로 여기서 connect해도 안전하다.
         self.table.selectionModel().selectionChanged.connect(

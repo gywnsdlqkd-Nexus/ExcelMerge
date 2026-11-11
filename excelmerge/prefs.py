@@ -270,6 +270,36 @@ def save_last_key(path: str, key_row: int, key_col: int, key_name: str = "") -> 
     _update_prefs(lambda c: _lru_put(c, "last_keys", os.path.abspath(path), entry))
 
 
+def _sheet_key_id(path: str, sheet) -> str:
+    return os.path.abspath(path) + "|" + (sheet or "")
+
+
+def load_sheet_key(path: str, sheet):
+    """3파일 비교가 **그 파일의 그 시트**에서 고른 (key_row, key_col, 헤더이름). 없으면 None.
+
+    파일 단위 기억(load_last_key)은 시트를 가리지 않아, 한 시트에서 고른 키 이름(ItemID)이 다른 시트에
+    외래 키 열로 있으면 그 열이 키가 됐다 — 3파일은 P4V 첫 방문에 자동 병합을 걸므로 같은 ID 두 행이
+    저장됐다(검토 실측). 그래서 3파일은 시트마다 따로 기억한다(2파일 기억과 섞지 않는다).
+    """
+    if not path:
+        return None
+    m = _read_prefs().get("sheet_keys")
+    if isinstance(m, dict):
+        v = m.get(_sheet_key_id(path, sheet))
+        if (isinstance(v, list) and len(v) == 3 and all(isinstance(x, int) for x in v[:2])
+                and v[0] >= 0 and v[1] >= -1 and isinstance(v[2], str)):
+            return (v[0], v[1], v[2])
+    return None
+
+
+def save_sheet_key(path: str, sheet, key_row: int, key_col: int, key_name: str = "") -> None:
+    """3파일 시트별 키 기억(간단 LRU). 실패는 조용히 무시."""
+    if not path:
+        return
+    entry = [int(key_row), int(key_col), str(key_name or "")]
+    _update_prefs(lambda c: _lru_put(c, "sheet_keys", _sheet_key_id(path, sheet), entry))
+
+
 def load_last_excluded(path: str):
     """그 파일에서 사용자가 마지막으로 지정한 '검사 제외 열' 목록. 없으면 None.
 
@@ -453,7 +483,7 @@ def load_path_history(side: str, kinds=_KINDS) -> list:
 def add_path_history(side: str, path: str) -> None:
     """경로를 그 쪽 히스토리 맨 앞에 둔다(같은 경로는 하나만). 임시 폴더 경로는 남기지 않는다.
     이미 맨 앞이면 쓰지 않는다(켤 때마다 쓰는 일을 줄인다). 실패는 조용히 무시."""
-    if side not in ("a", "b") or not isinstance(path, str) or not path.strip():
+    if side not in ("a", "b", "m") or not isinstance(path, str) or not path.strip():
         return
     path = os.path.abspath(path.strip().strip('"'))
     if _is_transient_path(path):

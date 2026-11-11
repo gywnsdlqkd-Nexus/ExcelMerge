@@ -606,21 +606,27 @@ def _write_patches_to_file(
     src_path=None,
     src_sheet_name=None,
     patch_style_src=None,
+    out_path=None,
 ) -> None:
     """
     patches            : {cell_ref: value}          — 기존 셀 덮어쓰기
     insert_rows        : [[(col_idx, value[, src_ref]), ...]]  — 파일 끝에 새 행 추가
     delete_row_nums    : {1-based row number}        — 해당 <row> 요소 자체 삭제
     delete_col_letters : {'A', 'B', ...}             — 해당 열의 모든 <c> 삭제
-    src_path           : 서식을 읽어올 소스 xlsx 경로 (None이면 서식 병합 안 함)
+    src_path           : 서식을 읽어올 소스 xlsx 경로 (None이면 서식 병합 안 함).
+                         **여러 소스**면 {태그: (경로, 시트)} — 그때 서식 좌표는 (태그, 좌표).
+                         3파일 병합에서 왼쪽·오른쪽 값을 한 번에 쓸 때 쓴다.
     src_sheet_name     : 소스 시트 이름
     patch_style_src    : {target_ref: source_ref}    — 덮어쓰기 셀의 소스 서식 좌표
+    out_path           : 결과를 쓸 파일. None 이면 path_base 를 그 자리에서 고친다.
+                         주면 path_base 는 **읽기만** 한다(P4V 병합의 기준 %b → 결과 %r).
     """
-    if _is_file_locked(path_base):
+    target = out_path or path_base
+    if _is_file_locked(target):
         # 이유를 단정하지 않는다 — 열려 있을 수도, 읽기 전용일 수도 있다.
-        raise PermissionError(f"파일을 저장할 수 없습니다.\n{path_base}")
+        raise PermissionError(f"파일을 저장할 수 없습니다.\n{target}")
 
-    tmp = path_base + ".tmp_merge"
+    tmp = target + ".tmp_merge"
     try:
         with zipfile.ZipFile(path_base, "r") as zin, \
              zipfile.ZipFile(tmp, "w", zipfile.ZIP_DEFLATED) as zout:
@@ -670,7 +676,7 @@ def _write_patches_to_file(
                       insert_rows, delete_row_nums, delete_col_letters,
                       sheet_name, path_base, self_sheet)
         # 임시 파일을 원자적으로 교체(백업 .bak 은 만들지 않음 — 사용자 요청으로 제거).
-        os.replace(tmp, path_base)
+        os.replace(tmp, target)
     except Exception:
         if os.path.exists(tmp):
             os.remove(tmp)
@@ -955,6 +961,8 @@ def _prepare_style_merge(zin, sheet_path, src_path, src_sheet_name,
             return rows
         return [[(c[0], c[1]) for c in cells] for cells in rows]
 
+    if isinstance(src_path, dict):
+        return _prepare_style_merge_multi(zin, src_path, patch_style_src, insert_rows, _strip)
     try:
         has_insert_src = bool(insert_rows) and any(
             len(c) > 2 and c[2] is not None for cells in insert_rows for c in cells)
@@ -1005,6 +1013,57 @@ def _prepare_style_merge(zin, sheet_path, src_path, src_sheet_name,
         # 서식 병합 실패 → 값만 병합(서식 없이). 사용자에겐 조용하지만 진단 로그로 남긴다.
         log.warning("서식 병합 pre-pass 실패(값만 병합): src=%s", src_path, exc_info=True)
         return None, None, _strip(insert_rows)
+
+
+def _prepare_style_merge_multi(zin, sources: dict, patch_style_src, insert_rows, _strip):
+    """여러 소스 파일의 서식을 한 대상에 합친다 — 서식 좌표는 (태그, 좌표).
+
+    소스마다 _StyleMerger 를 **차례로** 만든다. 병합기는 만들 때 대상 styles.xml 을 색인하므로,
+    먼저 끝난 소스가 대상에 더한 서식을 다음 소스가 보고 같은 것은 다시 더하지 않는다.
+    한 소스가 실패하면 그 소스의 칸만 서식 없이 쓴다(값은 그대로 — 단일 소스 경로와 같은 원칙).
+    """
+    def tag_of(ref):
+        return ref[0] if isinstance(ref, tuple) else None
+
+    try:
+        if "xl/styles.xml" not in zin.namelist():
+            return None, None, _strip(insert_rows)
+        dst_root = etree.fromstring(zin.read("xl/styles.xml"))
+    except Exception:
+        log.warning("서식 병합 pre-pass 실패(값만 병합): 대상 styles.xml", exc_info=True)
+        return None, None, _strip(insert_rows)
+
+    mapped: dict = {}            # (태그, 좌표) → 대상 s
+    modified = False
+    for tag, (path, sheet) in sources.items():
+        refs = {r for r in (patch_style_src or {}).values() if tag_of(r) == tag}
+        refs |= {c[2] for cells in (insert_rows or []) for c in cells
+                 if len(c) > 2 and tag_of(c[2]) == tag}
+        if not refs or not path:
+            continue
+        try:
+            with zipfile.ZipFile(path, "r") as src_zin:
+                if "xl/styles.xml" not in src_zin.namelist():
+                    continue
+                src_root = etree.fromstring(src_zin.read("xl/styles.xml"))
+                src_cell_s = _read_source_cell_styles(src_zin, sheet)
+            merger = _StyleMerger(src_root, dst_root)
+            for ref in refs:
+                s = src_cell_s.get(ref[1])
+                if s is not None:
+                    di = merger.map_index(s)
+                    if di is not None:
+                        mapped[ref] = di
+            modified = modified or merger.modified
+        except Exception:
+            log.warning("서식 병합 실패(이 소스는 값만): src=%s", path, exc_info=True)
+
+    patch_styles = {t: mapped[s] for t, s in (patch_style_src or {}).items() if s in mapped}
+    new_inserts = [[(c[0], c[1], mapped.get(c[2]) if len(c) > 2 else None) for c in cells]
+                   for cells in (insert_rows or [])]
+    new_styles_bytes = (etree.tostring(dst_root, xml_declaration=True, encoding="UTF-8",
+                                       standalone=True) if modified else None)
+    return (patch_styles or None), new_styles_bytes, (new_inserts if insert_rows else insert_rows)
 
 
 def _is_numeric(val: str) -> bool:

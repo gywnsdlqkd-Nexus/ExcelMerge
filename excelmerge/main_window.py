@@ -6,6 +6,7 @@
  - 모든 탭이 공유하는 하단 상태바(활성 탭이 갱신)
  - 탭 열기(중복 방지)/닫기, 창 제목 갱신
  - 커맨드라인(-s/-d) 진입 — 파일이면 파일 비교 탭, 폴더면 폴더 비교 탭
+ - 3파일 비교(Diff3View) 탭 — '＋ 3파일 비교' 버튼, 커맨드라인 -b(기준)·-r(결과)
 """
 import os
 
@@ -77,6 +78,14 @@ class MainWindow(QMainWindow):
         new_btn.setFocusPolicy(Qt.NoFocus)
         new_btn.clicked.connect(self._new_tab)
         corner_lay.addWidget(new_btn)
+
+        merge3_btn = QPushButton("＋ 3파일 비교")
+        merge3_btn.setFont(ui_font(9))
+        merge3_btn.setToolTip("왼쪽·가운데(기준)·오른쪽 세 파일을 비교하고 병합합니다 — "
+                              "가운데에서 갈라진 두 버전을 합칠 때")
+        merge3_btn.setFocusPolicy(Qt.NoFocus)
+        merge3_btn.clicked.connect(lambda: self.open_merge3())
+        corner_lay.addWidget(merge3_btn)
         self.tabs.setCornerWidget(corner, Qt.TopRightCorner)
 
         # ── 탭 이동/닫기 단축키 (탭이 많을 때 빠른 순회) ──
@@ -253,6 +262,50 @@ class MainWindow(QMainWindow):
             view.load_pair(path_a, path_b, record=record)
             self._update_tab_title(view)
         return view
+
+    def open_merge3(self, left: str = "", base: str = "", right: str = "",
+                    result: str = "", record: bool = True):
+        """3파일 비교 탭을 연다. 같은 (왼쪽, 가운데, 오른쪽, 결과) 탭이 있으면 그 탭으로.
+        경로가 있고 지금 탭이 빈 파일 탭이면 그 자리를 3파일 화면으로 바꾼다(시작 시 빈 탭 +
+        P4V 호출로 탭이 둘로 늘지 않게)."""
+        from .diff3_view import Diff3View
+        existing = self._find_merge3_tab(left, base, right, result)
+        if existing is not None:
+            self.tabs.setCurrentWidget(existing)
+            return existing
+        view = Diff3View(self.status)
+        for p in view.panels.values():
+            p.file_loaded.connect(lambda _p, v=view: self._update_tab_title(v))
+        cur = self.tabs.currentWidget()
+        if ((left or base or right) and isinstance(cur, DiffView)
+                and not cur.panel_a.get_path() and not cur.panel_b.get_path()):
+            idx = self.tabs.indexOf(cur)
+            self.tabs.removeTab(idx)
+            if hasattr(cur, "shutdown"):
+                cur.shutdown()
+            cur.deleteLater()
+            self.tabs.insertTab(idx, view, view.tab_title())
+            self._install_close_button(view)
+            self._apply_tab_icon(view)
+            self.tabs.setCurrentIndex(idx)
+        else:
+            self._add_tab(view, view.tab_title())
+        if left or base or right:
+            view.load3(left, base, right, result, record=record)
+            self._update_tab_title(view)
+        return view
+
+    def _find_merge3_tab(self, left: str, base: str, right: str, result: str = ""):
+        from .diff3_view import Diff3View
+        if not (left or base or right):
+            return None
+        key = tuple(self._norm(p) for p in (left, base, right, result))
+        for i in range(self.tabs.count()):
+            w = self.tabs.widget(i)
+            if isinstance(w, Diff3View):
+                if tuple(self._norm(p) for p in (*w.paths(), w.result_path())) == key:
+                    return w
+        return None
 
     def _convert_to_folder(self, view: "DiffView", side: str, path: str):
         """파일 그리드 탭에 폴더가 들어오면 그 탭 자리를 폴더 비교 뷰로 교체한다."""

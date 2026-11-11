@@ -652,12 +652,10 @@ class FreezeController(QObject):
         has_changed = any(host._col_has_changed(c) for c in target_cols)
         has_staged = host._cols_have_staged(target_cols)
         if has_changed:
-            m.addAction(f"A → B  병합 준비  [{cols_label}열]").triggered.connect(
-                lambda _=False, cs=target_cols:
-                (host._select_cols(cs), host.stage_requested.emit(DIR_A2B)))
-            m.addAction(f"B → A  병합 준비  [{cols_label}열]").triggered.connect(
-                lambda _=False, cs=target_cols:
-                (host._select_cols(cs), host.stage_requested.emit(DIR_B2A)))
+            for lbl, d in host.stage_choices:
+                m.addAction(f"{lbl}  병합 준비  [{cols_label}열]").triggered.connect(
+                    lambda _=False, cs=target_cols, d=d:
+                    (host._select_cols(cs), host.stage_requested.emit(d)))
         if has_staged:
             if has_changed:
                 m.addSeparator()
@@ -718,12 +716,10 @@ class FreezeController(QObject):
         has_changed = any(host._row_has_changed(r) for r in target_rows)
         has_staged = host._rows_have_staged(target_rows)
         if has_changed:
-            m.addAction(f"A → B  병합 준비{suffix}").triggered.connect(
-                lambda _=False, rs=target_rows:
-                (host._select_rows(rs), host.stage_requested.emit(DIR_A2B)))
-            m.addAction(f"B → A  병합 준비{suffix}").triggered.connect(
-                lambda _=False, rs=target_rows:
-                (host._select_rows(rs), host.stage_requested.emit(DIR_B2A)))
+            for lbl, d in host.stage_choices:
+                m.addAction(f"{lbl}  병합 준비{suffix}").triggered.connect(
+                    lambda _=False, rs=target_rows, d=d:
+                    (host._select_rows(rs), host.stage_requested.emit(d)))
         if has_staged:
             if has_changed:
                 m.addSeparator()
@@ -1205,7 +1201,12 @@ class ExcelTableView(QTableView):
     row_resized       = pyqtSignal(int, int)   # (row, new_height) — 사용자 조작에 의한 변경만
     drag_selection_finished = pyqtSignal()     # 드래그 선택 종료 — A↔B 미러를 1회만 수행
 
-    def __init__(self, side: str, parent=None):
+    # 병합 준비 항목 [(라벨, 방향)] — 0번이 Alt+→, 1번이 Alt+← 다(화살표 = 값이 흐르는 쪽).
+    # 2파일은 A → B / B → A. 3파일 화면은 인스턴스에서 '왼쪽 → 가운데' / '오른쪽 → 가운데' 로
+    # 바꾼다 — 메뉴 여섯 곳과 단축키가 이 목록 하나를 본다.
+    stage_choices = (("A → B", DIR_A2B), ("B → A", DIR_B2A))
+
+    def __init__(self, side: str, parent=None, model=None):
         super().__init__(parent)
         # 틀 고정 — updateGeometries() 오버라이드가 setModel 등에서 조기 호출될 수 있어 먼저 초기화.
         self._freeze = None            # FreezeController(생성 시 자기 자신을 여기 설정)
@@ -1224,7 +1225,10 @@ class ExcelTableView(QTableView):
             _hdr.setSectionsClickable(True)
             _hdr.setHighlightSections(True)
             _setter(_hdr)
-        self._model = DiffTableModel(side, self)
+        # model: 3파일 화면이 자기 모델(Diff3TableModel)을 넣는다. 없으면 2파일 모델.
+        if model is not None:
+            model.setParent(self)
+        self._model = model if model is not None else DiffTableModel(side, self)
         self.setModel(self._model)   # selectionModel은 여기서 1회 생성 — 이후 교체 없음
         # A/B 값이 다른 문자 구간을 셀 안에서 핑크로 강조 (modified 셀 한정)
         self.setItemDelegate(DiffHighlightDelegate(self))
@@ -2184,10 +2188,11 @@ class ExcelTableView(QTableView):
         menu.setStyleSheet(MENU_QSS)
 
         # ── 병합 준비 항목 (단일·다중 공통) ──
-        act_a2b = act_b2a = act_unstage = None
+        stage_acts = []
+        act_unstage = None
         if has_changed:
-            act_a2b = menu.addAction(f"A → B  병합 준비  [{cols_label}열]")
-            act_b2a = menu.addAction(f"B → A  병합 준비  [{cols_label}열]")
+            stage_acts = [(menu.addAction(f"{lbl}  병합 준비  [{cols_label}열]"), d)
+                          for lbl, d in self.stage_choices]
         if has_staged:
             if has_changed:
                 menu.addSeparator()
@@ -2228,12 +2233,10 @@ class ExcelTableView(QTableView):
         if act is None:
             return
 
-        if act_a2b is not None and act == act_a2b:
+        stage_dir = next((d for a, d in stage_acts if act == a), None)
+        if stage_dir is not None:
             self._select_cols(target_cols)
-            self.stage_requested.emit(DIR_A2B)
-        elif act_b2a is not None and act == act_b2a:
-            self._select_cols(target_cols)
-            self.stage_requested.emit(DIR_B2A)
+            self.stage_requested.emit(stage_dir)
         elif act_unstage is not None and act == act_unstage:
             self._select_cols(target_cols)
             self.unstage_requested.emit()
@@ -2275,10 +2278,11 @@ class ExcelTableView(QTableView):
         menu = QMenu(self)
         menu.setStyleSheet(MENU_QSS)
 
-        act_a2b = act_b2a = act_unstage = None
+        stage_acts = []
+        act_unstage = None
         if has_changed:
-            act_a2b = menu.addAction(f"A → B  병합 준비{suffix}")
-            act_b2a = menu.addAction(f"B → A  병합 준비{suffix}")
+            stage_acts = [(menu.addAction(f"{lbl}  병합 준비{suffix}"), d)
+                          for lbl, d in self.stage_choices]
         if has_staged:
             if has_changed:
                 menu.addSeparator()
@@ -2296,12 +2300,10 @@ class ExcelTableView(QTableView):
         if act is None:
             return
 
-        if act_a2b is not None and act == act_a2b:
+        stage_dir = next((d for a, d in stage_acts if act == a), None)
+        if stage_dir is not None:
             self._select_rows(target_rows)
-            self.stage_requested.emit(DIR_A2B)
-        elif act_b2a is not None and act == act_b2a:
-            self._select_rows(target_rows)
-            self.stage_requested.emit(DIR_B2A)
+            self.stage_requested.emit(stage_dir)
         elif act_unstage is not None and act == act_unstage:
             self._select_rows(target_rows)
             self.unstage_requested.emit()
@@ -2336,10 +2338,9 @@ class ExcelTableView(QTableView):
         menu.setAttribute(Qt.WA_DeleteOnClose)
 
         if has_changed:
-            menu.addAction("A → B  병합 준비").triggered.connect(
-                lambda _=False: self.stage_requested.emit(DIR_A2B))
-            menu.addAction("B → A  병합 준비").triggered.connect(
-                lambda _=False: self.stage_requested.emit(DIR_B2A))
+            for lbl, d in self.stage_choices:
+                menu.addAction(f"{lbl}  병합 준비").triggered.connect(
+                    lambda _=False, d=d: self.stage_requested.emit(d))
         if has_staged:
             if has_changed:
                 menu.addSeparator()
@@ -2704,11 +2705,11 @@ class ExcelTableView(QTableView):
         if alt and not ctrl and not shift:
             if key == Qt.Key_Right:
                 if self._has_changed_selection():
-                    self.stage_requested.emit(DIR_A2B)
+                    self.stage_requested.emit(self.stage_choices[0][1])
                 event.accept(); return
             if key == Qt.Key_Left:
                 if self._has_changed_selection():
-                    self.stage_requested.emit(DIR_B2A)
+                    self.stage_requested.emit(self.stage_choices[1][1])
                 event.accept(); return
             if key in (Qt.Key_Backspace, Qt.Key_Delete):
                 if self._has_staged_selection():

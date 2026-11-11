@@ -14,14 +14,16 @@ from excelmerge.main_window import MainWindow  # noqa: E402
 from excelmerge.theme import load_app_icon
 
 
-def _parse_args() -> tuple[str, str]:
+def _parse_args(argv=None) -> tuple[str, str, str, str]:
     """
     P4V diff 호출 형식: -s <원본> -d <수정본>
-    위치 인자 2개도 지원: <파일A> <파일B>
-    반환: (path_a, path_b)  — 없으면 빈 문자열
+    P4V merge 호출 형식: -b <기준> -s <theirs> -d <yours> -r <결과>  (P4V: -b %b -s %1 -d %2 -r %r)
+    위치 인자 2개: <파일A> <파일B>   /   3개: <왼쪽> <가운데(기준)> <오른쪽>  (WinMerge 순서)
+    반환: (path_a, path_b, base, result) — 없으면 빈 문자열.
+      base 가 있으면 3파일 비교: 왼쪽 = path_a, 가운데 = base, 오른쪽 = path_b.
     """
-    args = sys.argv[1:]
-    path_a = path_b = ""
+    args = list(sys.argv[1:] if argv is None else argv)
+    path_a = path_b = base = result = ""
     i = 0
     positional = []
     while i < len(args):
@@ -29,16 +31,24 @@ def _parse_args() -> tuple[str, str]:
             path_a = args[i + 1]; i += 2
         elif args[i] == "-d" and i + 1 < len(args):
             path_b = args[i + 1]; i += 2
+        elif args[i] == "-b" and i + 1 < len(args):
+            base = args[i + 1]; i += 2
+        elif args[i] == "-r" and i + 1 < len(args):
+            result = args[i + 1]; i += 2
         elif not args[i].startswith("-"):
             positional.append(args[i]); i += 1
         else:
             i += 1
+    if len(positional) >= 3 and not (path_a or path_b or base):
+        # WinMerge 순서 — 왼쪽, 가운데(기준), 오른쪽
+        path_a, base, path_b = positional[:3]
+        return path_a, path_b, base, result
     # -s/-d 없이 위치 인자로 넘어온 경우
     if not path_a and len(positional) >= 1:
         path_a = positional[0]
     if not path_b and len(positional) >= 2:
         path_b = positional[1]
-    return path_a, path_b
+    return path_a, path_b, base, result
 
 
 def _set_windows_app_user_model_id():
@@ -72,12 +82,15 @@ def main():
 
     # P4V 등 외부 도구가 커맨드라인으로 경로를 넘긴 경우 자동 로드.
     # 폴더가 하나라도 있으면 폴더 비교 탭, 아니면 파일 비교 탭으로 연다.
-    path_a, path_b = _parse_args()
+    path_a, path_b, base, result = _parse_args()
     a_is_dir = bool(path_a) and os.path.isdir(path_a)
     b_is_dir = bool(path_b) and os.path.isdir(path_b)
     a_is_file = bool(path_a) and os.path.isfile(path_a)
     b_is_file = bool(path_b) and os.path.isfile(path_b)
-    if a_is_dir or b_is_dir:
+    if base:
+        # 3파일 비교 — 경로가 틀려도 화면이 무엇이 없는지 알려 준다(조용히 2파일로 바꾸지 않는다).
+        win.open_merge3(path_a, base, path_b, result)
+    elif a_is_dir or b_is_dir:
         win.open_folder_compare(path_a if a_is_dir else "",
                                 path_b if b_is_dir else "")
     elif a_is_file or b_is_file:

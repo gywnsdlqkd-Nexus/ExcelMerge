@@ -166,6 +166,7 @@ def run_checks(a_src, b_src, workdir, timeout=90.0):
         QApplication.setActiveWindow(win)
         try:
             _drive(win, a, b, sha_a0, sha_b0, dialogs, errors, status, ok, timeout)
+            _drive3(win, a_src, b_src, workdir, dialogs, ok, timeout)
         finally:
             win.close()
             win.deleteLater()
@@ -299,6 +300,72 @@ def _land_on_a_value(view, table):
         table._move_current_cell(*spot)
         _pump()
     return spot
+
+
+def _drive3(win, a_src, b_src, workdir, dialogs, ok, timeout):
+    """3파일 병합(P4V 방식) — 왼쪽 = B, 가운데·오른쪽 = A, 결과는 따로.
+
+    오른쪽이 기준과 같으니 바뀐 곳은 모두 '왼쪽만 바뀜'이고 충돌이 없다. 열 때 자동 병합
+    준비가 걸리고, 바뀐 시트를 모두 열어 본 뒤 저장하면 결과 파일만 생기고 가운데 원본은
+    그대로여야 한다. 새 환경변수 없이 A/B 두 파일로 돈다.
+    """
+    ext_a, ext_b = os.path.splitext(a_src)[1], os.path.splitext(b_src)[1]
+    left = _writable_copy(b_src, os.path.join(workdir, "L3" + ext_b))
+    base = _writable_copy(a_src, os.path.join(workdir, "M3" + ext_a))
+    right = _writable_copy(a_src, os.path.join(workdir, "R3" + ext_a))
+    result = os.path.join(workdir, "OUT3" + ext_a)
+    sha_m0 = _sha(base)
+    view = win.open_merge3(left, base, right, result)
+
+    def compared():
+        return bool(view._matrix) and view.status.currentMessage().startswith("비교 완료")
+
+    if not ok("3파일 비교 완료", _wait(compared, timeout), view.status.currentMessage()):
+        return
+    ok("3파일 충돌 없음(오른쪽 = 기준)", "충돌 0칸" in view.status.currentMessage(),
+       view.status.currentMessage())
+    if os.path.splitext(a_src)[1].lower() not in (".xlsx", ".xlsm"):
+        # 3파일 저장은 가운데가 .xlsx/.xlsm 일 때만 한다 — 비교까지만 보고 끝낸다.
+        ok("3파일 저장(가운데 형식이 저장 미지원 — 건너뜀)", True)
+        return
+    if len(view._sheet_names) > 1:
+        if not ok("3파일 시트별 변경 판정", _wait(lambda: view._changed_sheets is not None,
+                                             timeout)):
+            return
+        # 가운데(A)에 없는 시트는 병합 대상이 아니다 — 열어 볼 필요도 없다(저장 검사에서도 빠진다).
+        for name in view._unvisited_changed_sheets() or []:
+            view.sheet_tabs.setCurrentIndex(view._sheet_names.index(name))
+            _wait(lambda n=name: view._current_sheet == n and compared(), timeout)
+    staged = sum(len(s["staged"]) for s in view._sheet_cache.values()) + len(view._staged)
+    if not staged:
+        ok("3파일 저장(바뀐 곳 없음 — 건너뜀)", True)
+        return
+    n0 = len(dialogs)
+    # 실제 A/B 는 시트·열 구성이 다를 수 있다(B 에만 있는 시트·열) — 그때 뜨는 '결과에 빠지는
+    # 변경' 확인은 사용자가 읽고 넘길 안내라 '예'로 답한다. 그 밖의 질문은 기록기가 '아니오'로 답한다.
+    from PyQt5.QtWidgets import QMessageBox
+    prev_q = QMessageBox.__dict__["question"]
+
+    def question(parent, title, text, *a, **k):
+        ans = prev_q.__func__(parent, title, text, *a, **k)    # 기록은 그대로
+        return QMessageBox.Yes if title == "결과에 빠지는 변경" else ans
+
+    QMessageBox.question = staticmethod(question)
+    try:
+        view._save()
+        # 저장이 끝나거나, 저장하지 않고 알림·질문을 띄우면 멈춘다 — 그 창이 곧 실패 사유다.
+        _wait(lambda: any(d[1] == "저장 완료" or d[0] in ("critical", "warning")
+                          or (d[0] == "question" and d[1] != "결과에 빠지는 변경")
+                          or d[1] == "저장 미지원" for d in dialogs[n0:])
+              or (not view._saving_now() and view.status.currentMessage().startswith("저장하지")),
+              timeout)
+    finally:
+        QMessageBox.question = prev_q
+    after = dialogs[n0:]
+    ok("3파일 저장 완료", any(d[1] == "저장 완료" for d in after),
+       [f"{d[0]}:{d[1]}:{d[2][:80]}" for d in after])
+    ok("3파일 결과 파일 생김", os.path.isfile(result))
+    ok("3파일 가운데 원본은 그대로", _sha(base) == sha_m0)
 
 
 # ── 진입점 ──────────────────────────────────────────────────────────────────
