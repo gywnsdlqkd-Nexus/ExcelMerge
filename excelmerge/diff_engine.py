@@ -93,6 +93,22 @@ def count_dropped_key_rows(a_data: list, b_data: list, key_col: int,
     return _dropped(a_data or [], a_key) + _dropped(b_data or [], b_key)
 
 
+def column_tags(names) -> list:
+    """헤더 이름 목록 → 열마다 (이름, 그 이름의 몇 번째). 0부터 센다.
+
+    같은 이름 열('#' 주석 열이 한 시트에 아홉 개씩)을 구분하는 식별자다. 열 매칭
+    (match_columns)과 파일별 '검사 제외 열' 기억(DiffView._display_col_ids)이 **같은 규칙**을
+    써야, 기억해 둔 열이 비교에서 짝지은 바로 그 열을 가리킨다.
+    """
+    seen: dict = {}
+    out = []
+    for n in names:
+        i = seen.get(n, 0)
+        seen[n] = i + 1
+        out.append((n, i))
+    return out
+
+
 def match_columns(a_data: list, b_data: list, key_row: int = 0) -> list | None:
     """헤더 이름으로 열을 맞춘 col_meta. 이름으로 맞출 수 없으면 None(= 위치 기준).
 
@@ -134,13 +150,7 @@ def match_columns(a_data: list, b_data: list, key_row: int = 0) -> list | None:
             out.pop()
         if not out or "" in out:         # 가운데 빈 헤더 → 맞출 수 없다
             return None
-        seen: dict = {}
-        tagged = []
-        for n in out:                    # 같은 이름은 나온 순서로 구분한다
-            i = seen.get(n, 0)
-            seen[n] = i + 1
-            tagged.append((n, i))
-        return tagged
+        return column_tags(out)          # 같은 이름은 나온 순서로 구분한다
 
     a_keys = keys(a_data[kr])
     b_keys = keys(b_data[kr])

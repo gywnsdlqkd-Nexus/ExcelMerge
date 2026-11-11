@@ -20,7 +20,7 @@ from PyQt5.QtCore import Qt, pyqtSignal, QThread
 from PyQt5.QtGui import QIcon, QKeySequence
 from .colref import get_column_letter
 
-from .diff_engine import (count_changed_masked, keep_mask, match_columns,
+from .diff_engine import (column_tags, count_changed_masked, keep_mask, match_columns,
                           usable_col_meta,
                           row_change_masks)
 from .loaders import _EXCEL_EXTS, list_sheet_names, clear_values_cache
@@ -900,18 +900,47 @@ class DiffView(QWidget):
         번호가 아니라 이름으로 기억하려면 '지금 이 화면의 각 열이 무슨 이름인지' 가
         필요하다. 한쪽에만 있는 열은 그쪽 파일에서 읽는다.
         """
-        kr = self._key_row if self._key_row and self._key_row > 0 else 0
-        a, b = self._raw_data["a"], self._raw_data["b"]
-        ah = a[kr] if kr < len(a) else []
-        bh = b[kr] if kr < len(b) else []
+        ah, bh = self._header_rows()
 
         def txt(row, i):
-            return str(row[i]).strip() if (i is not None and i < len(row)) else ""
+            return row[i] if (i is not None and i < len(row)) else ""
 
         if not col_meta:
             n = max(len(ah), len(bh))
             return [txt(ah, c) or txt(bh, c) for c in range(n)]
         return [txt(ah, ac) or txt(bh, bc) for ac, bc in col_meta]
+
+    def _header_rows(self) -> tuple:
+        """키 행(헤더 행)의 글자 (A, B) — 앞뒤 공백을 뗀다(match_columns 와 같은 규칙)."""
+        kr = self._key_row if self._key_row and self._key_row > 0 else 0
+        a, b = self._raw_data["a"], self._raw_data["b"]
+        return tuple([str(v).strip() for v in (d[kr] if kr < len(d) else [])]
+                     for d in (a, b))
+
+    def _display_col_ids(self, col_meta=None, width: int = 0) -> list:
+        """화면 열마다의 식별자 — 파일별 '검사 제외 열' 기억이 이것으로 열을 찾는다.
+
+          · 이름 있는 열: (이름, 그 이름의 몇 번째) — match_columns 가 짝지을 때 쓰는 바로 그
+            식별자(column_tags). 이름만 쓰면 '#' 처럼 같은 이름이 여럿일 때 첫 '#' 를 빼 두어도
+            다시 열면 다른 '#' 가 빠졌다 — 그 열의 실제 변경이 숨는다.
+          · 이름 없는 열: ("", 화면 열 번호) — 찾을 이름이 없어 자리로 기억한다.
+
+        열을 이름으로 맞춘 화면(col_meta)이면 그 열을 가진 파일의 헤더에서 센다. 공통 열은
+        양쪽 식별자가 같고(그래서 짝지어졌다) 한쪽 전용 열끼리는 겹치지 않으므로 화면 안에서
+        하나뿐이다. 위치 기준 화면이면 화면 이름 순서대로 센다 — 두 파일 헤더가 어긋나 있어도
+        겹치지 않게. width: 위치 기준일 때 헤더보다 넓은 데이터 열도 이름 없는 열로 채운다.
+        """
+        if col_meta:
+            at, bt = (column_tags(h) for h in self._header_rows())
+            ids = []
+            for c, (ac, bc) in enumerate(col_meta):
+                t = (at[ac] if ac is not None and ac < len(at) else
+                     bt[bc] if bc is not None and bc < len(bt) else ("", c))
+                ids.append(t if t[0] else ("", c))
+            return ids
+        names = self._display_header_names(None)
+        names += [""] * (width - len(names))
+        return [t if t[0] else ("", c) for c, t in enumerate(column_tags(names))]
 
     def _effective_col_meta(self) -> list | None:
         """지금 키로 실제로 쓰일 열 매핑 — 워커에 넘기는 것과 같은 값."""
@@ -927,10 +956,11 @@ class DiffView(QWidget):
 
         **사용자 조작에서만 부른다.** 키 변경 재계산(_recompute_diff)의 자동 초기화까지
         기록하면, 한 번 키를 건드린 것만으로 애써 잡아 둔 제외가 지워진다.
+
+        열마다 (이름, 그 이름의 몇 번째) 로, 이름 없는 열은 자리로 남긴다(_display_col_ids).
         """
-        names = self._display_header_names(self._diff_col_meta)
-        keep = [names[c] for c in sorted(self._excluded_cols)
-                if c < len(names) and names[c]]
+        ids = self._display_col_ids(self._diff_col_meta)
+        keep = [ids[c] if c < len(ids) else ("", c) for c in sorted(self._excluded_cols)]
         for panel in (self.panel_a, self.panel_b):
             path = panel.get_path()
             if path:
@@ -942,24 +972,30 @@ class DiffView(QWidget):
         A/B 중 먼저 기억이 있는 쪽을 따른다(_apply_remembered_key 와 같은 규칙 —
         보통 같은 이름의 두 빌드라 둘의 기억은 대개 같다).
 
-        기억은 **헤더 이름**이다. 번호로 기억하면 열 하나가 끼는 순간 엉뚱한 열이
-        회색이 된다. 옛 설정(숫자 목록)도 그대로 읽어 번호로 해석한다.
+        기억은 **(헤더 이름, 그 이름의 몇 번째)** 다(_display_col_ids). 번호로 기억하면 열
+        하나가 끼는 순간 엉뚱한 열이 회색이 되고, 이름만 기억하면 같은 이름('#' 여럿) 중
+        엉뚱한 열이 회색이 된다. 이름 없는 열은 자리로 기억한다 — 그 자리에 지금 이름이
+        생겼으면 다른 열이므로 적용하지 않는다(변경을 숨기느니 제외를 버린다).
+        옛 설정도 읽는다: 이름만 → 그 이름의 첫째, 숫자 목록 → 화면 열 번호.
 
         거르는 것 둘:
-          · 지금 화면에 없는 열 — 이름을 못 찾거나 폭을 벗어나면 버린다.
+          · 지금 화면에 없는 열 — 식별자를 못 찾거나 폭을 벗어나면 버린다.
           · 키 열 — 키는 제외할 수 없다(excludable_cols 와 같은 규칙).
         """
-        names = self._display_header_names(self._effective_col_meta())
-        width = len(names) if names else ncols
+        meta = self._effective_col_meta()
+        ids = self._display_col_ids(meta, ncols)
+        where = {ident: c for c, ident in enumerate(ids)}
+        width = len(meta) if meta else ncols
         for panel in (self.panel_a, self.panel_b):
             remembered = load_last_excluded(panel.get_path())
             if remembered is None:          # [] 는 "전부 해제" 라는 선택이다
                 continue
-            if all(isinstance(x, str) for x in remembered):
-                idx = {n: c for c, n in enumerate(names) if n}
-                cols = [idx[n] for n in remembered if n in idx]
-            else:                            # 옛 형식 — 화면 열 번호
+            if remembered and all(isinstance(x, int) for x in remembered):
+                # 아주 옛 형식 — 화면 열 번호
                 cols = [c for c in remembered if not width or c < width]
+            else:
+                idents = ((x, 0) if isinstance(x, str) else tuple(x) for x in remembered)
+                cols = [where[i] for i in idents if i in where]
             cols = staging.excludable_cols(cols, self._key_col, set())
             self._excluded_cols.clear()
             self._excluded_cols.update(cols)

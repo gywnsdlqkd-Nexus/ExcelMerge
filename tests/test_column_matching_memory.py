@@ -44,7 +44,8 @@ def test_the_old_number_format_still_loads(tmp_path):
 
 
 def test_nameless_columns_are_not_remembered(tmp_path):
-    """헤더가 빈 열은 다음에 찾을 방법이 없다 — 기억하지 않는다."""
+    """빈 이름 문자열로는 다음에 찾을 방법이 없다 — 버린다. (이름 없는 열은 화면이
+    ["", 열 번호] 로 자리를 따로 남긴다 — tests/test_excluded_memory.py.)"""
     p = str(tmp_path / "a.xlsx")
     save_last_excluded(p, ["#주석", ""])
     assert load_last_excluded(p) == ["#주석"]

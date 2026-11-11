@@ -280,6 +280,12 @@ def load_last_excluded(path: str):
 
     **빈 목록과 '기억 없음'은 다르다.** 사용자가 제외를 전부 해제한 것도 선택이므로
     `[]` 를 그대로 돌려준다 — 호출부는 `is None` 으로 구분해야 한다.
+
+    돌려주는 모양(save_last_excluded 참조):
+      · 지금 형식 — 칸마다 "이름"(그 이름의 첫째) 또는 (이름, 몇 번째) 또는 ("", 화면 열 번호).
+        이름만 있는 옛 설정도 이 형식의 일부로 그대로 읽힌다(= 그 이름의 첫째).
+      · 아주 옛 형식 — 숫자만 있는 목록(화면 열 번호). 정렬해 돌려준다.
+    알아볼 수 없는 칸이 하나라도 있으면 None(기억 없음)이다.
     """
     if not path:
         return None
@@ -287,29 +293,65 @@ def load_last_excluded(path: str):
     if isinstance(m, dict):
         v = m.get(os.path.abspath(path))
         if isinstance(v, list):
-            if all(isinstance(x, str) for x in v):
-                return list(v)                       # 지금 형식 — 헤더 이름
-            if all(isinstance(x, int) and x >= 0 for x in v):
-                return sorted(set(v))                # 옛 형식 — 화면 열 번호
+            if v and all(_is_col_no(x) for x in v):
+                return sorted(set(v))                # 아주 옛 형식 — 화면 열 번호
+            out = []
+            for x in v:
+                if x == "":
+                    continue                         # 빈 이름 — 찾을 수 없다
+                ident = _excluded_ident(x)
+                if ident is None:
+                    return None
+                out.append(x if isinstance(x, str) else ident)
+            return out
+    return None
+
+
+def _is_col_no(x) -> bool:
+    return isinstance(x, int) and not isinstance(x, bool) and x >= 0
+
+
+def _excluded_ident(x):
+    """제외 기억 한 칸 → (이름, n). 알아볼 수 없으면 None.
+
+      "이름"     → (이름, 0)   그 이름의 첫째 열. 이름만 남기던 옛 설정도 이렇게 읽는다.
+      [이름, k]  → (이름, k)   같은 이름의 k번째 열(0부터) — '#' 주석 열이 여럿일 때.
+      ["", c]    → ("", c)     이름 없는 열 — 화면 c열(자리로 기억한다).
+    """
+    if isinstance(x, str):
+        return (x, 0)
+    if (isinstance(x, (list, tuple)) and len(x) == 2
+            and isinstance(x[0], str) and _is_col_no(x[1])):
+        return (x[0], x[1])
     return None
 
 
 def save_last_excluded(path: str, cols) -> None:
-    """파일별 제외 열을 **헤더 이름**으로 기록(간단 LRU). 실패는 조용히 무시.
+    """파일별 제외 열을 기록(간단 LRU). 실패는 조용히 무시.
 
-    번호로 기억하면 열이 하나 끼는 순간 엉뚱한 열이 회색이 된다. 이름이 없는 열(빈
-    헤더)은 기억하지 않는다 — 다음에 찾을 방법이 없어서다.
-    숫자 목록을 주면 옛 형식으로 저장한다(읽기 호환용 경로).
+    cols 의 칸마다 (이름, 그 이름의 몇 번째) — 열 매칭(diff_engine.column_tags)과 같은
+    식별자다. 이름만 기억하면 '#' 처럼 같은 이름이 여럿일 때 엉뚱한 '#' 를 가리킨다.
+    이름 없는 열(빈 헤더)은 ("", 화면 열 번호) 로 자리를 기억한다. "이름" 은 (이름, 0).
+
+    저장 모양: 그 이름의 첫째는 예전처럼 **이름 문자열만** 남긴다(이 버전 이전도 읽는다),
+    둘째부터와 이름 없는 열은 [이름, k] · ["", c]. 숫자만 주면 아주 옛 형식(화면 열 번호)으로
+    저장한다(읽기 호환 확인용 경로). 알아볼 수 없는 칸이 섞이면 아무것도 저장하지 않는다.
     """
     if not path:
         return
-    if all(isinstance(c, str) for c in cols):
-        vals = sorted({c for c in cols if c})
+    cols = list(cols)
+    if cols and all(isinstance(c, int) and not isinstance(c, bool) for c in cols):
+        vals = sorted({c for c in cols if c >= 0})
     else:
-        try:
-            vals = sorted({int(c) for c in cols if int(c) >= 0})
-        except (TypeError, ValueError):
-            return
+        ids = set()
+        for c in cols:
+            if c == "":
+                continue                             # 빈 이름 — 찾을 수 없다
+            ident = _excluded_ident(c)
+            if ident is None:
+                return
+            ids.add(ident)
+        vals = [n if (n and k == 0) else [n, k] for n, k in sorted(ids)]
     _update_prefs(lambda c: _lru_put(c, "last_excluded", os.path.abspath(path), vals))
 
 
