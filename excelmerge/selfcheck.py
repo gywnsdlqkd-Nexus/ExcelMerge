@@ -195,10 +195,12 @@ def _drive(win, a, b, sha_a0, sha_b0, dialogs, errors, status, ok, timeout):
     box = view.panel_a.cell_edit
 
     # 1) 셀값란 Ctrl+C — 셀값란의 글자가 복사돼야 한다(v219: 표가 가로채 경로·표가 복사됨)
-    table.setFocus()
-    _press(table, Qt.Key_Down, Qt.AltModifier)           # 첫 변경 셀로
+    spot = _land_on_a_value(view, table)                 # A 쪽 값이 있는 변경 셀로 Alt+Down
     value = box.toPlainText()
-    if ok("셀값란에 값이 뜸", value.strip(), value[:40]):
+    if ok("셀값란에 값이 뜸", value.strip(),
+          value[:40] if value.strip() else
+          ("A 쪽에 값이 있는 칸이 없다" if spot is None else
+           f"목표 {spot} · 현재 {table._current_cell()} — 셀값란이 비었다")):
         cb = QApplication.clipboard()
         cb.setText("<SELFCHECK>")
         box.setFocus()
@@ -249,6 +251,54 @@ def _drive(win, a, b, sha_a0, sha_b0, dialogs, errors, status, ok, timeout):
     bad = [f"{d[0]}:{d[1]}" for d in dialogs[n1:] if d[0] in ("critical", "warning")]
     ok("저장 뒤 Ctrl+S 에 오류 없음", not bad and len(errors) == e1,
        bad or (errors[-1].strip().splitlines()[-1] if len(errors) > e1 else ""))
+
+
+def _land_on_a_value(view, table):
+    """셀값란 복사를 볼 칸에 선다 → 그 칸 (r, c), 고를 칸이 없으면 None.
+
+    예전엔 Alt+Down 한 번으로 '첫 변경 셀'에 섰다. 그 칸이 B 에만 있는 열·행이면 A 쪽이
+    비어 셀값란도 비고, 앱은 멀쩡한데 '셀값란에 값이 뜸'이 실패해 릴리스가 막혔다. 게다가
+    '첫'도 아니었다 — 비교가 끝나면 표가 포커스를 받으며 현재 셀을 본체에 보이는 첫 칸(틀
+    고정 머리글·'변경점만 보기'로 숨은 행 다음, 실측 (1, 1)·(2, 1))으로 잡아 두어, Alt+Down 이
+    그 다음부터 찾았다. 그래서:
+
+      · 포커스를 **먼저** 준 뒤 현재 셀을 정한다 — 포커스가 현재 셀을 바꾸지 못하게.
+      · diff 행렬에서 A 쪽 값이 있는 첫 변경 셀을 고르고, 그 **바로 앞 변경 셀**에 서 둔 채
+        (첫 칸이면 아무 칸에도 서지 않은 채) Alt+Down 을 한 번 누른다. 착지는 여전히 실제
+        키 경로다. 앞 칸은 정의상 A 쪽이 비어 있으므로 Alt+Down 이 안 먹으면 셀값란이 빈 채로
+        남아 그대로 실패한다. 몇 번 눌러야 닿는지 세지 않으니 B 전용 열이 수천 행이어도 한 번이다.
+      · 변경 셀이 전부 A 쪽이 빈 쌍(B 에 행만 더함)은 Alt+Down 으로 닿을 칸이 없다 — A 쪽 값이
+        있는 첫 칸을 직접 고른다. 셀값란 Ctrl+C 는 그 칸이 바뀌었는지와 무관하다. 숨은 행도
+        고른다: 그런 쌍은 값 있는 행이 전부 '변경점만 보기'·틀 고정으로 본체에서 숨어 있고
+        (실측), 셀값란은 보이는지와 무관하게 선택 칸의 값을 보여 준다.
+
+    값이 있는지는 셀값란과 같은 출처(model.display_text)로 본다.
+    """
+    from PyQt5.QtCore import Qt
+    model = table.model()
+
+    def has_value(rc):
+        return bool(model.display_text(*rc).strip())
+
+    table.setFocus()
+    _pump()
+    before = None
+    for rc in view._iter_changed_cells():                    # Alt+Down 과 같은 순서·같은 거름
+        if has_value(rc):
+            for t in (view.panel_a.table, view.panel_b.table):   # 다음 변경의 기준은 A → B 순
+                t.selectionModel().clear()
+            if before is not None:
+                table._move_current_cell(*before)
+            _pump()
+            _press(table, Qt.Key_Down, Qt.AltModifier)
+            return rc
+        before = rc
+    spot = next(((r, c) for r in range(model.data_rows)
+                 for c in range(model.data_cols) if has_value((r, c))), None)
+    if spot is not None:
+        table._move_current_cell(*spot)
+        _pump()
+    return spot
 
 
 # ── 진입점 ──────────────────────────────────────────────────────────────────
