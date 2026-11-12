@@ -32,30 +32,6 @@ from .statusbar import StatusBar
 from .theme import APP_QSS, load_app_icon, ui_font
 
 
-class _MainTabBar(QTabBar):
-    """탭 높이를 우상단 코너 버튼이 필요한 높이 이상으로 유지하는 탭 바.
-
-    QTabWidget 은 코너 위젯 높이를 **탭 바의 sizeHint(=탭 높이)로 자른다**(setMinimumHeight 는
-    무시됨). 탭 높이는 ✕ 버튼이 받쳐 주고 있었는데, 탭이 하나일 때 ✕ 를 숨기자(v231) 탭이
-    글자 높이로 줄어 코너 버튼이 19px 로 눌려 글자가 잘렸다(필요 27px, Windows 실측).
-    """
-    def __init__(self, parent=None):
-        super().__init__(parent)
-        self.min_tab_height = 0
-
-    def tabSizeHint(self, index):
-        s = super().tabSizeHint(index)
-        if s.height() < self.min_tab_height:
-            s.setHeight(self.min_tab_height)
-        return s
-
-    def minimumTabSizeHint(self, index):
-        s = super().minimumTabSizeHint(index)
-        if s.height() < self.min_tab_height:
-            s.setHeight(self.min_tab_height)
-        return s
-
-
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
@@ -72,7 +48,6 @@ class MainWindow(QMainWindow):
 
         # ── 탭 컨테이너 ──
         self.tabs = QTabWidget()
-        self.tabs.setTabBar(_MainTabBar())      # 탭이 하나여도 코너 버튼이 눌리지 않게
         self.tabs.setObjectName("main_tabs")
         # 기본 닫기 버튼 대신 커스텀(표준 느낌) ✕ 버튼을 탭마다 직접 단다.
         self.tabs.setTabsClosable(False)
@@ -112,9 +87,16 @@ class MainWindow(QMainWindow):
         merge3_btn.clicked.connect(lambda: self.open_merge3())
         corner_lay.addWidget(merge3_btn)
         self.tabs.setCornerWidget(corner, Qt.TopRightCorner)
-        # 코너 칸 높이 = 탭 높이 - 1px(문서 모드 탭 바 밑선, Windows·offscreen 모두 실측)이므로,
-        # 탭을 코너 버튼이 필요한 높이 + 1 이상으로 둔다.
-        self.tabs.tabBar().min_tab_height = corner.sizeHint().height() + 1
+        # QTabWidget 은 코너 칸 높이를 **탭 높이로 자른다**(탭 바 setMinimumHeight 는 무시됨).
+        # 탭 높이는 ✕ 버튼이 받쳐 주고 있었는데, 탭이 하나일 때 ✕ 를 숨기자(v231) 탭이 글자
+        # 높이로 줄어 코너 버튼이 19px 로 눌려 글자가 잘렸다(필요 27px, Windows 실측).
+        # 그래서 탭 최소 높이를 코너가 필요한 높이 + 1px(문서 모드 밑선, 실측)로 준다.
+        # 스타일시트로 준다 — QTabBar 하위 클래스로 tabSizeHint 를 덮어쓰면 전체 테스트에서
+        # 다른 테스트의 Qt 슬롯이 엉뚱한 인자로 불리는 예외가 간헐적으로 났다(5회 중 4회, v231 은 2회 중 0회).
+        # '>' 로 이 탭 바에만 건다 — 탭 안의 시트 탭(sheet_tabs)엔 번지지 않게.
+        self.setStyleSheet(
+            APP_QSS + "\nQTabWidget#main_tabs > QTabBar::tab "
+            f"{{ min-height: {corner.sizeHint().height() + 1}px; }}\n")
 
         # ── 탭 이동/닫기 단축키 (탭이 많을 때 빠른 순회) ──
         # Ctrl+Tab: 다음 탭 / Ctrl+Shift+Tab: 이전 탭 / Ctrl+W: 현재 탭 닫기.
