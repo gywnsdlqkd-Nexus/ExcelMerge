@@ -56,6 +56,31 @@ def test_ctrl_w_keeps_the_last_tab(qapp):
         win.close()
 
 
+def test_corner_buttons_keep_their_height_with_one_tab(qapp):
+    """✕ 를 숨겨 탭이 낮아져도 우상단 코너 버튼('업데이트 확인'·'＋ 새 비교'·'＋ 3파일 비교')이
+    눌리지 않는다 — QTabWidget 은 코너 높이를 탭 높이로 자른다(v231 에서 글자가 잘림, 사용자 제보)."""
+    from PyQt5.QtWidgets import QPushButton
+    win = MainWindow()
+    try:
+        win.show()
+        corner = win.tabs.cornerWidget()
+
+        def heights():
+            qapp.processEvents()
+            return [b.height() for b in corner.findChildren(QPushButton)]
+
+        assert win.tabs.tabBar().tabSizeHint(0).height() >= corner.sizeHint().height()
+        one = heights()
+        win._new_tab()
+        two = heights()
+        win._close_tab(1)
+        assert one == two == heights()
+        hint = corner.findChildren(QPushButton)[0].sizeHint().height()
+        assert min(one) >= hint - 1, (one, hint)
+    finally:
+        win.close()
+
+
 def test_merge3_replacing_the_only_empty_tab_has_no_close_button(qapp, tmp_path):
     """빈 비교 탭 자리를 3파일 탭으로 바꿔 끼워도 탭은 하나 — ✕ 없음."""
     import openpyxl
