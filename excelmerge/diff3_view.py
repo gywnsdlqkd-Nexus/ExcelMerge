@@ -15,6 +15,12 @@ yours). 병합 결과는 가운데에 쓴다 — 결과 파일(P4V 의 %r)을 �
     결과에서도 빠진다.
   · 시트를 옮겨 다녀도 결정은 시트별로 남고(_sheet_cache), 저장은 모든 시트를 함께 쓴다.
   · 결과 파일이 이 화면 밖에서 바뀌었으면 덮어쓰지 않는다.
+
+여섯 방향 — 결과 파일을 따로 받지 않은 보통의 비교에서는 **어느 파일에서 어느 파일로든** 보낸다
+(나란한 세 브랜치의 같은 표를 놓고 서로 맞추는 용도). 결정은 받는 파일마다 따로 두고(_targets),
+규칙과 저장은 '그 파일을 가운데에 둔 모양'(_Persp · diff3_engine.perspective)으로 위와 똑같이
+태운다 — 양옆도 열 때 사본을 떠 두고(_snap) 그 사본에서 매번 새로 만든다. 결과 파일을 받은 병합
+(P4V)은 가운데로 가는 두 방향뿐이다(_apply_mode).
 """
 import os
 import shutil
@@ -24,15 +30,17 @@ import tempfile
 from PyQt5.QtCore import Qt, QThread
 from PyQt5.QtGui import QIcon, QKeySequence
 from PyQt5.QtWidgets import (
-    QAbstractItemView, QApplication, QHBoxLayout, QLabel, QMessageBox, QPushButton,
-    QShortcut, QSizePolicy, QSplitter, QVBoxLayout, QWidget,
+    QAbstractItemView, QApplication, QHBoxLayout, QMessageBox, QPushButton,
+    QShortcut, QSplitter, QVBoxLayout, QWidget,
 )
 
 from .colref import get_column_letter
 from .compare_toolbar import add_legend, build_find_box, make_find_matcher
 from .diff3_engine import (S3_BOTH, S3_CONFLICT, S3_LEFT, S3_RIGHT, S3_SAME, SRC_LEFT,
-                           SRC_RIGHT, auto_merge_plan, match_columns3, usable_col_meta3)
-from .diff3_model import ROLE_BASE, ROLE_LEFT, ROLE_RIGHT, Diff3TableModel
+                           SRC_RIGHT, auto_merge_plan, match_columns3, perspective,
+                           usable_col_meta3)
+from .diff3_model import (ROLE_BASE, ROLE_LEFT, ROLE_RIGHT, TARGET_PERM, Diff3TableModel,
+                          src_role, src_token)
 from .diff3_workers import Diff3Worker, Load3Worker, Merge3Worker, Sheet3DiffWorker
 from .diff_engine import count_changed_masked, keep_mask
 from .loaders import clear_values_cache, list_sheet_names
@@ -46,8 +54,133 @@ from .xlsx_writer import _is_file_locked
 
 _WRITABLE = (".xlsx", ".xlsm")
 _SRC_IDX = {SRC_LEFT: 0, SRC_RIGHT: 2}          # row_meta3 · col_meta3 자리
-_SRC_NAME = {SRC_LEFT: "왼쪽", SRC_RIGHT: "오른쪽"}
 _HISTORY_SIDE = {ROLE_LEFT: "a", ROLE_BASE: "m", ROLE_RIGHT: "b"}
+_ROLES = (ROLE_LEFT, ROLE_BASE, ROLE_RIGHT)
+_ROLE_POS = {ROLE_LEFT: 0, ROLE_BASE: 1, ROLE_RIGHT: 2}     # 셀·row_meta3·col_meta3 자리
+_ROLE_NAME = {ROLE_LEFT: "왼쪽", ROLE_BASE: "가운데", ROLE_RIGHT: "오른쪽"}
+# 병합 준비 방향 "출처>대상". 앞의 둘이 Alt+→ / Alt+← 다(ExcelTableView.stage_choices 규칙).
+# 결과 파일을 따로 받은 병합(P4V)은 쓰는 곳이 결과 하나뿐이라 가운데로 가는 둘만 쓴다.
+_DIRECTIONS = ((ROLE_LEFT, ROLE_BASE), (ROLE_RIGHT, ROLE_BASE),
+               (ROLE_BASE, ROLE_LEFT), (ROLE_RIGHT, ROLE_LEFT),
+               (ROLE_BASE, ROLE_RIGHT), (ROLE_LEFT, ROLE_RIGHT))
+
+
+def _choices(directions) -> tuple:
+    return tuple((f"{_ROLE_NAME[s]} → {_ROLE_NAME[t]}", f"{s}>{t}") for s, t in directions)
+
+
+class _Persp:
+    """대상 파일 하나를 **가운데에 둔 모양**과 그 파일에 걸린 결정 — 병합 준비 규칙 한 벌.
+
+    규칙(지운 행은 행째로, 새 행은 키 없는 행이 안 되게, 한쪽에만 있는 열은 병합 불가 …)은
+    모두 '가운데에 쓴다'로 짜여 있다. 대상이 왼쪽·오른쪽이어도 같은 규칙을 태우려고, 그 파일을
+    가운데에 둔 매트릭스(diff3_engine.perspective)와 그 파일의 결정을 묶어 넘긴다. 여기서
+    SRC_LEFT/SRC_RIGHT 는 이 모양의 왼쪽/오른쪽 자리 파일이다(실제 파일은 src_role).
+    화면 좌표 (r, c) 는 어느 모양에서나 같다.
+    """
+
+    def __init__(self, role, matrix, row_meta, col_meta, staged, merged, presence):
+        self.role = role
+        self.matrix, self.row_meta, self.col_meta = matrix, row_meta, col_meta
+        self.staged, self.merged = staged, merged
+        self.presence = presence           # 이 시트가 (왼쪽 자리, 가운데 자리, 오른쪽 자리) 파일에 있나
+
+    def name(self, src=None) -> str:
+        return _ROLE_NAME[self.role if src is None else src_role(self.role, src)]
+
+    def row_has(self, r, src) -> bool:
+        return r < len(self.row_meta) and self.row_meta[r][_SRC_IDX[src]] is not None
+
+    def blocked(self, src) -> str:
+        """이 시트에서 src 쪽 값을 가져올 수 없는 이유. 가져올 수 있으면 ""."""
+        pl, pb, pr = self.presence
+        if not pb:
+            return f"{self.name()} 파일에 이 시트가 없어 병합할 수 없습니다 — 비교만 합니다."
+        if not (pl if src == SRC_LEFT else pr):
+            return (f"{self.name(src)} 파일에 이 시트가 없습니다 — 시트를 통째로 지우는 병합은 "
+                    f"하지 않습니다({self.name()} 내용을 유지합니다).")
+        return ""
+
+    def unmergeable(self, cell, src) -> bool:
+        """대상에 쓸 자리가 없거나(그 열이 대상에 없음), 쓰면 멀쩡한 열을 비우게 되는 칸
+        (소스에 그 열이 없는데 행은 있음). 2파일 _unmergeable_cells · build_side_patches 와 같은 규칙."""
+        cm = self.col_meta
+        if not cm:
+            return False
+        r, c = cell
+        if not (0 <= c < len(cm)):
+            return True
+        src_col, base_col = cm[c][_SRC_IDX[src]], cm[c][1]
+        if base_col is None:
+            return True
+        return src_col is None and self.row_has(r, src)
+
+    def noop(self, cell, src) -> bool:
+        """가져와도 대상이 그대로인 칸 — 그쪽 값이 대상 값과 같다(예: 왼쪽만 바뀐 칸에 '오른쪽 →').
+        충돌 칸은 아니다 — 대상 값과 같은 쪽을 고르는 것도 충돌을 푸는 결정이다(행 단위 충돌에서
+        남긴 쪽의 안 바뀐 칸을 고를 수 없어 충돌이 영영 남던 문제)."""
+        r, c = cell
+        st, lv, bv, rv = self.matrix[r][c]
+        if st == S3_SAME:
+            return True
+        if st == S3_CONFLICT:
+            return False
+        val = lv if src == SRC_LEFT else rv
+        removal = (not self.row_has(r, src)) and self.row_meta[r][1] is not None
+        return val == bv and not removal
+
+    def decision_of(self, cell):
+        return self.staged.get(cell) or self.merged.get(cell)
+
+    def auto_src(self, r, c):
+        """충돌 없는 칸을 채울 출처 — auto_merge_plan 과 같은 규칙. '양쪽이 같게' 칸은 값이 같으니
+        가져올 수 있는 쪽으로(한쪽 파일에 시트·열이 없으면 다른 쪽에서)."""
+        st = self.matrix[r][c][0]
+        cands = {S3_LEFT: (SRC_LEFT,), S3_RIGHT: (SRC_RIGHT,),
+                 S3_BOTH: (SRC_LEFT, SRC_RIGHT)}.get(st, ())
+        for src in cands:
+            if not self.blocked(src) and not self.unmergeable((r, c), src):
+                return src
+        return None
+
+    def complete_rows(self, rows) -> dict:
+        """행째로만 의미가 있는 결정을 행 전체로 맞춘다 → 새로 걸 {(r, c): 출처}.
+
+        · 한쪽이 **지운 행**을 그쪽으로 골랐으면, 그 행의 바뀐 칸 전체를 같은 쪽으로(일부만이면
+          키 없는 반쪽 행이 남는다 — 키를 바꿔 결정을 되살릴 때 열 일부를 못 찾아 생겼다).
+        · **대상에 없는 행**(새 행)에 결정이 하나라도 있으면, 아직 안 고른 충돌 없는 칸을 자동
+          병합 규칙으로 채운다 — 충돌 칸 하나만 골라 저장하면 키 없는 행이 들어갔다(검토 실측).
+        """
+        add = {}
+        for r in rows:
+            row = self.matrix[r]
+            meta = self.row_meta[r]
+            decided = {c: self.decision_of((r, c)) for c in range(len(row))}
+            decided = {c: d for c, d in decided.items() if d}
+            if not decided:
+                continue
+            if meta[1] is not None:
+                for src, i in _SRC_IDX.items():
+                    if meta[i] is None and src in decided.values():
+                        for c, cell in enumerate(row):
+                            if cell[0] != S3_SAME and decided.get(c) != src \
+                                    and not self.unmergeable((r, c), src):
+                                add[(r, c)] = src
+            else:
+                for c, cell in enumerate(row):
+                    if c in decided or cell[0] in (S3_SAME, S3_CONFLICT):
+                        continue
+                    src = self.auto_src(r, c)
+                    if src:
+                        add[(r, c)] = src
+        return add
+
+    def row_cells(self, rows) -> set:
+        return {(r, c) for r in rows for c in range(len(self.matrix[r]))}
+
+    def removal_rows(self, rows, src) -> set:
+        """rows 중 src 쪽이 지운 행(그쪽엔 없고 대상엔 있음)."""
+        return {r for r in rows if not self.row_has(r, src) and self.row_meta[r][1] is not None}
 
 
 def _rm_readonly(func, path, _exc):
@@ -82,7 +215,6 @@ class Diff3View(QWidget):
         self._auto_on_load = False         # P4V 병합(결과 파일 있음) — 처음 여는 시트는 자동 병합 준비
         self._tmpdir = None
         self._template = ""                # 가운데 원본 사본 — 비교 기준이자 저장의 바탕
-        self._out_stat = None              # 결과 파일의 (수정 시각, 크기) — 바깥 변경 감지
         self._raw = ([], [], [])
         # 키(행·열)는 2파일의 전역 설정을 물려받지 않는다 — 다른 표에서 B열을 키로 잡은 뒤 ID 가 A열인
         # 표를 P4V 로 병합하면 이름 열이 키가 돼 같은 ID 행이 둘 생겼고, 전역 키 행이 2행이면 첫 데이터
@@ -100,8 +232,17 @@ class Diff3View(QWidget):
         # 결정. 세 모델에 **참조로** 넘어가므로 리셋은 언제나 .clear()/.update() 로.
         self._staged: dict = {}            # 이번에 고른 것(주황) {(r, c): SRC_LEFT|SRC_RIGHT}
         self._merged: dict = {}            # 저장에 들어간 것(파랑)
-        self._undo: list = []              # [[(cell, 준비였던 출처, 병합이었던 출처), ...]]
-        self._dirty = False                # 마지막 저장 뒤 결정이 바뀌었나
+        # 대상 파일별 결정 {역할: (staged, merged)}. 가운데 것이 위의 _staged · _merged 다(같은 객체).
+        # 왼쪽·오른쪽이 대상인 결정의 출처는 그 파일을 가운데에 둔 모양 기준이다(_Persp).
+        self._targets = {ROLE_BASE: (self._staged, self._merged),
+                         ROLE_LEFT: ({}, {}), ROLE_RIGHT: ({}, {})}
+        self._undo: list = []              # [[(대상, cell, 준비였던 출처, 병합이었던 출처), ...]]
+        # 마지막 저장 뒤 결정이 바뀌었나 — 대상 파일별(self._dirty 는 가운데 것)
+        self._dirty_t = {r: False for r in _ROLES}
+        self._persp_cache: dict = {}       # 역할 → (매트릭스 ref, (matrix, row_meta, col_meta))
+        self._snap: dict = {}              # 역할 → 읽을 파일(세션 시작 때 떠 둔 사본, 없으면 원래 경로)
+        self._out_stats: dict = {}         # 역할 → 저장할 파일의 (수정 시각, 크기) — 바깥 변경 감지
+        self._saving_role = ROLE_BASE
         self._diff_only = False
         self._sheet_names: list = []
         self._current_sheet = None
@@ -142,13 +283,22 @@ class Diff3View(QWidget):
                           ("F5", self._on_refresh_shortcut),
                           ("Alt+Up", lambda: self._goto_btn(self.prev_diff_btn, -1, False)),
                           ("Alt+Down", lambda: self._goto_btn(self.next_diff_btn, +1, False)),
-                          ("Alt+Shift+Up", lambda: self._goto_btn(self.prev_conf_btn, -1, True)),
-                          ("Alt+Shift+Down", lambda: self._goto_btn(self.next_conf_btn, +1, True)),
+                          # 아직 고르지 않은 충돌로 — 버튼은 없고 단축키만(변경 이동 버튼이 켜져 있을 때)
+                          ("Alt+Shift+Up", lambda: self._goto_btn(self.prev_diff_btn, -1, True)),
+                          ("Alt+Shift+Down", lambda: self._goto_btn(self.next_diff_btn, +1, True)),
                           ("Ctrl+F", self._focus_find),
                           ("Ctrl+S", self._save)):
             sc = QShortcut(QKeySequence(seq), self)
             sc.setContext(Qt.WidgetWithChildrenShortcut)
             sc.activated.connect(slot)
+
+    @property
+    def _dirty(self) -> bool:
+        return self._dirty_t[ROLE_BASE]
+
+    @_dirty.setter
+    def _dirty(self, value: bool):
+        self._dirty_t[ROLE_BASE] = value
 
     # ── UI ─────────────────────────────────────────────────────────────────
     def _button(self, text, tip, slot=None, checkable=False):
@@ -196,30 +346,10 @@ class Diff3View(QWidget):
             ("준비", "staged"), ("병합", "merged"))])
         root.addLayout(bar)
 
-        # ── 병합 줄 — 3파일에만 있는 것(충돌 이동 · 자동 병합 · 저장할 곳 안내) ──
-        # 1행에 함께 두면 2파일과 버튼 자리가 달라지고, 찾기 박스까지 넣은 툴바가 기본 창 폭(1400)을
-        # 넘는다(실측: 최소 폭 약 1,600 — 두 줄이면 약 1,250). 충돌과 자동 병합은 기준(가운데)이
-        # 있어야 성립하는 개념이라 2파일에는 대응하는 버튼이 없다.
-        merge_bar = QHBoxLayout()
-        self.prev_conf_btn = self._button("◀ 이전 충돌", "아직 고르지 않은 이전 충돌로 이동 (Alt+Shift+↑)",
-                                          lambda: self._goto(-1, True))
-        self.next_conf_btn = self._button("다음 충돌 ▶", "아직 고르지 않은 다음 충돌로 이동 (Alt+Shift+↓)",
-                                          lambda: self._goto(+1, True))
-        self.auto_btn = self._button(
-            "자동 병합", "충돌이 없는 변경을 모두 가운데로 가져오도록 병합 준비합니다.\n"
-            "충돌(양쪽이 서로 다르게 고친 칸)은 직접 고릅니다.", self._auto_merge)
-        for w in (self.prev_conf_btn, self.next_conf_btn, self.auto_btn):
-            merge_bar.addWidget(w)
-        merge_bar.addSpacing(8)
-        self.result_label = QLabel("")
-        self.result_label.setFont(ui_font(9))
-        self.result_label.setStyleSheet("color: #555;")
-        self.result_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
-        # 긴 결과 경로가 창 최소 폭을 밀어내지 않게 — 모자라면 잘리고, 전체는 툴팁으로.
-        self.result_label.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
-        self.result_label.setMinimumWidth(0)
-        merge_bar.addWidget(self.result_label, 1)
-        root.addLayout(merge_bar)
+        # 충돌 이동 · 자동 병합 버튼은 두지 않는다 — 화면을 2파일과 같게 한다. 둘은 '가운데가 공통
+        # 기준이고 결과도 가운데 하나'일 때의 개념인데, 세 파일이 서로 주고받는 비교에서는 쓰는 곳이
+        # 셋이라 뜻이 흐려진다. 결과 파일을 받은 병합(P4V)에서는 열 때 자동 병합이 이미 걸리고
+        # (_on_diff_ready), 남은 충돌은 Alt+Shift+↑/↓ 로 가며, 저장 전에 고르지 않은 충돌을 묻는다.
 
         splitter = QSplitter(Qt.Horizontal)
         self.panels = {}
@@ -227,19 +357,17 @@ class Diff3View(QWidget):
                             (ROLE_RIGHT, "오른쪽")):
             p = FilePanel(label, role, model=Diff3TableModel(role),
                           history_side=_HISTORY_SIDE[role], drop_hint=False)
-            # 화살표 = 값이 흐르는 쪽. Alt+→ 왼쪽 → 가운데, Alt+← 오른쪽 → 가운데(세 패널 공통).
-            p.table.stage_choices = (("왼쪽 → 가운데", SRC_LEFT), ("오른쪽 → 가운데", SRC_RIGHT))
+            p.table.model().set_targets(self._targets)
             self.panels[role] = p
             splitter.addWidget(p)
         self.panel_l = self.panels[ROLE_LEFT]
         self.panel_b = self.panels[ROLE_BASE]
         self.panel_r = self.panels[ROLE_RIGHT]
-        # 저장 = 2파일과 같은 자리(패널 경로칸 옆 아이콘). 쓰는 곳은 언제나 가운데(결과)뿐이라
-        # 가운데 패널의 버튼만 남긴다 — 양옆은 읽기만 하는 파일이다.
-        self.panel_l.save_btn.hide()
-        self.panel_r.save_btn.hide()
+        # 저장 = 2파일과 같은 자리(패널 경로칸 옆 아이콘) — 그 패널 파일에 걸린 병합 준비를 그 파일에
+        # 쓴다. 결과 파일을 따로 받은 병합에서는 양옆 버튼을 숨긴다(_apply_mode).
         self.save_btn = self.panel_b.save_btn
-        self.save_btn.clicked.connect(lambda _=False: self._save())
+        for role, p in self.panels.items():
+            p.save_btn.clicked.connect(lambda _=False, r=role: self._save(r))
         splitter.setSizes([600, 600, 600])
         root.addWidget(splitter, 1)
 
@@ -289,7 +417,7 @@ class Diff3View(QWidget):
         self._update_result_label()
         self.status.showMessage(
             "왼쪽·가운데(기준)·오른쪽 파일을 넣으면 비교합니다.  "
-            "| 칸 선택 → Alt+→(왼쪽 값) / Alt+←(오른쪽 값) → 가운데 패널의 저장")
+            "| 칸 선택 후 우클릭 → 병합 준비(보낼 방향 선택) → 받는 패널의 저장")
 
     # ── 진입점 ─────────────────────────────────────────────────────────────
     def load3(self, left: str = "", base: str = "", right: str = "", result: str = "",
@@ -344,17 +472,35 @@ class Diff3View(QWidget):
         self._drop_template()
 
     def _update_result_label(self):
+        # 저장 아이콘은 가운데 패널에 있지만, P4V 병합이면 쓰는 곳이 가운데가 아니라 결과 파일이다 —
+        # 그 경로를 툴팁과 가운데 패널 제목에 적는다.
         if self._result_path:
-            text = f"결과 파일: {self._result_path}   — 가운데 원본은 바꾸지 않습니다"
             tip = ("병합 결과 저장 (Ctrl+S)\n"
                    f"결과 파일에 씁니다 — 가운데 원본은 바꾸지 않습니다.\n{self._result_path}")
+            title = f"가운데 (기준) → 결과: {os.path.basename(self._result_path)}"
         else:
-            text = "저장하면 가운데 파일에 씁니다"
-            tip = "병합 결과 저장 (Ctrl+S) — 가운데 파일에 씁니다"
-        self.result_label.setText(text)
-        self.result_label.setToolTip(text)
-        # 저장 아이콘은 가운데 패널에 있지만, P4V 병합이면 쓰는 곳이 가운데가 아니라 결과 파일이다.
+            tip = "가운데 파일에 저장 — 이 파일로 보낸 병합 준비를 씁니다 (Ctrl+S)"
+            title = "가운데 (기준)"
         self.save_btn.setToolTip(tip)
+        self.panel_b.title_label.setText(title)
+        self.panel_b.title_label.setToolTip(self._result_path)
+        self._apply_mode()
+
+    def _apply_mode(self):
+        """결과 파일을 따로 받은 병합(P4V)과 보통의 3파일 비교를 가른다.
+
+        · P4V 병합 — 쓰는 곳은 결과 하나. 가운데로 가는 두 방향만 두고 양옆 저장 버튼은 숨긴다.
+          왼쪽(theirs)·기준은 P4V 의 임시 파일이라 써도 버려진다.
+        · 보통의 비교 — 세 파일이 서로 주고받는다. 여섯 방향, 패널마다 저장 버튼.
+        """
+        merge = bool(self._result_path)
+        choices = _choices(_DIRECTIONS[:2] if merge else _DIRECTIONS)
+        for role, p in self.panels.items():
+            p.table.stage_choices = choices
+            if role != ROLE_BASE:
+                p.save_btn.setVisible(not merge)
+                p.save_btn.setToolTip(
+                    f"{_ROLE_NAME[role]} 파일에 저장 — 이 파일로 보낸 병합 준비를 씁니다 (Ctrl+S)")
 
     # ── 세션(세 파일) ──────────────────────────────────────────────────────
     def _on_file_loaded(self, role: str, path: str):
@@ -378,6 +524,27 @@ class Diff3View(QWidget):
             shutil.rmtree(self._tmpdir, onerror=_rm_readonly)
         self._tmpdir = None
         self._template = ""
+        self._snap = {}
+
+    def _read_paths(self) -> tuple:
+        """비교·저장이 **읽는** (왼쪽, 가운데, 오른쪽) — 세션을 열 때 떠 둔 사본, 없으면 원래 파일."""
+        l, _b, r = self.paths()
+        return (self._snap.get(ROLE_LEFT) or l, self._template, self._snap.get(ROLE_RIGHT) or r)
+
+    def _out_path_of(self, role: str) -> str:
+        """role 파일을 대상으로 저장할 때 쓰는 파일 — 가운데는 결과 파일이 있으면 그 파일."""
+        if role == ROLE_BASE:
+            return self.out_path()
+        return self.paths()[_ROLE_POS[role]]
+
+    def _clear_decisions(self):
+        """모든 대상의 결정을 비운다. 모델이 **참조로** 들고 있으므로 새 객체로 갈지 않는다."""
+        for st, mg in self._targets.values():
+            st.clear()
+            mg.clear()
+
+    def _has_decisions(self) -> bool:
+        return any(st or mg for st, mg in self._targets.values())
 
     def _forget_inflight(self):
         """진행 중인 읽기·비교 결과를 버리게 한다 — 시트·파일이 바뀐 뒤 늦게 도착한 옛 결과가
@@ -413,10 +580,10 @@ class Diff3View(QWidget):
         self._row_meta = []
         self._row_masks = []
         self._conf_masks = []
-        self._staged.clear()
-        self._merged.clear()
+        self._clear_decisions()
         self._undo.clear()
-        self._dirty = False
+        for role in _ROLES:
+            self._dirty_t[role] = False
         self._carry = None
         self._sheet_cache.clear()
         self._visited.clear()
@@ -474,13 +641,32 @@ class Diff3View(QWidget):
             self._drop_template()
             self._on_error(f"가운데 파일을 읽을 수 없습니다: {e}")
             return
+        # 양옆도 저장 대상이 될 수 있으면(보통의 3파일 비교 + 쓸 수 있는 형식) 가운데처럼 사본을 떠서
+        # 그 사본과 비교하고 그 사본에서 결과를 만든다. 왼쪽에 저장한 뒤에도 비교 기준과 결정 좌표가
+        # 그대로여야 다음 저장이 어긋나지 않는다(가운데 사본과 같은 이유). 그 밖에는 원래 파일을 읽는다.
+        self._snap = {ROLE_LEFT: l, ROLE_BASE: self._template, ROLE_RIGHT: r}
+        if not self._result_path:
+            for role, path, stem in ((ROLE_LEFT, l, "left"), (ROLE_RIGHT, r, "right")):
+                ext = os.path.splitext(path)[1]
+                if ext.lower() not in _WRITABLE:
+                    continue
+                try:
+                    copy = os.path.join(self._tmpdir, stem + ext)
+                    shutil.copyfile(path, copy)
+                    os.chmod(copy, stat.S_IWRITE | stat.S_IREAD)
+                except OSError as e:
+                    self._drop_template()
+                    self._on_error(f"{_ROLE_NAME[role]} 파일을 읽을 수 없습니다: {e}")
+                    return
+                self._snap[role] = copy
         self._session_paths = (l, b, r)
-        self._out_stat = _stat(self.out_path())
+        self._out_stats = {role: _stat(self._out_path_of(role)) for role in _ROLES}
         self._rebuild_sheet_tabs()
         self._run_compare()
 
     def _rebuild_sheet_tabs(self):
-        l, b, r = self.paths()
+        b = self.paths()[1]
+        l, _t, r = self._read_paths()
         ln, bn, rn = list_sheet_names(l), list_sheet_names(self._template), list_sheet_names(r)
         names = list(bn)
         for n in ln + rn:
@@ -515,7 +701,7 @@ class Diff3View(QWidget):
         names, self._pending_sheet_diff = self._pending_sheet_diff, None
         if not names:
             return
-        l, _b, r = self.paths()
+        l, _b, r = self._read_paths()
         self._sheet_token += 1
         token = self._sheet_token
         w = Sheet3DiffWorker((l, self._template, r), names)
@@ -558,7 +744,7 @@ class Diff3View(QWidget):
     def _stash_sheet(self):
         """결정이 있는 시트는 떠날 때 상태째 둔다 — 저장은 모든 시트의 결정을 함께 쓴다."""
         name = self._current_sheet
-        if not self._matrix or not (self._staged or self._merged):
+        if not self._matrix or not self._has_decisions():
             self._sheet_cache.pop(name, None)
             return
         # 키는 **지금 매트릭스를 만든 키**로 둔다. 키를 바꿔 다시 비교하는 중에 떠나면
@@ -571,6 +757,9 @@ class Diff3View(QWidget):
             "risk": self._auto_risk, "ambiguous": self._ambiguous, "moved": self._moved,
             "conf_masks": self._conf_masks,
             "staged": dict(self._staged), "merged": dict(self._merged),
+            # 왼쪽·오른쪽이 대상인 결정 {역할: (staged, merged)}
+            "side": {role: (dict(self._targets[role][0]), dict(self._targets[role][1]))
+                     for role in (ROLE_LEFT, ROLE_RIGHT)},
         }
 
     def _restore_sheet(self, snap):
@@ -600,10 +789,12 @@ class Diff3View(QWidget):
         self._row_meta = snap["row_meta"]
         self._row_masks = snap["row_masks"]
         self._conf_masks = snap["conf_masks"]
-        self._staged.clear()
+        self._clear_decisions()
         self._staged.update(snap["staged"])
-        self._merged.clear()
         self._merged.update(snap["merged"])
+        for role, (st, mg) in snap.get("side", {}).items():
+            self._targets[role][0].update(st)
+            self._targets[role][1].update(mg)
         self._undo.clear()
         for p in self.panels.values():
             p.table.set_key_col(self._key_col)
@@ -613,20 +804,48 @@ class Diff3View(QWidget):
         self._set_buttons_enabled(True)
         self.status.showMessage(self._summary())
 
-    def _sheets_to_write(self) -> list:
+    def _sheets_to_write(self, role: str = ROLE_BASE) -> list:
+        """role 파일에 쓸 [(시트, matrix, row_meta3, col_meta3, 결정)] — 모두 그 파일을 가운데에 둔
+        모양이다(저장 엔진은 언제나 '가운데에 쓴다')."""
         out = []
         if self._matrix:
-            out.append((self._current_sheet, self._matrix, self._row_meta, self._col_meta3,
-                        {**self._merged, **self._staged}))
+            p = self._persp(role)
+            out.append((self._current_sheet, p.matrix, p.row_meta, p.col_meta,
+                        {**p.merged, **p.staged}))
         for name, s in self._sheet_cache.items():
-            if name != self._current_sheet:
+            if name == self._current_sheet:
+                continue
+            if role == ROLE_BASE:
                 out.append((name, s["matrix"], s["row_meta"], s["col_meta3"],
                             {**s["merged"], **s["staged"]}))
+                continue
+            st, mg = s.get("side", {}).get(role, ({}, {}))
+            if st or mg:
+                m, rm, cm = perspective(s["matrix"], s["row_meta"], s["col_meta3"],
+                                        tuple(_ROLE_POS[x] for x in TARGET_PERM[role]))
+                out.append((name, m, rm, cm, {**mg, **st}))
         return out
+
+    def _persp(self, role: str = ROLE_BASE) -> _Persp:
+        """지금 시트를 role 파일이 가운데인 모양으로 — 가운데면 매트릭스 그대로, 양옆이면 한 번
+        만들어 두고 매트릭스가 바뀔 때까지 다시 쓴다."""
+        st, mg = self._targets[role]
+        if role == ROLE_BASE:
+            return _Persp(role, self._matrix, self._row_meta, self._col_meta3, st, mg,
+                          self._presence())
+        hit = self._persp_cache.get(role)
+        if hit is None or hit[0] is not self._matrix:
+            perm = tuple(_ROLE_POS[x] for x in TARGET_PERM[role])
+            hit = (self._matrix, perspective(self._matrix, self._row_meta, self._col_meta3, perm))
+            self._persp_cache[role] = hit
+        m, rm, cm = hit[1]
+        here = self._presence()
+        presence = tuple(here[_ROLE_POS[x]] for x in TARGET_PERM[role])
+        return _Persp(role, m, rm, cm, st, mg, presence)
 
     # ── 비교 ───────────────────────────────────────────────────────────────
     def _run_compare(self):
-        l, _b, r = self.paths()
+        l, _b, r = self._read_paths()
         if not self._template:
             return
         self._set_buttons_enabled(False)
@@ -634,8 +853,7 @@ class Diff3View(QWidget):
         self._row_meta = []
         self._row_masks = []
         self._conf_masks = []
-        self._staged.clear()
-        self._merged.clear()
+        self._clear_decisions()
         self._undo.clear()
         self._excluded_cols.clear()
         # 옛 시트의 원본·열 맞춤도 비운다 — 읽는 동안 키를 바꾸면 옛 시트 데이터로 다시 비교해
@@ -784,7 +1002,7 @@ class Diff3View(QWidget):
         모두 밀린다. 그때 자동 병합은 값을 엉뚱한 열·행에 쓴다(검토 실측) — 사람이 보고 고르게 한다.
         """
         kr = self._key_row
-        # 그 시트가 아예 없는 파일은 뺀다 — 그쪽은 어차피 병합 출처로 쓰지 않는다(_src_blocked).
+        # 그 시트가 아예 없는 파일은 뺀다 — 그쪽은 어차피 병합 출처로 쓰지 않는다(_Persp.blocked).
         present = [d for d, here in zip(self._raw, self._presence()) if here and d]
         if cm3 is None:
             heads = set()
@@ -913,7 +1131,8 @@ class Diff3View(QWidget):
         if self._matrix:
             self._open_conf[self._current_sheet] = self._count_open()
         return (f"비교 완료 — {rows}행 × {cols}열 | 변경 {changed}칸 · 충돌 {conf}칸"
-                f"(남은 {open_conf}) · 준비 {len(self._staged)}칸 · 병합 {len(self._merged)}칸")
+                f"(남은 {open_conf}) · 준비 {sum(len(st) for st, _m in self._targets.values())}칸"
+                f" · 병합 {sum(len(mg) for _s, mg in self._targets.values())}칸")
 
     def _presence(self) -> tuple:
         """지금 시트가 (왼쪽, 가운데, 오른쪽) 파일에 있나. 시트가 없는 형식(CSV 등)은 모두 참."""
@@ -927,16 +1146,6 @@ class Diff3View(QWidget):
         if gone:
             return (f"  | {'·'.join(gone)} 파일에 이 시트가 없음 — 시트 삭제는 병합하지 않습니다"
                     "(가운데 내용 유지)")
-        return ""
-
-    def _src_blocked(self, src) -> str:
-        """이 시트에서 src 쪽 값을 가져올 수 없는 이유. 가져올 수 있으면 ""."""
-        pl, pb, pr = self._presence()
-        if not pb:
-            return "가운데 파일에 이 시트가 없어 병합할 수 없습니다 — 비교만 합니다."
-        if not (pl if src == SRC_LEFT else pr):
-            return (f"{_SRC_NAME[src]} 파일에 이 시트가 없습니다 — 시트를 통째로 지우는 병합은 "
-                    "하지 않습니다(가운데 내용을 유지합니다).")
         return ""
 
     # ── 키 · 제외 ──────────────────────────────────────────────────────────
@@ -955,39 +1164,46 @@ class Diff3View(QWidget):
         if not self._matrix:
             return None
         ids = self._col_ids()
-        return {"staged": [(self._cell_ident(r, c, ids), d) for (r, c), d in self._staged.items()],
-                "merged": [(self._cell_ident(r, c, ids), d) for (r, c), d in self._merged.items()]}
+
+        def ident(d):
+            return [(self._cell_ident(r, c, ids), v) for (r, c), v in d.items()]
+        return {role: {"staged": ident(st), "merged": ident(mg)}
+                for role, (st, mg) in self._targets.items()}
 
     def _apply_carry(self) -> str:
         """키를 바꿔 다시 비교한 뒤 결정을 (파일 행 번호, 파일 열 번호)로 다시 찾아 건다.
         새 키로 행이 다르게 짝지어져 못 찾은 결정은 풀고 알린다 — 병합이 풀리면 다음 저장
-        결과에서도 빠지므로 저장 대기로 둔다."""
+        결과에서도 빠지므로 저장 대기로 둔다. 대상 파일마다 따로 한다."""
         carry, self._carry = self._carry, None
         rows = {tuple(m): r for r, m in enumerate(self._row_meta)}
         cols = {t: c for c, t in enumerate(self._col_ids())}
-        lost_merged = lost = 0
-        for kind, target in (("staged", self._staged), ("merged", self._merged)):
-            target.clear()
-            for (rid, cid), d in carry[kind]:
-                r, c = rows.get(rid), cols.get(cid)
-                if r is None or c is None or self._matrix[r][c][0] == S3_SAME:
-                    lost += 1
-                    lost_merged += kind == "merged"
-                    continue
-                target[(r, c)] = d
-        if lost_merged:
-            self._dirty = True
-        # 되살린 결정이 행의 일부만 덮으면(못 찾은 열이 있으면) 행째로 맞춘다 — 삭제 행이 반쪽만
-        # 걸리면 키 없는 행이 저장됐다(검토 실측).
-        rows = {k[0] for k in list(self._staged) + list(self._merged)}
-        filled = self._complete_rows(rows)
-        for k, d in filled.items():
-            self._staged[k] = d
-            self._merged.pop(k, None)
-        if filled:
-            self._dirty = True
+        lost_merged = lost = n_filled = 0
+        for role, kinds in carry.items():
+            st, mg = self._targets[role]
+            for kind, target in (("staged", st), ("merged", mg)):
+                target.clear()
+                for (rid, cid), d in kinds[kind]:
+                    r, c = rows.get(rid), cols.get(cid)
+                    if r is None or c is None or self._matrix[r][c][0] == S3_SAME:
+                        lost += 1
+                        if kind == "merged":
+                            lost_merged += 1
+                            self._dirty_t[role] = True
+                        continue
+                    target[(r, c)] = d
+            if not (st or mg):
+                continue
+            # 되살린 결정이 행의 일부만 덮으면(못 찾은 열이 있으면) 행째로 맞춘다 — 삭제 행이 반쪽만
+            # 걸리면 키 없는 행이 저장됐다(검토 실측).
+            filled = self._persp(role).complete_rows({k[0] for k in list(st) + list(mg)})
+            for k, d in filled.items():
+                st[k] = d
+                mg.pop(k, None)
+            if filled:
+                self._dirty_t[role] = True
+                n_filled += len(filled)
         if not lost:
-            return f"  | 행을 맞추려 {len(filled)}칸을 함께 준비" if filled else ""
+            return f"  | 행을 맞추려 {n_filled}칸을 함께 준비" if n_filled else ""
         return (f"  | 새 키로 다시 찾지 못한 결정 {lost}개는 풀림"
                 + (" — 병합이 풀린 칸은 다음 저장 결과에서도 빠집니다" if lost_merged else ""))
 
@@ -1230,12 +1446,12 @@ class Diff3View(QWidget):
         """검색어와 맞는 (r, c) 를 행 우선 순서로. **화면에 보이는 글자**로 판정한다 — 세 패널 중
         하나라도 맞으면 그 칸이고, 숨은 행·검사 제외 열은 뺀다(2파일과 같은 규칙).
 
-        가운데 패널은 결정이 걸린 칸에서 고른 쪽 값을 보인다(Diff3TableModel.display_text). 그 칸의
-        기준값은 화면 어디에도 없으므로 판정에서 뺀다 — 넣으면 '보이지 않는 글자를 찾는' 오동작이 된다.
+        값을 받기로 한 패널은 그 칸에서 가져올 값을 보인다(Diff3TableModel.display_text). 그 칸의 제
+        원본 값은 화면 어디에도 없으므로 판정에서 뺀다 — 넣으면 '보이지 않는 글자를 찾는' 오동작이 된다.
         """
         excl = self._excluded_cols
-        staged, merged = self._staged, self._merged
-        decided = bool(staged or merged)
+        targets = self._targets
+        decided = self._has_decisions()
         hidden = self.panel_b.table.isRowHidden
         for r, row in enumerate(self._matrix):
             if hidden(r):
@@ -1244,10 +1460,15 @@ class Diff3View(QWidget):
                 if c in excl:
                     continue
                 lv, bv, rv = cell[1], cell[2], cell[3]
-                if match(lv) or (rv != lv and match(rv)):
-                    yield (r, c)
-                elif bv != lv and bv != rv and match(bv) \
-                        and not (decided and ((r, c) in staged or (r, c) in merged)):
+                if decided:
+                    key = (r, c)
+                    shown = [v for v, role in ((lv, ROLE_LEFT), (bv, ROLE_BASE), (rv, ROLE_RIGHT))
+                             if key not in targets[role][0] and key not in targets[role][1]]
+                    if len(shown) < 3:           # 받는 패널이 있는 칸 — 주는 쪽 값만 화면에 있다
+                        if any(match(v) for v in shown):
+                            yield key
+                        continue
+                if match(lv) or (rv != lv and match(rv)) or (bv != lv and bv != rv and match(bv)):
                     yield (r, c)
 
     def _find_cells(self, term: str) -> list:
@@ -1257,9 +1478,8 @@ class Diff3View(QWidget):
         (새 비교·시트 전환·키 변경이면 다른 객체)."""
         case, word = self.find_case_btn.isChecked(), self.find_word_btn.isChecked()
         key = (term, case, word, self._diff_only, tuple(sorted(self._excluded_cols)),
-               len(self._staged), len(self._merged),
-               hash(frozenset(self._staged)) if self._staged else 0,
-               hash(frozenset(self._merged)) if self._merged else 0)
+               tuple((len(d), hash(frozenset(d)) if d else 0)
+                     for pair in self._targets.values() for d in pair))
         hit = self._find_cache
         if hit is not None and hit[0] == key and hit[1] is self._matrix:
             return hit[2]
@@ -1353,98 +1573,42 @@ class Diff3View(QWidget):
         n = len(self._matrix)
         return {(r, c) for (r, c) in out if 0 <= r < n and 0 <= c < len(self._matrix[r])}
 
+    # 가운데가 대상일 때의 규칙 — 자동 병합과 저장 전 집계가 쓴다. 규칙 본문은 _Persp 에 있다.
     def _row_has(self, r, src) -> bool:
-        return r < len(self._row_meta) and self._row_meta[r][_SRC_IDX[src]] is not None
+        return self._persp().row_has(r, src)
 
     def _unmergeable(self, cell, src) -> bool:
-        """가운데에 쓸 자리가 없거나(그 열이 가운데에 없음), 쓰면 멀쩡한 열을 비우게 되는 칸
-        (소스에 그 열이 없는데 행은 있음). 2파일 _unmergeable_cells · build_side_patches 와 같은 규칙."""
-        cm = self._col_meta3
-        if not cm:
-            return False
-        r, c = cell
-        if not (0 <= c < len(cm)):
-            return True
-        src_col, base_col = cm[c][_SRC_IDX[src]], cm[c][1]
-        if base_col is None:
-            return True
-        return src_col is None and self._row_has(r, src)
+        return self._persp().unmergeable(cell, src)
 
     def _noop(self, cell, src) -> bool:
-        """가져와도 가운데가 그대로인 칸 — 그쪽 값이 기준과 같다(예: 왼쪽만 바뀐 칸에 '오른쪽 →').
-        충돌 칸은 아니다 — 기준값과 같은 쪽을 고르는 것도 충돌을 푸는 결정이다(행 단위 충돌에서
-        남긴 쪽의 안 바뀐 칸을 고를 수 없어 충돌이 영영 남던 문제)."""
-        r, c = cell
-        st, lv, bv, rv = self._matrix[r][c]
-        if st == S3_SAME:
-            return True
-        if st == S3_CONFLICT:
-            return False
-        val = lv if src == SRC_LEFT else rv
-        removal = (not self._row_has(r, src)) and self._row_meta[r][1] is not None
-        return val == bv and not removal
+        return self._persp().noop(cell, src)
 
     def _decision_of(self, cell):
         return self._staged.get(cell) or self._merged.get(cell)
 
     def _auto_src(self, r, c):
-        """충돌 없는 칸을 채울 출처 — auto_merge_plan 과 같은 규칙. '양쪽이 같게' 칸은 값이 같으니
-        가져올 수 있는 쪽으로(한쪽 파일에 시트·열이 없으면 다른 쪽에서)."""
-        st = self._matrix[r][c][0]
-        cands = {S3_LEFT: (SRC_LEFT,), S3_RIGHT: (SRC_RIGHT,),
-                 S3_BOTH: (SRC_LEFT, SRC_RIGHT)}.get(st, ())
-        for src in cands:
-            if not self._src_blocked(src) and not self._unmergeable((r, c), src):
-                return src
-        return None
+        return self._persp().auto_src(r, c)
 
     def _complete_rows(self, rows) -> dict:
-        """행째로만 의미가 있는 결정을 행 전체로 맞춘다 → 새로 걸 {(r, c): 출처}.
-
-        · 한쪽이 **지운 행**을 그쪽으로 골랐으면, 그 행의 바뀐 칸 전체를 같은 쪽으로(일부만이면
-          키 없는 반쪽 행이 남는다 — 키를 바꿔 결정을 되살릴 때 열 일부를 못 찾아 생겼다).
-        · **가운데에 없는 행**(새 행)에 결정이 하나라도 있으면, 아직 안 고른 충돌 없는 칸을 자동
-          병합 규칙으로 채운다 — 충돌 칸 하나만 골라 저장하면 키 없는 행이 들어갔다(검토 실측).
-        """
-        add = {}
-        for r in rows:
-            row = self._matrix[r]
-            meta = self._row_meta[r]
-            decided = {c: self._decision_of((r, c)) for c in range(len(row))}
-            decided = {c: d for c, d in decided.items() if d}
-            if not decided:
-                continue
-            if meta[1] is not None:
-                for src, i in _SRC_IDX.items():
-                    if meta[i] is None and src in decided.values():
-                        for c, cell in enumerate(row):
-                            if cell[0] != S3_SAME and decided.get(c) != src \
-                                    and not self._unmergeable((r, c), src):
-                                add[(r, c)] = src
-            else:
-                for c, cell in enumerate(row):
-                    if c in decided or cell[0] in (S3_SAME, S3_CONFLICT):
-                        continue
-                    src = self._auto_src(r, c)
-                    if src:
-                        add[(r, c)] = src
-        return add
+        return self._persp().complete_rows(rows)
 
     def _row_cells(self, rows) -> set:
         return {(r, c) for r in rows for c in range(len(self._matrix[r]))}
 
-    def _record_undo(self, cells):
-        self._undo.append([(cell, self._staged.get(cell), self._merged.get(cell))
-                           for cell in cells])
+    def _record_undo(self, cells, role: str = ROLE_BASE):
+        st, mg = self._targets[role]
+        self._undo.append([(role, cell, st.get(cell), mg.get(cell)) for cell in cells])
 
     def _stage_plan(self, plan: dict, undo: bool = True):
-        """{(r, c): 출처} 중 아직 결정이 없고 병합할 수 있는 칸을 준비. (준비한 수, 못 하는 수)."""
+        """{(r, c): 출처} 중 아직 결정이 없고 병합할 수 있는 칸을 **가운데로** 준비.
+        (준비한 수, 못 하는 수). 자동 병합 전용 — 대상은 언제나 가운데다."""
         cells = {k: v for k, v in plan.items()
                  if k not in self._staged and k not in self._merged}
         bad = set()
+        p = self._persp()
         for k, v in list(cells.items()):
-            if self._src_blocked(v) or self._unmergeable(k, v):
-                alt = self._auto_src(*k)     # '양쪽이 같게' 는 다른 쪽에서라도
+            if p.blocked(v) or p.unmergeable(k, v):
+                alt = p.auto_src(*k)         # '양쪽이 같게' 는 다른 쪽에서라도
                 if alt is None:
                     bad.add(k)
                     del cells[k]
@@ -1460,30 +1624,93 @@ class Diff3View(QWidget):
         self._set_buttons_enabled(True)
         return len(cells), len(bad)
 
-    def _removal_rows(self, rows, src) -> set:
-        """rows 중 src 쪽이 지운 행(그쪽엔 없고 가운데엔 있음)."""
-        return {r for r in rows if not self._row_has(r, src) and self._row_meta[r][1] is not None}
+    @staticmethod
+    def _parse_direction(direction):
+        """'출처>대상'(역할 글자) → (대상 역할, 그 대상 기준의 SRC_LEFT|SRC_RIGHT). 틀리면 None.
+        SRC_LEFT/SRC_RIGHT 만 주면 가운데로 가져온다는 뜻이다(자동 병합·옛 호출)."""
+        if direction in _SRC_IDX:
+            return ROLE_BASE, direction
+        s, sep, t = str(direction).partition(">")
+        if not sep or s not in _ROLE_POS or t not in _ROLE_POS or s == t:
+            return None
+        return t, src_token(t, s)
 
-    def _stage_selected(self, src: str):
-        if not self._matrix or src not in _SRC_IDX or self._computing or self._refuse_if_saving():
+    def _target_blocked(self, role: str) -> str:
+        """role 파일을 저장 대상으로 쓸 수 없는 이유. 쓸 수 있으면 "". 가운데는 저장할 때 따로 본다."""
+        if role == ROLE_BASE:
+            return ""
+        name = _ROLE_NAME[role]
+        if self._result_path:
+            return "결과 파일을 따로 받은 병합에서는 가운데(결과)에만 씁니다."
+        paths = self.paths()
+        mine = paths[_ROLE_POS[role]]
+        if os.path.splitext(mine)[1].lower() not in _WRITABLE:
+            return (f"{name} 파일은 .xlsx/.xlsm 이 아니라 저장할 수 없습니다 — 비교만 합니다.\n\n"
+                    + mine)
+        norm = lambda x: os.path.normcase(os.path.abspath(x))
+        same = [_ROLE_NAME[o] for o in _ROLES
+                if o != role and paths[_ROLE_POS[o]] and norm(paths[_ROLE_POS[o]]) == norm(mine)]
+        if same:
+            return (f"{name} 패널과 {'·'.join(same)} 패널이 같은 파일입니다 — 한 파일을 두 패널에서 "
+                    "따로 고쳐 쓸 수 없습니다.")
+        return ""
+
+    def _crossed(self, cell, target: str, source: str) -> bool:
+        """한 칸에서 한 파일은 **받는 쪽이거나 주는 쪽 하나만** 한다 — 그 규칙에 걸리는 칸.
+
+        가져오는 값은 언제나 그 파일의 **원본 값**이다. 출처 파일이 이 칸에서 다른 파일 값을 받기로
+        했다면 화면의 출처 칸은 받을 값을 보이는데 실제로 넘어가는 것은 원본이라 보이는 것과 쓰는
+        것이 달라진다. 대상 파일의 이 칸을 다른 파일로 보내기로 한 경우도 같다. 그런 칸은 준비하지
+        않고 알린다 — 먼저 걸린 병합 준비를 풀면 된다."""
+        st, mg = self._targets[source]
+        if cell in st or cell in mg:
+            return True
+        for role, (st, mg) in self._targets.items():
+            if role == target:
+                continue
+            d = st.get(cell) or mg.get(cell)
+            if d and src_role(role, d) == target:
+                return True
+        return False
+
+    def _stage_selected(self, direction: str):
+        """고른 칸을 병합 준비 — direction 은 '출처>대상'(우클릭 메뉴·단축키가 보낸다)."""
+        parsed = self._parse_direction(direction)
+        if not self._matrix or parsed is None or self._computing or self._refuse_if_saving():
             return
-        why = self._src_blocked(src)
+        target, src = parsed
+        why = self._target_blocked(target)
         if why:
             QMessageBox.information(self, "알림", why)
             return
+        p = self._persp(target)
+        why = p.blocked(src)
+        if why:
+            QMessageBox.information(self, "알림", why)
+            return
+        staged, merged = p.staged, p.merged
+        sname, tname = p.name(src), p.name()
+        t_wa = tname + ("와" if target == ROLE_BASE else "과")
         sel = self._selected_cells()
         changed = {k for k in sel if self._matrix[k[0]][k[1]][0] != S3_SAME}
         if not changed:
             QMessageBox.information(self, "알림", "선택한 칸 중 바뀐 칸이 없습니다.")
             return
-        cells = expand_row_removals(self._matrix, self._row_meta, changed, src)
-        noop = {k for k in cells if self._noop(k, src)}
-        bad = {k for k in cells - noop if self._unmergeable(k, src)}
+        source = src_role(target, src)
+        crossed = {k for k in changed if self._crossed(k, target, source)}
+        cells = expand_row_removals(p.matrix, p.row_meta, changed - crossed, src)
+        noop = {k for k in cells if p.noop(k, src)}
+        bad = {k for k in cells - noop if p.unmergeable(k, src)}
         cells -= noop | bad
         if not cells:
-            why = (f"고른 칸은 {_SRC_NAME[src]} 값이 가운데와 같아 가져올 것이 없습니다."
-                   if noop and not bad else
-                   "고른 칸이 모두 가운데에 없는 열이거나 열 구성이 달라 병합할 수 없습니다.")
+            if crossed and not noop and not bad:
+                why = (f"고른 칸은 이미 다른 병합 준비에 물려 있습니다 — {sname} 칸이 다른 파일 값을 "
+                       f"받기로 했거나, {tname} 칸을 다른 파일로 보내기로 한 칸입니다.\n"
+                       "먼저 그 병합 준비를 취소하세요.")
+            elif noop and not bad:
+                why = f"고른 칸은 {sname} 값이 {t_wa} 같아 가져올 것이 없습니다."
+            else:
+                why = f"고른 칸이 모두 {tname}에 없는 열이거나 열 구성이 달라 병합할 수 없습니다."
             QMessageBox.information(self, "알림", why)
             return
         # 이 행을 **반대쪽이 지운 것**으로 골라 두었다면, 이쪽 값을 고르는 순간 그 행은 남기는
@@ -1491,70 +1718,95 @@ class Diff3View(QWidget):
         # (검토 실측). 지운 쪽을 고를 때는 expand_row_removals 가 이미 행 전체를 덮는다.
         other = SRC_RIGHT if src == SRC_LEFT else SRC_LEFT
         released = set()
-        for r in self._removal_rows({k[0] for k in cells}, other):
-            released |= {(r, c) for c in range(len(self._matrix[r]))
-                         if (self._staged.get((r, c)) or self._merged.get((r, c))) == other
+        for r in p.removal_rows({k[0] for k in cells}, other):
+            released |= {(r, c) for c in range(len(p.matrix[r]))
+                         if (staged.get((r, c)) or merged.get((r, c))) == other
                          and (r, c) not in cells}
         rows = {k[0] for k in cells}
-        self._record_undo(self._row_cells(rows))     # 행째 되돌릴 수 있게
+        self._record_undo(p.row_cells(rows), target)     # 행째 되돌릴 수 있게
         for k in released:
-            self._staged.pop(k, None)
-            self._merged.pop(k, None)
+            staged.pop(k, None)
+            merged.pop(k, None)
         for k in cells:
-            self._staged[k] = src
-            self._merged.pop(k, None)
-        filled = self._complete_rows(rows)
+            staged[k] = src
+            merged.pop(k, None)
+        filled = p.complete_rows(rows)
+        if not self._result_path:
+            # 대상에 없는 행을 가져올 때는 **고른 쪽에서 행째로** 가져온다. complete_rows 는 다른
+            # 두 파일의 값이 서로 다른 칸(충돌)을 사람 몫으로 남기는데, 세 파일이 서로 주고받는 비교에서
+            # '가운데 → 왼쪽'으로 행을 보냈다면 그 행은 가운데의 행이어야 한다 — 남겨 두면 그 칸들이
+            # 빈 채로 들어간다(실측: 20열 행이 3칸만 들어감). 칸마다 다른 쪽을 고르고 싶으면 그 칸에
+            # 다시 병합 준비를 걸면 된다. 결과 파일을 받은 병합(P4V)은 충돌을 사람이 고르는 기존 규칙 그대로.
+            for r in rows:
+                if p.row_meta[r][1] is not None or not p.row_has(r, src):
+                    continue
+                for c, cell in enumerate(p.matrix[r]):
+                    k = (r, c)
+                    if (cell[0] == S3_CONFLICT and k not in staged and k not in merged
+                            and k not in filled and not p.unmergeable(k, src)):
+                        filled[k] = src
         for k, d in filled.items():
-            self._staged[k] = d
-            self._merged.pop(k, None)
-        self._dirty = True
-        self._notify(self._row_cells(rows))
+            staged[k] = d
+            merged.pop(k, None)
+        self._dirty_t[target] = True
+        self._notify(p.row_cells(rows))
         self._silent_clear_selection()
         self._set_buttons_enabled(True)
         note = ""
         if released:
-            note += (f"  | 같은 행의 {_SRC_NAME[other]} 삭제 결정 {len(released)}칸은 풀림"
+            note += (f"  | 같은 행의 {p.name(other)} 삭제 결정 {len(released)}칸은 풀림"
                      "(행을 남김)")
         if filled:
             note += f"  | 새 행의 나머지 {len(filled)}칸도 함께 준비(키 없는 행 방지)"
         if noop:
-            note += f"  | {_SRC_NAME[src]} 값이 가운데와 같은 {len(noop)}칸은 뺌"
+            note += f"  | {sname} 값이 {t_wa} 같은 {len(noop)}칸은 뺌"
         if bad:
             note += f"  | 열 구성이 달라 병합할 수 없는 {len(bad)}칸은 뺌"
+        if crossed:
+            note += f"  | 다른 병합 준비에 물린 {len(crossed)}칸은 뺌"
         self.status.showMessage(
-            f"{_SRC_NAME[src]} → 가운데 병합 준비 {len(cells)}칸{note}  | {self._summary()}")
+            f"{sname} → {tname} 병합 준비 {len(cells)}칸{note}  | {self._summary()}")
 
     def _unstage_selected(self):
+        """고른 칸의 병합 준비·병합을 푼다 — 어느 파일로 보내기로 한 것이든 모두."""
         if self._computing or self._refuse_if_saving():
             return
         sel = self._selected_cells()
-        cells = {k for k in sel if k in self._staged or k in self._merged}
-        if not cells:
+        entry, touched, had_merged = [], set(), 0
+        for role in _ROLES:
+            st, mg = self._targets[role]
+            cells = {k for k in sel if k in st or k in mg}
+            if not cells:
+                continue
+            p = self._persp(role)
+            # 지운 행을 가져온 결정은 행 전체로 — 일부만 풀면 반쪽짜리 빈 행이 남는다.
+            # 새 행(대상에 없는 행)도 행째로 — 키 칸만 풀면 키 없는 행이 들어간다(검토 실측).
+            for src in _SRC_IDX:
+                rows = [k for k in cells
+                        if p.decision_of(k) == src
+                        and not p.row_has(k[0], src) and p.row_meta[k[0]][1] is not None]
+                for r in {k[0] for k in rows}:
+                    cells |= {(r, c) for c in range(len(p.matrix[r]))
+                              if p.decision_of((r, c)) == src}
+            for r in {k[0] for k in cells if p.row_meta[k[0]][1] is None}:
+                cells |= {(r, c) for c in range(len(p.matrix[r])) if p.decision_of((r, c))}
+            had_merged += sum(1 for k in cells if k in mg)
+            entry += [(role, cell, st.get(cell), mg.get(cell)) for cell in cells]
+            for k in cells:
+                st.pop(k, None)
+                mg.pop(k, None)
+            self._dirty_t[role] = True
+            touched |= cells
+        if not entry:
             QMessageBox.information(self, "알림", "선택한 칸 중 병합 준비·병합된 칸이 없습니다.")
             return
-        # 지운 행을 가져온 결정은 행 전체로 — 일부만 풀면 반쪽짜리 빈 행이 남는다.
-        # 새 행(가운데에 없는 행)도 행째로 — 키 칸만 풀면 키 없는 행이 들어간다(검토 실측).
-        for src in _SRC_IDX:
-            rows = [k for k in cells
-                    if self._decision_of(k) == src
-                    and not self._row_has(k[0], src) and self._row_meta[k[0]][1] is not None]
-            for r in {k[0] for k in rows}:
-                cells |= {(r, c) for c in range(len(self._matrix[r]))
-                          if self._decision_of((r, c)) == src}
-        for r in {k[0] for k in cells if self._row_meta[k[0]][1] is None}:
-            cells |= {(r, c) for c in range(len(self._matrix[r])) if self._decision_of((r, c))}
-        had_merged = sum(1 for k in cells if k in self._merged)
-        self._record_undo(cells)
-        for k in cells:
-            self._staged.pop(k, None)
-            self._merged.pop(k, None)
-        self._dirty = True
-        self._notify(cells)
+        self._undo.append(entry)
+        self._notify(touched)
         self._silent_clear_selection()
         self._set_buttons_enabled(True)
         note = (f"  | 병합을 푼 {had_merged}칸은 다음 저장 때 결과에서도 빠집니다"
                 if had_merged else "")
-        self.status.showMessage(f"병합 준비 취소 {len(cells)}칸{note}  | {self._summary()}")
+        self.status.showMessage(f"병합 준비 취소 {len(entry)}칸{note}  | {self._summary()}")
 
     def _auto_merge(self):
         if not self._matrix or self._computing or self._refuse_if_saving():
@@ -1578,15 +1830,16 @@ class Diff3View(QWidget):
             self.status.showMessage("되돌릴 병합 준비 동작이 없습니다.")
             return
         entry = self._undo.pop()
-        for cell, staged, merged in entry:
-            self._staged.pop(cell, None)
-            self._merged.pop(cell, None)
+        for role, cell, staged, merged in entry:
+            st, mg = self._targets[role]
+            st.pop(cell, None)
+            mg.pop(cell, None)
             if staged is not None:
-                self._staged[cell] = staged
+                st[cell] = staged
             if merged is not None:
-                self._merged[cell] = merged
-        self._dirty = True
-        self._notify([cell for cell, _s, _m in entry])
+                mg[cell] = merged
+            self._dirty_t[role] = True
+        self._notify([cell for _role, cell, _s, _m in entry])
         self._silent_clear_selection()
         self._set_buttons_enabled(True)
         self.status.showMessage(f"되돌리기 — {len(entry)}칸  | {self._summary()}")
@@ -1654,13 +1907,28 @@ class Diff3View(QWidget):
                 out.append((n, f"{who}에서 지운 시트 — 결과에 가운데 내용이 남습니다"))
         return out
 
-    def _save(self):
+    def _save(self, role: str | None = None):
+        """role 파일에 걸린 결정을 그 파일에 쓴다. role 을 안 주면(Ctrl+S) 병합 준비가 걸린 파일이
+        하나일 때 그 파일 — 여럿이면 아무 쪽도 쓰지 않고 알린다(2파일의 Ctrl+S 와 같은 규칙:
+        단축키가 어느 파일을 바꿀지 임의로 고르지 않는다)."""
         if self._saving_now() or not self._matrix or self._computing:
             return
         if self._carry is not None:
             return                       # 키를 바꿔 다시 비교하는 중
-        if not self._dirty:
+        if role is None:
+            dirty = [x for x in _ROLES if self._dirty_t[x]]
+            if len(dirty) > 1:
+                self.status.showMessage(
+                    "·".join(_ROLE_NAME[x] for x in dirty)
+                    + " 파일에 병합 준비가 있습니다 — 저장할 패널의 '저장' 버튼을 눌러 주세요.")
+                return
+            role = dirty[0] if dirty else ROLE_BASE
+        if not self._dirty_t[role]:
             self.status.showMessage("저장할 변경이 없습니다.")
+            return
+        why = self._target_blocked(role)
+        if why:
+            QMessageBox.information(self, "저장 미지원", why)
             return
         if self._session_paths and self._text_paths() != self._session_paths:
             QMessageBox.warning(
@@ -1668,9 +1936,11 @@ class Diff3View(QWidget):
                 "경로칸이 지금 비교한 파일과 다릅니다 — 다른 파일에 쓰게 될 수 있어 저장하지 "
                 "않았습니다.\n경로칸에서 Enter 로 다시 비교하거나 경로를 되돌린 뒤 저장하세요.")
             return
-        l, b, r = self.paths()
-        out = self.out_path()
-        for p in (b, out):
+        b = self.paths()[1]
+        out = self._out_path_of(role)
+        # 바탕 = 그 파일의 원본 사본. 가운데는 _template, 양옆은 세션을 열 때 떠 둔 사본.
+        template = self._template if role == ROLE_BASE else self._snap.get(role, "")
+        for p in ((b, out) if role == ROLE_BASE else (out,)):
             if os.path.splitext(p)[1].lower() not in _WRITABLE:
                 QMessageBox.information(
                     self, "저장 미지원",
@@ -1679,13 +1949,13 @@ class Diff3View(QWidget):
         if _is_file_locked(out):
             QMessageBox.warning(self, "저장할 수 없음", f"파일을 저장할 수 없습니다.\n\n{out}")
             return
-        if _stat(out) != self._out_stat:
+        if _stat(out) != self._out_stats.get(role):
             QMessageBox.warning(
                 self, "저장하지 않음",
                 "저장할 파일이 이 화면 밖에서 바뀌었습니다 — 덮어쓰지 않았습니다.\n"
                 "새로고침(F5)으로 다시 읽은 뒤 병합하세요.\n\n" + out)
             return
-        if self._result_path:
+        if role == ROLE_BASE and self._result_path:
             pending = self._unvisited_changed_sheets()
             if pending is None:
                 self.status.showMessage("시트별 변경을 확인하는 중입니다 — 잠시 뒤 다시 저장하세요.")
@@ -1712,13 +1982,17 @@ class Diff3View(QWidget):
         self._set_buttons_enabled(False)
         self.status.showMessage("저장 중...")
         self.status.begin_busy()
-        w = Merge3Worker(self._template, out, self._sheets_to_write(),
-                         {SRC_LEFT: l, SRC_RIGHT: r})
-        w.done.connect(lambda n, o=out, ss=self._session: self._on_saved(n, o, ss))
+        # 값·서식을 가져올 파일 — 대상을 가운데에 둔 모양의 왼쪽·오른쪽 자리 파일(읽는 사본)
+        reads = dict(zip(_ROLES, self._read_paths()))
+        perm = TARGET_PERM[role]
+        w = Merge3Worker(template, out, self._sheets_to_write(role),
+                         {SRC_LEFT: reads[perm[0]], SRC_RIGHT: reads[perm[2]]})
+        w.done.connect(lambda n, o=out, ss=self._session, rr=role: self._on_saved(n, o, ss, rr))
         w.error.connect(self._on_save_error)
         w.finished.connect(w.deleteLater)
         self._merge_worker = w
         self._save_in_flight = True
+        self._saving_role = role
         w.start()
 
     def _on_save_error(self, msg: str):
@@ -1727,7 +2001,7 @@ class Diff3View(QWidget):
         if self._session_after_save:
             self._start_session()
 
-    def _on_saved(self, count: int, out: str, session=None):
+    def _on_saved(self, count: int, out: str, session=None, role: str = ROLE_BASE):
         self._save_in_flight = False
         self.status.end_progress()
         clear_values_cache()
@@ -1738,18 +2012,21 @@ class Diff3View(QWidget):
             return
         if session is not None and session != self._session:
             return                       # 저장 뒤 파일을 새로 열었다 — 지금 화면과 무관
-        moved = list(self._staged)
-        self._merged.update(self._staged)
-        self._staged.clear()
+        st, mg = self._targets[role]
+        moved = list(st)
+        mg.update(st)
+        st.clear()
         for s in self._sheet_cache.values():
-            s["merged"].update(s["staged"])
-            s["staged"].clear()
+            cst, cmg = ((s["staged"], s["merged"]) if role == ROLE_BASE
+                        else s.get("side", {}).get(role, ({}, {})))
+            cmg.update(cst)
+            cst.clear()
         self._undo.clear()
-        self._dirty = False
-        self._out_stat = _stat(out)
+        self._dirty_t[role] = False
+        self._out_stats[role] = _stat(out)
         self._notify(moved)
         self._set_buttons_enabled(True)
-        msg = f"저장 완료 — {os.path.basename(out)} | 병합 {len(self._merged)}칸"
+        msg = f"저장 완료 — {os.path.basename(out)} | 병합 {len(mg)}칸"
         self.status.showMessage(f"{msg}  | {self._summary()}")
         QMessageBox.information(self, "저장 완료", f"병합 결과를 저장했습니다.\n\n{out}")
 
@@ -1763,8 +2040,9 @@ class Diff3View(QWidget):
     def _set_buttons_enabled(self, enabled: bool):
         has = enabled and bool(self._matrix)
         for b in (self.diff_only_btn, self.prev_diff_btn, self.next_diff_btn,
-                  self.prev_conf_btn, self.next_conf_btn, self.auto_btn,
                   self.find_edit, self.find_case_btn, self.find_word_btn,
                   self.find_prev_btn, self.find_next_btn):
             b.setEnabled(has)
-        self.save_btn.setEnabled(has and self._dirty)
+        # 저장 버튼은 그 패널 파일에 저장할 결정이 있을 때만(2파일과 같음)
+        for role, p in self.panels.items():
+            p.save_btn.setEnabled(has and self._dirty_t[role])

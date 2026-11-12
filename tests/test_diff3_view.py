@@ -138,7 +138,7 @@ def test_auto_merge_then_pick_a_conflict_then_save_into_the_middle(win, tmp_path
     assert _vals(b) == [H, ["1", "A", "P"], ["2", "b", "q"], ["3", "R3", "r"]]
     assert view._merged and not view._staged and not view.save_btn.isEnabled()
     # 저장 뒤에도 비교 기준은 원본 — 병합한 칸은 파랑으로 남고, 다시 저장해도 같은 결과
-    assert m.cell_kind(r3, 1) == "merged"
+    assert m.decision(r3, 1) == (SRC_RIGHT, "merged")
 
 
 def test_saving_twice_after_revoking_a_merge_rebuilds_from_the_original(win, tmp_path):
@@ -267,18 +267,18 @@ def test_toolbar_first_row_is_the_same_as_the_two_file_view(win, tmp_path):
     finally:
         two.shutdown()
         two.deleteLater()
-    # 3파일에만 있는 것은 아래 줄에 — 1행의 버튼 자리를 밀지 않는다
-    assert _toolbar_row(view, 1) == ["◀ 이전 충돌", "다음 충돌 ▶", "자동 병합"]
+    # 3파일에만 있던 충돌 이동 · 자동 병합 버튼은 두지 않는다 — 툴바는 한 줄뿐이다
+    from PyQt5.QtWidgets import QPushButton
+    texts = {b.text() for b in view.findChildren(QPushButton)}
+    assert not texts & {"◀ 이전 충돌", "다음 충돌 ▶", "자동 병합", "저장"}, texts
     assert win.minimumSizeHint().width() <= 1400, "툴바가 기본 창 폭을 넘는다"
 
 
-def test_save_button_sits_on_the_middle_panel_like_the_two_file_view(win, tmp_path):
+def test_every_panel_has_its_own_save_button_like_the_two_file_view(win, tmp_path):
     view, l, b, r, _ = _open(win, tmp_path)
     assert view.save_btn is view.panel_b.save_btn
-    assert view.panel_b.save_btn.isVisible()
-    assert not view.panel_l.save_btn.isVisible() and not view.panel_r.save_btn.isVisible(), \
-        "양옆은 읽기만 하는 파일 — 저장 버튼이 보이면 안 된다"
-    assert not view.save_btn.isEnabled()            # 결정이 없으면 꺼져 있다(2파일과 같음)
+    for p in view.panels.values():
+        assert p.save_btn.isVisible() and not p.save_btn.isEnabled()   # 결정이 없으면 꺼져 있다
     view._auto_merge()
     assert view.save_btn.isEnabled()
     view.save_btn.click()
@@ -289,10 +289,200 @@ def test_save_button_sits_on_the_middle_panel_like_the_two_file_view(win, tmp_pa
     assert "가운데 파일" in view.save_btn.toolTip()
 
 
-def test_save_button_tooltip_names_the_result_file_in_p4v_mode(win, tmp_path):
+def test_p4v_mode_writes_only_the_result(win, tmp_path):
+    """결과 파일을 따로 받은 병합 — 쓰는 곳은 결과 하나. 양옆 저장 버튼·양옆으로 가는 방향이 없다."""
     view, l, b, r, res = _open(win, tmp_path, result=True)
     assert res in view.save_btn.toolTip() and "결과 파일" in view.save_btn.toolTip()
-    assert res in view.result_label.toolTip()
+    assert os.path.basename(res) in view.panel_b.title_label.text()
+    assert not view.panel_l.save_btn.isVisible() and not view.panel_r.save_btn.isVisible()
+    for p in view.panels.values():
+        assert [d for _lbl, d in p.table.stage_choices] == ["l>b", "r>b"]
+    r3 = _row(view, "3")
+    _select(view, [(r3, 1)])
+    view._stage_selected("b>l")                      # 메뉴엔 없지만 불러도 받지 않는다
+    assert not view._targets["l"][0]
+
+
+# ── 여섯 방향 병합 — 어느 파일에서 어느 파일로든 ────────────────────────────
+def _save_role(view, role):
+    view.panels[role].save_btn.click()
+    assert _wait(lambda: not view._saving_now() and view.status.currentMessage().startswith(
+        ("저장 완료", "오류"))), view.status.currentMessage()
+    assert view.status.currentMessage().startswith("저장 완료"), view.status.currentMessage()
+
+
+def test_menu_offers_six_directions_and_alt_arrows_still_go_to_the_middle(win, tmp_path):
+    view, *_ = _open(win, tmp_path)
+    for p in view.panels.values():
+        assert p.table.stage_choices == (
+            ("왼쪽 → 가운데", "l>b"), ("오른쪽 → 가운데", "r>b"),
+            ("가운데 → 왼쪽", "b>l"), ("오른쪽 → 왼쪽", "r>l"),
+            ("가운데 → 오른쪽", "b>r"), ("왼쪽 → 오른쪽", "l>r"))
+
+
+def test_perspective_identity_matches_the_engine():
+    from excelmerge.diff3_engine import compute_diff3, perspective
+    left = [H, [1, "a", "p"], [3, "c", "r"], [5, "n", "n"]]
+    right = [H, [1, "a", "P"], [2, "b", "Q"], [3, "R3", "r"]]
+    m, rm = compute_diff3([[str(v) for v in r] for r in left],
+                          [[str(v) for v in r] for r in BASE],
+                          [[str(v) for v in r] for r in right], 0, 0)
+    pm, prm, pcm = perspective(m, rm, None, (0, 1, 2))
+    assert pm == m and [tuple(x) for x in prm] == [tuple(x) for x in rm] and pcm is None
+    # 왼쪽을 가운데에 둔 모양 — 값 자리가 (가운데, 왼쪽, 오른쪽)
+    lm, lrm, _ = perspective(m, rm, None, (1, 0, 2))
+    for row, lrow, meta, lmeta in zip(m, lm, rm, lrm):
+        assert tuple(lmeta) == (meta[1], meta[0], meta[2])
+        for cell, lcell in zip(row, lrow):
+            assert lcell[1:] == (cell[2], cell[1], cell[3])
+
+
+def test_middle_to_left_and_right_to_left_save_into_the_left_file(win, tmp_path):
+    view, l, b, r, _ = _open(win, tmp_path)
+    r1, r3 = _row(view, "1"), _row(view, "3")
+    before_b, before_r = open(b, "rb").read(), open(r, "rb").read()
+    _select(view, [(r1, 1)])
+    view._stage_selected("b>l")                      # 왼쪽이 고친 A 를 가운데 값 a 로
+    _select(view, [(r3, 1)])
+    view._stage_selected("r>l")                      # 충돌 칸에 오른쪽 값
+    lm = view.panel_l.table.model()
+    assert lm.display_text(r1, 1) == "a" and lm.display_text(r3, 1) == "R3", \
+        "받는 패널이 가져올 값을 보여야 한다"
+    assert view.panel_l.save_btn.isEnabled() and not view.panel_b.save_btn.isEnabled()
+    assert not view._staged, "가운데로 가는 결정이 아니다"
+    _save_role(view, "l")
+    assert _vals(l) == [H, ["1", "a", "p"], ["2", "b", "q"], ["3", "R3", "r"]]
+    assert open(b, "rb").read() == before_b and open(r, "rb").read() == before_r, \
+        "왼쪽에 저장했는데 다른 파일이 바뀌었다"
+    assert not view.panel_l.save_btn.isEnabled()
+    assert lm.decision(r1, 1) is not None and lm.decision(r1, 1)[1] == "merged"
+
+
+def test_one_value_can_go_to_two_files_and_each_saves_on_its_own(win, tmp_path):
+    view, l, b, r, _ = _open(win, tmp_path)
+    r1 = _row(view, "1")
+    _select(view, [(r1, 1)])
+    view._stage_selected("l>b")                      # 왼쪽 A → 가운데
+    _select(view, [(r1, 1)])
+    view._stage_selected("l>r")                      # 같은 값을 오른쪽에도
+    assert view.panel_b.save_btn.isEnabled() and view.panel_r.save_btn.isEnabled()
+    view._save()                                     # Ctrl+S — 대상이 둘이라 아무 쪽도 쓰지 않는다
+    assert not view._saving_now() and "저장할 패널" in view.status.currentMessage()
+    _save_role(view, "r")
+    assert _vals(r)[1] == ["1", "A", "P"] and _vals(b)[1] == ["1", "a", "p"]
+    assert view.panel_b.save_btn.isEnabled(), "오른쪽만 저장했는데 가운데 저장 대기가 꺼졌다"
+    _save_role(view, "b")
+    assert _vals(b)[1] == ["1", "A", "p"]
+
+
+def test_second_save_into_a_side_file_rebuilds_from_its_original(win, tmp_path):
+    """양옆도 가운데처럼 원본 사본에서 새로 만든다 — 저장 뒤에 병합을 풀고 다시 저장하면 빠진다."""
+    view, l, b, r, _ = _open(win, tmp_path)
+    r1, r3 = _row(view, "1"), _row(view, "3")
+    _select(view, [(r1, 2), (r3, 1)])
+    view._stage_selected("l>r")                      # 오른쪽 P → p, R3 → L3
+    _save_role(view, "r")
+    assert _vals(r) == [H, ["1", "a", "p"], ["2", "b", "q"], ["3", "L3", "r"]]
+    _select(view, [(r1, 2)])
+    view._unstage_selected()                         # P → p 를 푼다
+    assert view.panel_r.save_btn.isEnabled()
+    _save_role(view, "r")
+    assert _vals(r) == [H, ["1", "a", "P"], ["2", "b", "q"], ["3", "L3", "r"]], \
+        "푼 병합이 오른쪽 파일에 남았다"
+
+
+def test_new_row_goes_to_a_side_file_whole_and_deleted_row_is_removed(win, tmp_path):
+    base = [H, [1, "a", "p"], [2, "b", "q"], [3, "c", "r"], [4, "d", "s"]]   # 가운데에만 4
+    left = [H, [1, "a", "p"], [3, "c", "r"]]                                 # 왼쪽엔 2·4 없음
+    right = [H, [1, "a", "p"], [2, "b", "q"], [3, "c", "r"]]
+    view, l, b, r, _ = _open(win, tmp_path, left=left, base=base, right=right)
+    r2, r4 = _row(view, "2"), _row(view, "4")
+    _select(view, [(r4, 1)])
+    view._stage_selected("b>r")                      # 가운데의 새 행 4 를 오른쪽에 — 칸 하나만 골라도 행째
+    assert {c for (rr, c) in view._targets["r"][0] if rr == r4} == {0, 1, 2}
+    _select(view, [(r2, 1)])
+    view._stage_selected("l>r")                      # 왼쪽이 지운 2 를 오른쪽에서도 지운다 — 행째
+    assert {c for (rr, c) in view._targets["r"][0] if rr == r2} == {0, 1, 2}
+    _save_role(view, "r")
+    assert _vals(r) == [H, ["1", "a", "p"], ["3", "c", "r"], ["4", "d", "s"]]
+
+
+def test_row_missing_in_the_target_comes_whole_from_the_picked_file(win, tmp_path):
+    """받는 파일에 없는 행 — 다른 두 파일의 값이 서로 달라도 고른 쪽에서 행째로 온다.
+    충돌 칸을 남겨 두면 그 칸이 빈 채로 들어갔다(실측: 20열 행이 3칸만 들어감)."""
+    base = [H, [1, "a", "p"], [4, "d", "s"]]
+    left = [H, [1, "a", "p"]]                         # 왼쪽엔 4 없음
+    right = [H, [1, "a", "p"], [4, "D", "S"]]         # 오른쪽의 4 는 값이 다르다
+    view, l, b, r, _ = _open(win, tmp_path, left=left, base=base, right=right)
+    r4 = _row(view, "4")
+    _select(view, [(r4, 0)])
+    view._stage_selected("b>l")                      # 키 칸 하나만 고른다
+    assert {c for (rr, c) in view._targets["l"][0] if rr == r4} == {0, 1, 2}
+    _select(view, [(r4, 2)])
+    view._stage_selected("r>l")                      # 한 칸만 오른쪽 값으로 바꾼다
+    _save_role(view, "l")
+    assert _vals(l) == [H, ["1", "a", "p"], ["4", "d", "S"]]
+
+
+def test_a_cell_is_either_a_receiver_or_a_giver_not_both(win, tmp_path):
+    view, *_ = _open(win, tmp_path)
+    r3 = _row(view, "3")
+    _select(view, [(r3, 1)])
+    view._stage_selected("l>b")                      # 가운데가 왼쪽 값을 받는다
+    _select(view, [(r3, 1)])
+    view._stage_selected("b>r")                      # 그 가운데 칸을 오른쪽으로 — 화면 값과 쓰는 값이 갈린다
+    assert not view._targets["r"][0], "받기로 한 칸을 다시 출처로 썼다"
+    _select(view, [(r3, 1)])
+    view._stage_selected("r>l")                      # 왼쪽은 가운데의 출처 — 받는 쪽이 될 수 없다
+    assert not view._targets["l"][0], "출처로 쓰인 칸이 다른 값을 받았다"
+
+
+def test_unstage_and_undo_cover_every_target(win, tmp_path):
+    view, *_ = _open(win, tmp_path)
+    r1 = _row(view, "1")
+    _select(view, [(r1, 1)])
+    view._stage_selected("l>b")
+    _select(view, [(r1, 1)])
+    view._stage_selected("l>r")
+    _select(view, [(r1, 1)])
+    view._unstage_selected()                         # 한 번에 두 대상 모두
+    assert not view._staged and not view._targets["r"][0]
+    view._undo_last()
+    assert view._staged == {(r1, 1): SRC_LEFT} and len(view._targets["r"][0]) == 1
+    view._undo_last()
+    assert view._staged and not view._targets["r"][0]
+
+
+def test_side_decisions_survive_sheet_switch_and_key_change(win, tmp_path):
+    other = [["K", "X"], ["k1", "x"]]
+    view, l, b, r, _ = _open(win, tmp_path, extra={"Other": other})
+    r1 = _row(view, "1")
+    _select(view, [(r1, 1)])
+    view._stage_selected("b>l")
+    view.sheet_tabs.setCurrentIndex(view._sheet_names.index("Other"))
+    assert _wait(lambda: view._current_sheet == "Other" and bool(view._matrix)
+                 and view.status.currentMessage().startswith("비교 완료"))
+    assert not view._targets["l"][0] and view.panel_l.save_btn.isEnabled()
+    _save_role(view, "l")                            # 다른 시트에 있는 결정도 함께 쓴다
+    assert _vals(l)[1] == ["1", "a", "p"]
+    view.sheet_tabs.setCurrentIndex(view._sheet_names.index("Data"))
+    assert _wait(lambda: view._current_sheet == "Data" and bool(view._targets["l"][1]))
+    view._on_key_col_changed(-1)                     # 키를 바꿔 다시 비교해도 결정이 따라온다
+    assert _wait(lambda: view.status.currentMessage().startswith("비교 완료"))
+    assert len(view._targets["l"][1]) == 1
+
+
+def test_side_file_that_cannot_be_written_is_refused(win, tmp_path):
+    view, l, b, r, _ = _open(win, tmp_path)
+    csv = tmp_path / "left.csv"
+    csv.write_text("ID,V,W\n1,A,p\n2,b,q\n3,L3,r\n", encoding="utf-8")
+    view.panel_l.set_path(str(csv))
+    view._start_session()
+    assert _wait(lambda: bool(view._matrix) and view.status.currentMessage().startswith("비교 완료"))
+    r1 = _row(view, "1")
+    _select(view, [(r1, 1)])
+    view._stage_selected("b>l")
+    assert not view._targets["l"][0], "저장할 수 없는 형식의 파일에 병합 준비가 걸렸다"
 
 
 def _find(view, term):

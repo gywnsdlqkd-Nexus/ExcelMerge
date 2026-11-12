@@ -5,15 +5,17 @@
 is_added_placeholder·own_col·orig_row …)만 보므로 그대로 동작한다.
 
 셀은 (status, l_val, b_val, r_val) — diff3_engine 참고. 행·열 대응은 3원소 (l, b, r).
-병합 준비(staged)·병합 완료(merged)는 {(r, c): SRC_LEFT|SRC_RIGHT} — 가운데(결과)에 어느
-쪽 값을 쓰는지. 둘 다 Diff3View 가 소유하고 세 모델에 **참조로** 넘긴다.
+병합 준비(staged)·병합 완료(merged)는 **대상 파일마다** {(r, c): SRC_LEFT|SRC_RIGHT} — 그 파일에
+어느 쪽 값을 쓰는지. 가운데가 대상이면 SRC_LEFT = 왼쪽, SRC_RIGHT = 오른쪽이고, 양옆이 대상이면
+그 파일을 가운데에 둔 모양으로 읽는다(TARGET_PERM · src_role). 모두 Diff3View 가 소유하고 세
+모델에 **참조로** 넘긴다(set_targets). set_targets 를 안 부르면 가운데 대상 하나뿐이다.
 
 색 규칙(패널별로 '그 파일이 무엇을 바꿨나'만 칠한다)
   왼쪽   기준과 다른 칸 — 왼쪽만 바뀜(노랑)·양쪽이 같게(보라)·충돌(빨강). 오른쪽만 바뀐 칸은
          왼쪽 파일 입장에선 기준 그대로라 흰색.
   오른쪽 대칭.
   가운데 바뀐 칸 전부(어느 쪽이 바꿨든) — 병합 결과가 들어갈 자리다.
-  준비·완료 칸은 가운데와 **값을 가져온 쪽**에 준비(주황)·병합(파랑).
+  준비·완료 칸은 **값을 받는 쪽**(가져온 값을 보인다)과 **값을 준 쪽**에 준비(주황)·병합(파랑).
   그 파일에 없는 행·열은 빗금(2파일의 '반대쪽에만 있는 행'과 같은 뜻).
 """
 from PyQt5.QtCore import Qt
@@ -31,7 +33,24 @@ _OWN_CHANGES = {
     ROLE_RIGHT: (S3_RIGHT, S3_BOTH, S3_CONFLICT),
     ROLE_BASE: (S3_LEFT, S3_RIGHT, S3_BOTH, S3_CONFLICT),
 }
-_SRC_OF_ROLE = {ROLE_LEFT: SRC_LEFT, ROLE_RIGHT: SRC_RIGHT}
+# 대상 파일 → 그 파일을 가운데에 둔 모양의 (왼쪽 자리, 가운데 자리, 오른쪽 자리).
+# 남은 두 파일은 원래 좌우 순서를 지킨다 — diff3_engine.perspective 의 perm 과 같은 뜻.
+TARGET_PERM = {
+    ROLE_BASE: (ROLE_LEFT, ROLE_BASE, ROLE_RIGHT),
+    ROLE_LEFT: (ROLE_BASE, ROLE_LEFT, ROLE_RIGHT),
+    ROLE_RIGHT: (ROLE_LEFT, ROLE_RIGHT, ROLE_BASE),
+}
+
+
+def src_role(target: str, src: str) -> str:
+    """target 파일에 걸린 결정의 출처(SRC_LEFT|SRC_RIGHT)가 실제로 어느 파일인가."""
+    perm = TARGET_PERM[target]
+    return perm[0] if src == SRC_LEFT else perm[2]
+
+
+def src_token(target: str, role: str) -> str:
+    """src_role 의 반대 — role 파일에서 target 으로 가져올 때의 SRC_LEFT|SRC_RIGHT."""
+    return SRC_LEFT if TARGET_PERM[target][0] == role else SRC_RIGHT
 _STATUS_BG = {
     S3_LEFT: DIFF_COLORS["modified"],
     S3_RIGHT: DIFF_COLORS["modified"],
@@ -48,33 +67,61 @@ class Diff3TableModel(DiffTableModel):
         self.role = role
         self._idx = _ROLE_IDX[role]      # row_meta3 · col_meta3 의 내 자리
         self._vi = self._idx + 1         # 셀 튜플의 내 값 자리
+        self._targets = None             # {대상 역할: (staged, merged)} — None 이면 가운데뿐
 
     # ── 결정(준비·완료) ──────────────────────────────────────────────────────
+    def set_targets(self, targets: dict):
+        """대상 파일별 결정 {역할: (staged, merged)} 를 **참조로** 받는다(세 모델이 같은 것을 본다)."""
+        self._targets = targets
+
+    def _target_dicts(self):
+        if self._targets is not None:
+            return self._targets
+        return {ROLE_BASE: (self._staged, self._merged if isinstance(self._merged, dict) else {})}
+
     def decision(self, r: int, c: int):
-        """(r, c) 에 걸린 결정 — (출처, 'staged'|'merged') 또는 None."""
-        d = self._staged.get((r, c))
+        """**이 패널 파일에** 쓰기로 한 결정 — (출처 SRC_LEFT|SRC_RIGHT, 'staged'|'merged') 또는 None.
+        출처는 이 파일을 가운데에 둔 모양 기준이다(실제 파일은 src_role)."""
+        own = self._target_dicts().get(self.role)
+        if own is None:
+            return None
+        d = own[0].get((r, c))
         if d is not None:
             return d, "staged"
-        d = self._merged.get((r, c)) if isinstance(self._merged, dict) else None
+        d = own[1].get((r, c))
         if d is not None:
             return d, "merged"
         return None
 
+    def _any_decision(self, r: int, c: int) -> bool:
+        """어느 파일이 대상이든 이 칸에 결정이 걸려 있나."""
+        key = (r, c)
+        return any(key in st or key in mg for st, mg in self._target_dicts().values())
+
     def staged_coords(self):
         """'병합 준비 취소' 메뉴·Alt+Backspace 가 보는 칸 — 3파일은 저장된 병합(파랑)도 풀 수
-        있다(다음 저장에서 결과에서 빠진다). 2파일은 저장된 칸을 되돌리지 않으므로 준비만 본다."""
-        if not self._merged:
-            return self._staged.keys()
-        return self._staged.keys() | self._merged.keys()
+        있다(다음 저장에서 결과에서 빠진다). 2파일은 저장된 칸을 되돌리지 않으므로 준비만 본다.
+        어느 파일이 대상이든 모두 본다."""
+        out = set()
+        for st, mg in self._target_dicts().values():
+            out.update(st)
+            out.update(mg)
+        return out
 
     def _shows_decision(self, r: int, c: int):
-        """이 패널이 결정 색을 보이는가 — 가운데는 언제나, 양옆은 값을 가져온 쪽일 때만."""
-        dec = self.decision(r, c)
-        if dec is None:
-            return None
-        if self.role == ROLE_BASE or _SRC_OF_ROLE.get(self.role) == dec[0]:
-            return dec
-        return None
+        """이 패널이 결정 색을 보이는가 — 값을 받는 파일이거나, 값을 준 파일일 때.
+        → 'staged'|'merged' 또는 None(둘 다면 준비가 먼저)."""
+        key = (r, c)
+        found = None
+        for target, (st, mg) in self._target_dicts().items():
+            for d, kind in ((st.get(key), "staged"), (mg.get(key), "merged")):
+                if d is None:
+                    continue
+                if target == self.role or src_role(target, d) == self.role:
+                    if kind == "staged":
+                        return kind
+                    found = kind
+        return found
 
     # ── 값 ─────────────────────────────────────────────────────────────────
     def _compute_col_has_values(self, c: int) -> bool:
@@ -101,21 +148,20 @@ class Diff3TableModel(DiffTableModel):
             row = self._preview[r]
             return row[c] if c < len(row) else ""
         cell = self._diff_matrix[r][c]
-        if self.role == ROLE_BASE:
-            dec = self.decision(r, c)
-            if dec is not None:
-                return cell[1] if dec[0] == SRC_LEFT else cell[3]
+        dec = self.decision(r, c)
+        if dec is not None:              # 이 파일에 쓰기로 한 칸 — 가져올 값을 보인다
+            return cell[_ROLE_IDX[src_role(self.role, dec[0])] + 1]
         return cell[self._vi]
 
     def cell_kind(self, r: int, c: int) -> str:
-        """병합 자격 — merged > staged > 변경. 패널과 무관하게 같다(선택이 세 패널에 미러되므로
-        어느 패널에서 우클릭해도 같은 메뉴가 떠야 한다)."""
+        """병합 자격 — 바뀐 칸이면 'changed'. 패널과 무관하게 같다(선택이 세 패널에 미러되므로
+        어느 패널에서 우클릭해도 같은 메뉴가 떠야 한다).
+
+        결정이 걸린 칸도 'changed' 다 — 같은 칸을 다른 파일로도 보낼 수 있고(왼쪽 → 가운데 뒤에
+        왼쪽 → 오른쪽), 고른 쪽을 바로 바꿀 수 있어야 한다. '병합 준비 취소' 는 staged_coords 로
+        따로 판정한다."""
         if self._mode != MODE_DIFF or not self.is_data_cell(r, c):
             return S3_SAME
-        if (r, c) in self._merged:
-            return "merged"
-        if (r, c) in self._staged:
-            return "staged"
         return "changed" if self._diff_matrix[r][c][0] != S3_SAME else S3_SAME
 
     def _formula_orig_row(self, r: int):
@@ -129,8 +175,8 @@ class Diff3TableModel(DiffTableModel):
     def is_formula(self, r: int, c: int) -> bool:
         if not self._formula_flags or not self.is_data_cell(r, c):
             return False
-        if self._mode == MODE_DIFF and self.role == ROLE_BASE and self.decision(r, c):
-            return False   # 가운데가 남의 값을 보이는 칸
+        if self._mode == MODE_DIFF and self.decision(r, c):
+            return False   # 이 패널이 남의 값을 보이는 칸
         orig = self._formula_orig_row(r)
         col = self.own_col(c)
         return orig is not None and col is not None and (orig, col) in self._formula_flags
@@ -148,7 +194,7 @@ class Diff3TableModel(DiffTableModel):
         """내 값에서 기준(가운데는 바꾼 쪽)과 다른 문자 구간."""
         if self._mode != MODE_DIFF or not self.is_data_cell(r, c):
             return []
-        if c in self._excluded or self.decision(r, c) is not None:
+        if c in self._excluded or self._any_decision(r, c):
             return []
         st, lv, bv, rv = self._diff_matrix[r][c]
         if st not in _OWN_CHANGES[self.role]:
@@ -168,12 +214,12 @@ class Diff3TableModel(DiffTableModel):
         return cached
 
     def is_added_placeholder(self, r: int, c: int) -> bool:
-        """빗금 — 이 패널 파일에 없는 행·열. 가운데가 결정된 값을 보이면 빗금을 걷는다."""
+        """빗금 — 이 패널 파일에 없는 행·열. 가져올 값을 보이는 칸은 빗금을 걷는다."""
         if self._mode != MODE_DIFF or not self.is_data_cell(r, c):
             return False
         if c in self._excluded:
             return False
-        if self.role == ROLE_BASE and self.decision(r, c) is not None:
+        if self.decision(r, c) is not None:
             return False
         return self._absent(r, c)
 
@@ -182,9 +228,9 @@ class Diff3TableModel(DiffTableModel):
             r, c = index.row(), index.column()
             if not self.is_data_cell(r, c):
                 return None
-            dec = self._shows_decision(r, c)
-            if dec is not None:
-                return DIFF_COLORS["merged" if dec[1] == "merged" else "staged"]
+            kind = self._shows_decision(r, c)
+            if kind is not None:
+                return DIFF_COLORS[kind]
             if c in self._excluded:
                 return EXCLUDED_CELL_BG
             st = self._diff_matrix[r][c][0]

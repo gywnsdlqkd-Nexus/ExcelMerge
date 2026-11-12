@@ -1885,6 +1885,39 @@ def count_dropped3(left: list, base: list, right: list, col_meta3, key_col: int,
     return total
 
 
+def perspective(matrix: list, row_meta3: list, col_meta3: list | None, perm: tuple):
+    """매트릭스를 **다른 파일을 가운데(쓰는 곳)에 둔 모양**으로 비춘다 — (matrix, row_meta3, col_meta3).
+
+    perm = (왼쪽 자리에 올 파일, 가운데 자리에 올 파일, 오른쪽 자리에 올 파일) — 원래 자리 번호
+    (0 왼쪽 · 1 가운데 · 2 오른쪽). 행·열 짝은 그대로 두고(화면 좌표 (r, c) 가 같다) 값 자리와 상태만
+    새 가운데 기준으로 다시 매긴다. 상태 규칙은 _make_row 와 같다 — 값은 classify, 새 가운데에 있는
+    행을 한쪽이 지우고 다른 쪽이 고쳤으면 행 단위 충돌.
+
+    3파일 화면이 가운데가 아닌 파일에 저장할 때 쓴다: 병합 준비·저장 규칙(행 삭제·새 행·한쪽에만
+    있는 열)은 모두 '가운데에 쓴다'로 짜여 있으므로, 대상 파일을 가운데에 둔 모양을 만들어 같은
+    규칙을 그대로 태운다. perm 이 (0, 1, 2) 면 원래 매트릭스와 같다.
+    """
+    a, t, z = perm
+    cols = [(cm[a], cm[t], cm[z]) for cm in col_meta3] if col_meta3 else None
+    metas = [(m[a], m[t], m[z]) for m in row_meta3]
+    va, vt, vz = a + 1, t + 1, z + 1
+    out = []
+    for row, m in zip(matrix, metas):
+        if all(cell[0] == S3_SAME for cell in row):
+            out.append(row)                         # 세 값이 같은 칸은 어느 모양에서나 같다
+            continue
+        cells = [(classify(c[va], c[vt], c[vz]), c[va], c[vt], c[vz]) for c in row]
+        if m[1] is not None and ((m[0] is None) != (m[2] is None)):
+            ki = 2 if m[0] is None else 0           # 지우지 않은 쪽
+            edited = any(cell[ki + 1] != cell[2] for i, cell in enumerate(cells)
+                         if cols is None or (cols[i][1] is not None and cols[i][ki] is not None))
+            if edited:
+                cells = [((S3_CONFLICT if st != S3_SAME else st), l, b, r)
+                         for st, l, b, r in cells]
+        out.append(cells)
+    return out, metas, cols
+
+
 def conflict_masks(matrix: list) -> list:
     """행별 '충돌 열' 비트마스크 — row_change_masks 와 같은 모양(다음/이전 충돌, 충돌 수)."""
     out = []
