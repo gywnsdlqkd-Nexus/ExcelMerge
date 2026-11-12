@@ -25,11 +25,11 @@ from PyQt5.QtCore import Qt, QThread
 from PyQt5.QtGui import QIcon, QKeySequence
 from PyQt5.QtWidgets import (
     QAbstractItemView, QApplication, QHBoxLayout, QLabel, QMessageBox, QPushButton,
-    QShortcut, QSplitter, QVBoxLayout, QWidget,
+    QShortcut, QSizePolicy, QSplitter, QVBoxLayout, QWidget,
 )
 
 from .colref import get_column_letter
-from .compare_toolbar import add_legend
+from .compare_toolbar import add_legend, build_find_box, make_find_matcher
 from .diff3_engine import (S3_BOTH, S3_CONFLICT, S3_LEFT, S3_RIGHT, S3_SAME, SRC_LEFT,
                            SRC_RIGHT, auto_merge_plan, match_columns3, usable_col_meta3)
 from .diff3_model import ROLE_BASE, ROLE_LEFT, ROLE_RIGHT, Diff3TableModel
@@ -130,6 +130,7 @@ class Diff3View(QWidget):
         self._syncing_scroll = False
         self._syncing_selection = False
         self._syncing_split = False
+        self._find_cache = None            # (열쇠, 매트릭스 ref, 칸 목록) — _find_cells
 
         self._build_ui()
         for p in self.panels.values():
@@ -143,6 +144,7 @@ class Diff3View(QWidget):
                           ("Alt+Down", lambda: self._goto_btn(self.next_diff_btn, +1, False)),
                           ("Alt+Shift+Up", lambda: self._goto_btn(self.prev_conf_btn, -1, True)),
                           ("Alt+Shift+Down", lambda: self._goto_btn(self.next_conf_btn, +1, True)),
+                          ("Ctrl+F", self._focus_find),
                           ("Ctrl+S", self._save)):
             sc = QShortcut(QKeySequence(seq), self)
             sc.setContext(Qt.WidgetWithChildrenShortcut)
@@ -168,38 +170,56 @@ class Diff3View(QWidget):
         root.setContentsMargins(8, 8, 8, 8)
         root.setSpacing(6)
 
+        # ── 툴바 1행 — 2파일 화면(DiffView)과 같은 버튼·같은 순서·같은 자리 ──
+        # 변경점만 보기 · 새로고침 · 이전/다음 변경 · 찾기 · (범례). 저장도 2파일처럼 패널 경로칸 옆
+        # 아이콘이다(아래). 두 화면을 오가도 손이 같은 자리로 가게 한다.
         bar = QHBoxLayout()
-        self.diff_only_btn = self._button("변경점만 보기", "변경된 행만 표시 / 전체 표시 (Ctrl+D)",
+        self.diff_only_btn = self._button("변경점만 보기", "변경된 행만 표시 / 전체 표시 전환 (Ctrl+D)",
                                           checkable=True)
         self.diff_only_btn.toggled.connect(self._on_diff_only_toggled)
         self.refresh_btn = self._button("새로고침", "세 파일을 다시 읽어 비교합니다 (F5)",
                                         self._run_refresh)
-        self.prev_diff_btn = self._button("◀ 이전 변경", "이전 변경 칸 (Alt+↑)",
+        self.prev_diff_btn = self._button("◀ 이전 변경", "이전 변경 셀로 이동 (Alt+↑)",
                                           lambda: self._goto(-1, False))
-        self.next_diff_btn = self._button("다음 변경 ▶", "다음 변경 칸 (Alt+↓)",
+        self.next_diff_btn = self._button("다음 변경 ▶", "다음 변경 셀로 이동 (Alt+↓)",
                                           lambda: self._goto(+1, False))
-        self.prev_conf_btn = self._button("◀ 이전 충돌", "아직 고르지 않은 이전 충돌 (Alt+Shift+↑)",
-                                          lambda: self._goto(-1, True))
-        self.next_conf_btn = self._button("다음 충돌 ▶", "아직 고르지 않은 다음 충돌 (Alt+Shift+↓)",
-                                          lambda: self._goto(+1, True))
-        self.auto_btn = self._button(
-            "자동 병합", "충돌이 없는 변경을 모두 가운데로 가져오도록 병합 준비합니다.\n"
-            "충돌(양쪽이 서로 다르게 고친 칸)은 직접 고릅니다.", self._auto_merge)
-        self.save_btn = self._button("저장", "병합 결과를 저장합니다 (Ctrl+S)", self._save)
-        for w in (self.diff_only_btn, self.refresh_btn, self.prev_diff_btn, self.next_diff_btn,
-                  self.prev_conf_btn, self.next_conf_btn, self.auto_btn, self.save_btn):
+        for w in (self.diff_only_btn, self.refresh_btn, self.prev_diff_btn, self.next_diff_btn):
             bar.addWidget(w)
+        bar.addSpacing(16)
+        bar.addLayout(build_find_box(
+            self, "찾을 내용 (Ctrl+F)", self._goto_find,
+            "셀 값 검색 — Enter: 다음 찾기, Shift+Enter: 이전 찾기",
+            with_word=True))
         bar.addStretch()
         add_legend(bar, [(lbl, DIFF_COLORS[key]) for lbl, key in (
             ("변경", "modified"), ("같게 바뀜", "both"), ("충돌", "conflict"),
             ("준비", "staged"), ("병합", "merged"))])
         root.addLayout(bar)
 
+        # ── 병합 줄 — 3파일에만 있는 것(충돌 이동 · 자동 병합 · 저장할 곳 안내) ──
+        # 1행에 함께 두면 2파일과 버튼 자리가 달라지고, 찾기 박스까지 넣은 툴바가 기본 창 폭(1400)을
+        # 넘는다(실측: 최소 폭 약 1,600 — 두 줄이면 약 1,250). 충돌과 자동 병합은 기준(가운데)이
+        # 있어야 성립하는 개념이라 2파일에는 대응하는 버튼이 없다.
+        merge_bar = QHBoxLayout()
+        self.prev_conf_btn = self._button("◀ 이전 충돌", "아직 고르지 않은 이전 충돌로 이동 (Alt+Shift+↑)",
+                                          lambda: self._goto(-1, True))
+        self.next_conf_btn = self._button("다음 충돌 ▶", "아직 고르지 않은 다음 충돌로 이동 (Alt+Shift+↓)",
+                                          lambda: self._goto(+1, True))
+        self.auto_btn = self._button(
+            "자동 병합", "충돌이 없는 변경을 모두 가운데로 가져오도록 병합 준비합니다.\n"
+            "충돌(양쪽이 서로 다르게 고친 칸)은 직접 고릅니다.", self._auto_merge)
+        for w in (self.prev_conf_btn, self.next_conf_btn, self.auto_btn):
+            merge_bar.addWidget(w)
+        merge_bar.addSpacing(8)
         self.result_label = QLabel("")
         self.result_label.setFont(ui_font(9))
         self.result_label.setStyleSheet("color: #555;")
         self.result_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
-        root.addWidget(self.result_label)
+        # 긴 결과 경로가 창 최소 폭을 밀어내지 않게 — 모자라면 잘리고, 전체는 툴팁으로.
+        self.result_label.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
+        self.result_label.setMinimumWidth(0)
+        merge_bar.addWidget(self.result_label, 1)
+        root.addLayout(merge_bar)
 
         splitter = QSplitter(Qt.Horizontal)
         self.panels = {}
@@ -207,7 +227,6 @@ class Diff3View(QWidget):
                             (ROLE_RIGHT, "오른쪽")):
             p = FilePanel(label, role, model=Diff3TableModel(role),
                           history_side=_HISTORY_SIDE[role], drop_hint=False)
-            p.save_btn.hide()            # 저장은 툴바 하나 — 쓰는 곳은 언제나 가운데(결과)
             # 화살표 = 값이 흐르는 쪽. Alt+→ 왼쪽 → 가운데, Alt+← 오른쪽 → 가운데(세 패널 공통).
             p.table.stage_choices = (("왼쪽 → 가운데", SRC_LEFT), ("오른쪽 → 가운데", SRC_RIGHT))
             self.panels[role] = p
@@ -215,6 +234,12 @@ class Diff3View(QWidget):
         self.panel_l = self.panels[ROLE_LEFT]
         self.panel_b = self.panels[ROLE_BASE]
         self.panel_r = self.panels[ROLE_RIGHT]
+        # 저장 = 2파일과 같은 자리(패널 경로칸 옆 아이콘). 쓰는 곳은 언제나 가운데(결과)뿐이라
+        # 가운데 패널의 버튼만 남긴다 — 양옆은 읽기만 하는 파일이다.
+        self.panel_l.save_btn.hide()
+        self.panel_r.save_btn.hide()
+        self.save_btn = self.panel_b.save_btn
+        self.save_btn.clicked.connect(lambda _=False: self._save())
         splitter.setSizes([600, 600, 600])
         root.addWidget(splitter, 1)
 
@@ -264,7 +289,7 @@ class Diff3View(QWidget):
         self._update_result_label()
         self.status.showMessage(
             "왼쪽·가운데(기준)·오른쪽 파일을 넣으면 비교합니다.  "
-            "| 칸 선택 → Alt+→(왼쪽 값) / Alt+←(오른쪽 값) → 저장")
+            "| 칸 선택 → Alt+→(왼쪽 값) / Alt+←(오른쪽 값) → 가운데 패널의 저장")
 
     # ── 진입점 ─────────────────────────────────────────────────────────────
     def load3(self, left: str = "", base: str = "", right: str = "", result: str = "",
@@ -320,10 +345,16 @@ class Diff3View(QWidget):
 
     def _update_result_label(self):
         if self._result_path:
-            self.result_label.setText(
-                f"결과 파일: {self._result_path}   — 가운데 원본은 바꾸지 않습니다")
+            text = f"결과 파일: {self._result_path}   — 가운데 원본은 바꾸지 않습니다"
+            tip = ("병합 결과 저장 (Ctrl+S)\n"
+                   f"결과 파일에 씁니다 — 가운데 원본은 바꾸지 않습니다.\n{self._result_path}")
         else:
-            self.result_label.setText("저장하면 가운데 파일에 씁니다")
+            text = "저장하면 가운데 파일에 씁니다"
+            tip = "병합 결과 저장 (Ctrl+S) — 가운데 파일에 씁니다"
+        self.result_label.setText(text)
+        self.result_label.setToolTip(text)
+        # 저장 아이콘은 가운데 패널에 있지만, P4V 병합이면 쓰는 곳이 가운데가 아니라 결과 파일이다.
+        self.save_btn.setToolTip(tip)
 
     # ── 세션(세 파일) ──────────────────────────────────────────────────────
     def _on_file_loaded(self, role: str, path: str):
@@ -1180,11 +1211,101 @@ class Diff3View(QWidget):
     def _focus_grid(self):
         fw = QApplication.focusWidget()
         if fw is not None:
+            if fw is self.find_edit:
+                return                   # 찾을 내용을 치는 중 — 포커스를 뺏지 않는다(2파일과 같음)
             for p in self.panels.values():
                 for w in (p.cell_edit, p.path_edit):
                     if w is fw or w.isAncestorOf(fw):
                         return
         self.panel_b.table.setFocus()
+
+    # ── 찾기(2파일과 같은 동작) ────────────────────────────────────────────
+    def _focus_find(self):
+        """Ctrl+F — 찾기 입력란 포커스 + 전체 선택."""
+        if self.find_edit.isEnabled():
+            self.find_edit.setFocus()
+            self.find_edit.selectAll()
+
+    def _iter_find_matches(self, match):
+        """검색어와 맞는 (r, c) 를 행 우선 순서로. **화면에 보이는 글자**로 판정한다 — 세 패널 중
+        하나라도 맞으면 그 칸이고, 숨은 행·검사 제외 열은 뺀다(2파일과 같은 규칙).
+
+        가운데 패널은 결정이 걸린 칸에서 고른 쪽 값을 보인다(Diff3TableModel.display_text). 그 칸의
+        기준값은 화면 어디에도 없으므로 판정에서 뺀다 — 넣으면 '보이지 않는 글자를 찾는' 오동작이 된다.
+        """
+        excl = self._excluded_cols
+        staged, merged = self._staged, self._merged
+        decided = bool(staged or merged)
+        hidden = self.panel_b.table.isRowHidden
+        for r, row in enumerate(self._matrix):
+            if hidden(r):
+                continue
+            for c, cell in enumerate(row):
+                if c in excl:
+                    continue
+                lv, bv, rv = cell[1], cell[2], cell[3]
+                if match(lv) or (rv != lv and match(rv)):
+                    yield (r, c)
+                elif bv != lv and bv != rv and match(bv) \
+                        and not (decided and ((r, c) in staged or (r, c) in merged)):
+                    yield (r, c)
+
+    def _find_cells(self, term: str) -> list:
+        """검색어에 맞는 칸 목록 — 같은 조건으로 다시 물으면 표를 다시 훑지 않는다(2파일
+        DiffView._find_cells 와 같은 이유: Enter 를 누를 때마다 표 전체를 훑으면 큰 표에서 굼뜨다).
+        결과를 바꾸는 것은 검색어·옵션·표·필터·제외 열·결정이 걸린 칸이다. 표는 identity 로 대조한다
+        (새 비교·시트 전환·키 변경이면 다른 객체)."""
+        case, word = self.find_case_btn.isChecked(), self.find_word_btn.isChecked()
+        key = (term, case, word, self._diff_only, tuple(sorted(self._excluded_cols)),
+               len(self._staged), len(self._merged),
+               hash(frozenset(self._staged)) if self._staged else 0,
+               hash(frozenset(self._merged)) if self._merged else 0)
+        hit = self._find_cache
+        if hit is not None and hit[0] == key and hit[1] is self._matrix:
+            return hit[2]
+        cells = list(self._iter_find_matches(make_find_matcher(term, case, word)))
+        self._find_cache = (key, self._matrix, cells)
+        return cells
+
+    def _goto_find(self, direction: int):
+        """direction=+1: 다음 찾기, -1: 이전 찾기. 끝에 닿으면 반대편에서 이어 찾는다."""
+        term = self.find_edit.text()
+        if not term or not self._matrix:
+            return
+        cells = self._find_cells(term)
+        if not cells:
+            self.status.showMessage(f'"{term}" — 일치 항목이 없습니다.')
+            return
+        anchor = self._current_anchor()
+        wrapped = ""
+        if direction > 0:
+            target = next((x for x in cells if x > anchor), None)
+            if target is None:
+                target = cells[0]
+                wrapped = " — 처음부터 다시 검색합니다."
+        else:
+            target = next((x for x in reversed(cells) if x < anchor), None)
+            if target is None:
+                target = cells[-1]
+                wrapped = " — 끝에서부터 다시 검색합니다."
+        self._land_on(*target)
+        idx = cells.index(target) + 1
+        self.status.showMessage(f'찾기: "{term}" {idx}/{len(cells)}개 일치{wrapped}')
+
+    def _current_anchor(self) -> tuple:
+        """이동(변경·충돌·찾기)의 출발 칸 — 가운데, 왼쪽, 오른쪽 순으로 현재 칸이 있는 패널."""
+        for p in (self.panel_b, self.panel_l, self.panel_r):
+            r, c = p.table._current_cell()
+            if r >= 0 and c >= 0:
+                return (r, c)
+        return (0, -1)
+
+    def _land_on(self, r: int, c: int):
+        """세 패널을 같은 칸으로 옮기고 화면 가운데로 스크롤."""
+        for p in self.panels.values():
+            p.table._move_current_cell(r, c)
+            if p.table.model().is_data_cell(r, c):
+                p.table.scrollTo(p.table.model().index(r, c), QAbstractItemView.PositionAtCenter)
 
     # ── 이동 ───────────────────────────────────────────────────────────────
     def _goto_btn(self, btn, direction, conflicts):
@@ -1213,12 +1334,7 @@ class Diff3View(QWidget):
         if not cells:
             self.status.showMessage(f"{what}이 없습니다." if conflicts else "변경된 칸이 없습니다.")
             return
-        anchor = (0, -1)
-        for p in (self.panel_b, self.panel_l, self.panel_r):
-            r, c = p.table._current_cell()
-            if r >= 0 and c >= 0:
-                anchor = (r, c)
-                break
+        anchor = self._current_anchor()
         if direction > 0:
             target = next((x for x in cells if x > anchor), None)
         else:
@@ -1226,11 +1342,7 @@ class Diff3View(QWidget):
         if target is None:
             self.status.showMessage(f"{'마지막' if direction > 0 else '첫'} {what}입니다.")
             return
-        r, c = target
-        for p in self.panels.values():
-            p.table._move_current_cell(r, c)
-            if p.table.model().is_data_cell(r, c):
-                p.table.scrollTo(p.table.model().index(r, c), QAbstractItemView.PositionAtCenter)
+        self._land_on(*target)
         self.panel_b.table.setFocus()
 
     # ── 병합 준비 ──────────────────────────────────────────────────────────
@@ -1651,6 +1763,8 @@ class Diff3View(QWidget):
     def _set_buttons_enabled(self, enabled: bool):
         has = enabled and bool(self._matrix)
         for b in (self.diff_only_btn, self.prev_diff_btn, self.next_diff_btn,
-                  self.prev_conf_btn, self.next_conf_btn, self.auto_btn):
+                  self.prev_conf_btn, self.next_conf_btn, self.auto_btn,
+                  self.find_edit, self.find_case_btn, self.find_word_btn,
+                  self.find_prev_btn, self.find_next_btn):
             b.setEnabled(has)
         self.save_btn.setEnabled(has and self._dirty)

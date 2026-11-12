@@ -238,6 +238,125 @@ def test_noop_pick_is_refused(win, tmp_path):
     assert not view._staged
 
 
+# ── 2파일 화면과 같은 UI — 툴바 1행 · 저장 버튼 자리 · 찾기 ─────────────────
+def _toolbar_row(view, index=0):
+    """view 의 index 번째 가로 줄에 놓인 것 — 버튼은 글자(없으면 툴팁 첫 줄), 입력란은 objectName."""
+    from PyQt5.QtWidgets import QLineEdit, QPushButton
+    out = []
+
+    def walk(lay):
+        for i in range(lay.count()):
+            it = lay.itemAt(i)
+            if it.layout() is not None:
+                walk(it.layout())
+            elif isinstance(it.widget(), QPushButton):
+                b = it.widget()
+                out.append(b.text() or b.toolTip().splitlines()[0])
+            elif isinstance(it.widget(), QLineEdit):
+                out.append(it.widget().objectName())
+    walk(view.layout().itemAt(index).layout())
+    return out
+
+
+def test_toolbar_first_row_is_the_same_as_the_two_file_view(win, tmp_path):
+    from excelmerge.diff_view import DiffView
+    view, *_ = _open(win, tmp_path)
+    two = DiffView(win.status)
+    try:
+        assert _toolbar_row(view) == _toolbar_row(two), "3파일 툴바 1행이 2파일과 달라졌다"
+    finally:
+        two.shutdown()
+        two.deleteLater()
+    # 3파일에만 있는 것은 아래 줄에 — 1행의 버튼 자리를 밀지 않는다
+    assert _toolbar_row(view, 1) == ["◀ 이전 충돌", "다음 충돌 ▶", "자동 병합"]
+    assert win.minimumSizeHint().width() <= 1400, "툴바가 기본 창 폭을 넘는다"
+
+
+def test_save_button_sits_on_the_middle_panel_like_the_two_file_view(win, tmp_path):
+    view, l, b, r, _ = _open(win, tmp_path)
+    assert view.save_btn is view.panel_b.save_btn
+    assert view.panel_b.save_btn.isVisible()
+    assert not view.panel_l.save_btn.isVisible() and not view.panel_r.save_btn.isVisible(), \
+        "양옆은 읽기만 하는 파일 — 저장 버튼이 보이면 안 된다"
+    assert not view.save_btn.isEnabled()            # 결정이 없으면 꺼져 있다(2파일과 같음)
+    view._auto_merge()
+    assert view.save_btn.isEnabled()
+    view.save_btn.click()
+    assert _wait(lambda: not view._saving_now()
+                 and view.status.currentMessage().startswith("저장 완료")), \
+        view.status.currentMessage()
+    assert _vals(b)[1] == ["1", "A", "P"]
+    assert "가운데 파일" in view.save_btn.toolTip()
+
+
+def test_save_button_tooltip_names_the_result_file_in_p4v_mode(win, tmp_path):
+    view, l, b, r, res = _open(win, tmp_path, result=True)
+    assert res in view.save_btn.toolTip() and "결과 파일" in view.save_btn.toolTip()
+    assert res in view.result_label.toolTip()
+
+
+def _find(view, term):
+    view.find_edit.setText(term)
+    return view._find_cells(term)
+
+
+def test_find_searches_what_the_three_panels_show(win, tmp_path):
+    view, *_ = _open(win, tmp_path)
+    r1, r2, r3 = _row(view, "1"), _row(view, "2"), _row(view, "3")
+    assert view.find_edit.isEnabled() and view.find_next_btn.isEnabled()
+    assert _find(view, "L3") == [(r3, 1)]             # 왼쪽 패널에만 있는 값
+    assert _find(view, "R3") == [(r3, 1)]             # 오른쪽 패널에만 있는 값
+    assert _find(view, "c") == [(r3, 1)]              # 가운데(기준) 값
+    # '변경점만 보기'로 숨은 행은 찾지 않는다 — 끄면 찾는다
+    assert view.diff_only_btn.isChecked() and _find(view, "q") == []
+    view.diff_only_btn.setChecked(False)
+    assert _find(view, "q") == [(r2, 2)]
+    # 검사 제외 열은 뺀다
+    view._on_columns_exclude_set([2], True)
+    assert _find(view, "q") == []
+    view._on_columns_exclude_set([2], False)
+    # 결정이 걸린 칸 — 가운데는 고른 값을 보이므로 기준값("c")은 화면에 없다
+    _select(view, [(r3, 1)])
+    view._stage_selected(SRC_RIGHT)
+    assert _find(view, "c") == [], "화면에 없는 기준값을 찾았다"
+    assert _find(view, "R3") == [(r3, 1)]
+    view._undo_last()
+    assert _find(view, "c") == [(r3, 1)], "결정을 되돌렸는데 찾기 결과가 옛것이다"
+
+
+def test_find_moves_all_three_panels_and_wraps(win, tmp_path):
+    view, *_ = _open(win, tmp_path)
+    r1, r3 = _row(view, "1"), _row(view, "3")
+    view.find_case_btn.setChecked(False)              # 대소문자 구분 — "A" 는 왼쪽 1행뿐
+    view.find_edit.setText("A")
+    view._goto_find(+1)
+    for p in view.panels.values():
+        assert p.table._current_cell() == (r1, 1)
+    assert '1/1개 일치' in view.status.currentMessage()
+    view._goto_find(+1)                               # 하나뿐 — 처음으로 돌아온다
+    assert "처음부터 다시" in view.status.currentMessage()
+    view.find_edit.setText("없는글자")
+    view._goto_find(+1)
+    assert "일치 항목이 없습니다" in view.status.currentMessage()
+    assert view.panel_b.table._current_cell() == (r1, 1)
+
+
+def test_ctrl_f_focuses_the_find_box(win, tmp_path):
+    # 키 입력을 흉내 내지 않는다 — 창 활성화·수정자 키 상태가 뒤 테스트(헤더 클릭)를 오염시켰다.
+    # 단축키가 이 화면 범위로 등록돼 있고, 그 신호가 찾기 입력란을 잡는지만 본다.
+    from PyQt5.QtGui import QKeySequence
+    from PyQt5.QtWidgets import QShortcut
+    view, *_ = _open(win, tmp_path)
+    sc = [s for s in view.findChildren(QShortcut)
+          if s.parent() is view and s.key() == QKeySequence("Ctrl+F")]
+    assert len(sc) == 1 and sc[0].context() == Qt.WidgetWithChildrenShortcut
+    view.find_edit.setText("abc")
+    calls = []
+    view.find_edit.setFocus = lambda *a: calls.append("focus")
+    sc[0].activated.emit()
+    assert calls == ["focus"] and view.find_edit.selectedText() == "abc"
+
+
 def test_cli_parses_p4v_merge_and_three_positional():
     import excel_diff_merge as e
     assert e._parse_args(["-b", "B", "-s", "T", "-d", "Y", "-r", "R"]) == ("T", "Y", "B", "R")

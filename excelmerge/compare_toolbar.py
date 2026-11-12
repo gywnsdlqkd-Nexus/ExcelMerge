@@ -1,9 +1,11 @@
-"""비교 뷰(DiffView/FolderCompareView) 공용 툴바 조각 — 찾기 박스·범례.
+"""비교 뷰(DiffView/Diff3View/FolderCompareView) 공용 툴바 조각 — 찾기 박스·범례.
 
 두 뷰가 거의 동일한 찾기 박스(검색란 + 대소문자/전체단어 토글 + 이전/다음 버튼)와
 색 범례를 각자 인라인으로 중복 구성하던 것을 여기로 통합했다. 순수 위젯 구성만 담당하며,
 동작(검색 로직)은 각 뷰의 콜백(on_goto)·상태에 위임한다.
 """
+import re
+
 from PyQt5.QtWidgets import QHBoxLayout, QLineEdit, QPushButton, QLabel, QShortcut
 from PyQt5.QtCore import Qt, QSize
 from PyQt5.QtGui import QKeySequence
@@ -17,6 +19,19 @@ _CASE_TIP = ("대소문자 무시 (Ignore case)\n"
 _WORD_TIP = ("전체 단어 일치 (Match whole word only)\n"
              "켜짐: 검색어가 독립된 단어로 존재할 때만 찾음\n"
              "꺼짐: 부분 문자열도 찾음")
+
+
+def make_find_matcher(term: str, ignore_case: bool, whole_word: bool):
+    """검색 옵션(대소문자 무시/전체 단어)에 맞는 판별 함수 — 2파일·3파일 화면 공용."""
+    if whole_word:
+        # \b는 검색어가 특수문자로 시작/끝나면 동작하지 않으므로 lookaround 사용
+        flags = re.IGNORECASE if ignore_case else 0
+        pat = re.compile(r"(?<!\w)" + re.escape(term) + r"(?!\w)", flags)
+        return lambda text: pat.search(text) is not None
+    if ignore_case:
+        needle = term.casefold()
+        return lambda text: needle in text.casefold()
+    return lambda text: term in text
 
 
 def build_find_box(owner, placeholder: str, on_goto, edit_tooltip: str,

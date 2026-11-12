@@ -9,7 +9,6 @@
     포커스된(활성) 탭에서만 발화한다(탭 여러 개일 때 중복 발화 방지).
 """
 import os
-import re
 
 from PyQt5.QtWidgets import (
     QApplication, QWidget, QVBoxLayout, QHBoxLayout,
@@ -31,7 +30,7 @@ from .prefs import (load_key_prefs, save_key_prefs, load_last_key, save_last_key
 from .theme import APP_QSS, DIFF_COLORS, ui_font, ext_tab_icon
 from . import staging
 from .constants import STATUS_SAME, DIR_A2B, DIR_B2A
-from .compare_toolbar import build_find_box, add_legend
+from .compare_toolbar import build_find_box, add_legend, make_find_matcher
 from .widgets import (
     ExcelTableView, MinimapScrollBar, SheetTabBar, FreezeController,
 )
@@ -1249,17 +1248,8 @@ class DiffView(QWidget):
 
     def _make_find_matcher(self, term: str):
         """검색 옵션(대소문자 무시/전체 단어)에 맞는 판별 함수를 반환."""
-        ignore_case = self.find_case_btn.isChecked()
-        whole_word = self.find_word_btn.isChecked()
-        if whole_word:
-            # \b는 검색어가 특수문자로 시작/끝나면 동작하지 않으므로 lookaround 사용
-            flags = re.IGNORECASE if ignore_case else 0
-            pat = re.compile(r"(?<!\w)" + re.escape(term) + r"(?!\w)", flags)
-            return lambda text: pat.search(text) is not None
-        if ignore_case:
-            needle = term.casefold()
-            return lambda text: needle in text.casefold()
-        return lambda text: term in text
+        return make_find_matcher(term, self.find_case_btn.isChecked(),
+                                 self.find_word_btn.isChecked())
 
     def _iter_find_matches(self, match):
         """검색어와 일치하는 (r, c) 셀을 행 우선 순서로 yield.
