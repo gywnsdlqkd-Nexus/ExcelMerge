@@ -1995,6 +1995,8 @@ class ExcelTableView(QTableView):
                 vh.set_band(0)
                 hh.set_band(0)
             super().updateGeometries()
+            if not do_freeze:
+                self._resnap_scroll_offsets()
             if do_freeze:
                 fr = self.frameWidth()
                 # 밴드를 뺀 '본래' 헤더 크기. width()/height()는 super()가 밴드 포함
@@ -2007,9 +2009,43 @@ class ExcelTableView(QTableView):
                 vp = self.viewport().geometry()
                 hh.setGeometry(fr + hdr_w + fw, fr, vp.width(), hdr_h)
                 vh.setGeometry(fr, fr + hdr_h + fh, hdr_w, vp.height())
+                # 헤더를 뷰포트 크기로 맞춘 **뒤에** — '끝에 붙는 자리'는 헤더 폭으로 계산된다.
+                self._resnap_scroll_offsets()
                 fc.reposition()
         finally:
             self._in_update_geoms = False
+
+    def _resnap_scroll_offsets(self):
+        """스크롤바 **범위만** 바뀐 뒤에도 화면 위치를 (값, 최댓값)에 맞게 다시 잡는다.
+
+        열/행 단위 스크롤에서 Qt 는 화면 위치(헤더 offset)를 **값이 바뀔 때만** 정한다 —
+        값이 최댓값이면 '마지막 열이 오른쪽 끝에 붙는 자리', 아니면 '그 열의 왼쪽 끝'.
+        창 크기가 바뀌면 최댓값만 바뀌고 값은 그대로일 수 있는데, 그때는 다시 정하지 않는다.
+        그래서 같은 값·같은 최댓값인 두 패널이 서로 다른 자리를 그린다.
+
+        실측(60열, 오른쪽 끝까지 스크롤 후 창 최대화): A 는 범위가 줄며 값이 잘려 '끝에
+        붙는 자리'로 갔고, B 는 그 값을 **범위가 줄기 전에** 미러로 받아 '열의 왼쪽 끝'에
+        남았다 — 둘 다 55/55 인데 첫 열이 55 와 56 으로 갈렸다. 창을 다시 줄여도 A 는
+        열 중간에 걸친 채(값 55/57) 남아, 키웠다 줄일 때마다 열이 틀어져 보였다.
+
+        Qt 의 QHeaderViewPrivate::setScrollOffset 과 같은 규칙을 그대로 다시 적용한다.
+        """
+        moved = False
+        for header, bar, mode in (
+                (self.horizontalHeader(), self.horizontalScrollBar(),
+                 self.horizontalScrollMode()),
+                (self.verticalHeader(), self.verticalScrollBar(),
+                 self.verticalScrollMode())):
+            if mode != QAbstractItemView.ScrollPerItem:
+                continue
+            old = header.offset()
+            if bar.maximum() > 0 and bar.value() == bar.maximum():
+                header.setOffsetToLastSection()
+            else:
+                header.setOffsetToSectionPosition(bar.value())
+            moved = moved or header.offset() != old
+        if moved:
+            self.viewport().update()
 
     def set_excluded_cols(self, cols: set):
         """외부(MainWindow)에서 제외 열 집합을 갱신하고 헤더/셀을 다시 칠한다."""

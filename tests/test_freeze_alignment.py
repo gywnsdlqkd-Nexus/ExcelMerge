@@ -313,3 +313,61 @@ def test_healing_does_not_loop(frozen, qapp):
     finally:
         fz.reposition = orig
     assert len(calls) <= 2, f"reposition 이 {len(calls)}번 — 재귀로 돈다"
+
+
+# ── 창 크기 변경(최대화 ↔ 이전 크기) ─────────────────────────────────────────
+# 실기 제보: 창을 키웠다 줄일 때마다 A/B 의 열 위치가 틀어진다.
+# 열/행 단위 스크롤에서 Qt 는 화면 위치를 **값이 바뀔 때만** 정한다. 창 크기로 범위만
+# 바뀌면 다시 정하지 않아, 같은 값·같은 최댓값인 두 패널이 서로 다른 자리를 그렸다.
+def _col_x(view, c, origin=None):
+    """그 열이 그려지는 x — origin(기본: 그 뷰 자신)의 왼쪽 끝 기준.
+    A/B 는 서로 다른 자리에 놓인 패널이라 각자 기준으로, 띠는 본체 기준으로 잰다."""
+    return (view.viewport().mapToGlobal(QPoint(view.columnViewportPosition(c), 0)).x()
+            - (origin or view).mapToGlobal(QPoint(0, 0)).x())
+
+
+def _row_top(view, r, origin=None):
+    return (view.viewport().mapToGlobal(QPoint(0, view.rowViewportPosition(r))).y()
+            - (origin or view).mapToGlobal(QPoint(0, 0)).y())
+
+
+def _assert_cols_aligned(dv, tag):
+    ta, tb = dv.panel_a.table, dv.panel_b.table
+    ca, cb = ta.columnAt(0), tb.columnAt(0)
+    assert ca == cb, f"{tag}: A 는 {ca}열, B 는 {cb}열부터 그린다"
+    assert _col_x(ta, ca) == _col_x(tb, cb), f"{tag}: 같은 열의 x 가 A/B 에서 다르다"
+    top = dv._freeze["a"].top
+    assert _col_x(top, ca, ta) == _col_x(ta, ca), f"{tag}: 고정 행 띠가 본체와 어긋난다"
+
+
+@pytest.mark.parametrize("src", ["a", "b"])
+def test_columns_stay_aligned_when_window_grows_and_shrinks(wide, qapp, src):
+    dv = wide
+    win = dv.window()
+    bar = (dv.panel_a if src == "a" else dv.panel_b).table.horizontalScrollBar()
+    bar.setValue(bar.maximum()); qapp.processEvents()
+    _assert_cols_aligned(dv, "처음")
+    for i in range(3):
+        win.resize(1900, 1000); qapp.processEvents()
+        _assert_cols_aligned(dv, f"키움 {i}")
+        win.resize(900, 600); qapp.processEvents()
+        _assert_cols_aligned(dv, f"줄임 {i}")
+        ta = dv.panel_a.table
+        # 줄인 뒤에는 끝이 아니므로 첫 열이 열 경계에 딱 맞아야 한다(중간에 걸치지 않는다).
+        if ta.horizontalScrollBar().value() < ta.horizontalScrollBar().maximum():
+            assert ta.columnViewportPosition(ta.columnAt(0)) == 0
+
+
+def test_rows_stay_aligned_when_window_grows_and_shrinks(frozen, qapp):
+    dv = frozen
+    win = dv.window()
+    ta, tb = dv.panel_a.table, dv.panel_b.table
+    ta.verticalScrollBar().setValue(ta.verticalScrollBar().maximum()); qapp.processEvents()
+    for i in range(3):
+        for size in ((1200, 1000), (1200, 700)):
+            win.resize(*size); qapp.processEvents()
+            ra, rb = ta.rowAt(0), tb.rowAt(0)
+            assert ra == rb, f"{i} {size}: A 는 {ra}행, B 는 {rb}행부터 그린다"
+            assert _row_top(ta, ra) == _row_top(tb, rb)
+            left = dv._freeze["a"].left
+            assert _row_top(left, ra, ta) == _row_top(ta, ra), "고정 열 띠가 본체와 어긋난다"
